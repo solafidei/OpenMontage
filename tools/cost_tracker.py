@@ -16,7 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from lib.config_model import BudgetMode
+from lib.config_model import BudgetMode, OpenMontageConfig
+from lib.paths import PROJECTS_DIR
 
 
 class EntryStatus(str, Enum):
@@ -60,6 +61,34 @@ class CostTracker:
 
         if cost_log_path and cost_log_path.exists():
             self._load()
+
+    @classmethod
+    def for_project(
+        cls,
+        project_id: str,
+        *,
+        projects_dir: Optional[Path] = None,
+    ) -> "CostTracker":
+        """Open the project's cost tracker in one line.
+
+        Reads the global budget config block (mode, total, reserve percent,
+        single-action approval threshold, new-paid-tool approval) and derives
+        the log path from the project workspace convention —
+        ``<projects_dir>/<project_id>/artifacts/cost_log.json`` — so any
+        stage can call this again with the same project_id to re-open the
+        same persisted ledger.
+        """
+        cfg = OpenMontageConfig.load()
+        base = projects_dir if projects_dir is not None else PROJECTS_DIR
+        log_path = base / project_id / "artifacts" / "cost_log.json"
+        return cls(
+            budget_total_usd=cfg.budget.total_usd,
+            reserve_pct=cfg.budget.reserve_pct,
+            single_action_approval_usd=cfg.budget.single_action_approval_usd,
+            require_approval_for_new_paid_tool=cfg.budget.require_approval_for_new_paid_tool,
+            mode=cfg.budget.mode,
+            cost_log_path=log_path,
+        )
 
     # ---- Budget calculations ----
 
@@ -114,17 +143,24 @@ class CostTracker:
         self._save()
         return entry_id
 
-    def reserve(self, entry_id: str) -> None:
+    def reserve(self, entry_id: str, *, user_approved: bool = False) -> None:
         """Reserve budget for an estimated entry.
 
         Raises BudgetExceededError in cap mode, or ApprovalRequiredError
         when the action exceeds the single-action approval threshold.
+
+        ``user_approved=True`` waives the single-action threshold for THIS
+        entry only — use it when the user explicitly approved this exact
+        line item (e.g. at the proposal gate). It does not waive the
+        first-paid-use guard (call ``approve_tool`` for that) or the budget
+        check. The flag persists on the entry so the approval is auditable
+        in cost_log.json.
         """
         entry = self._find(entry_id)
         estimated = entry["estimated_usd"]
 
         # Check single-action approval threshold
-        if estimated > self.single_action_approval_usd:
+        if estimated > self.single_action_approval_usd and not user_approved:
             if self.mode != BudgetMode.OBSERVE:
                 raise ApprovalRequiredError(
                     f"Action costs ${estimated:.2f}, exceeds "
@@ -153,6 +189,8 @@ class CostTracker:
 
         entry["status"] = EntryStatus.RESERVED.value
         entry["reserved_usd"] = estimated
+        if user_approved:
+            entry["user_approved"] = True
         entry["timestamp"] = self._now()
         self._save()
 
@@ -492,6 +530,9 @@ class CostTracker:
             "budget_total_usd": self.budget_total_usd,
             "budget_reserved_usd": round(self.budget_reserved_usd, 4),
             "budget_spent_usd": round(self.budget_spent_usd, 4),
+            "mode": BudgetMode(self.mode).value,
+            "reserve_pct": self.reserve_pct,
+            "single_action_approval_usd": self.single_action_approval_usd,
             "approved_tools": sorted(self._approved_tools),
             "entries": self.entries,
         }

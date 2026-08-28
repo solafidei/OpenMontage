@@ -29,6 +29,7 @@ The post-render self-review (final_review) is identical across runtimes — same
 | Tools | `video_compose`, `audio_mixer`, `video_stitch` | Final assembly |
 | Tools | `composition_validator` | Pre-render validation (MANDATORY) |
 | Tools | `audio_probe` | Music duration check |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the proposal and asset directors already wrote to |
 | Playbook | Active style playbook | Render consistency |
 | Reference | `remotion-composer/public/demo-props/mori-no-seishin.json` | Composition JSON format reference |
 | Reference | `skills/core/remotion.md` | Remotion patterns, anime_scene type, critical constraints |
@@ -146,6 +147,10 @@ This tool:
 - `loop` — set to `true` if the remaining music is shorter than the video
 
 **If the tool says `needs_loop: true`:** set `"loop": true` in the composition JSON. Remotion will loop the audio seamlessly with the volume fade resetting per loop.
+
+### 3b. Cost Track The Render
+
+The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state: `entry_id = tracker.estimate("video_compose", "render", 0.0)`, `tracker.reserve(entry_id, user_approved=True)`, then `tracker.reconcile(entry_id, 0.0, success=True)` once the render finishes (`success=False` if it failed). This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent.
 
 ### 4. Pre-Render Validation (MANDATORY — NO EXCEPTIONS)
 

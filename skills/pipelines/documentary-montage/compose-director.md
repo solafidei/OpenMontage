@@ -28,6 +28,7 @@ This pipeline currently REQUIRES `render_runtime="remotion"`. The end-tag stack 
 | Tool | `audio_mixer` | Music fade, silence window, L-cuts |
 | Tool (optional) | `color_grade` | Uniform LUT across mixed-era clips |
 | Tool (optional) | `video_trimmer`, `video_stitch` | Lower-level helpers if needed |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea and asset directors already wrote to |
 
 ## Mental Model
 
@@ -65,6 +66,10 @@ Remotion-first on `operation="render"`, even for footage-led pieces.
 - If Remotion is unavailable, do NOT quietly drop to FFmpeg. Surface
   the engine change and get approval before using a lower-level
   FFmpeg-only path.
+
+### 0b. Cost Track The Render
+
+Both the FFmpeg body render and the Remotion end-tag render are local, $0-API-cost operations, but they still round-trip through the ledger so `cost_log.json` leaves no entry in `estimated`/`reserved` state: `entry_id = tracker.estimate("video_compose", "render", 0.0)`, `tracker.reserve(entry_id, user_approved=True)`, then `tracker.reconcile(entry_id, 0.0, success=True)` once the render finishes (`success=False` if it failed). This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent.
 
 ### 1. Resolve The Canvas
 

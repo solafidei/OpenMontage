@@ -46,6 +46,7 @@ orchestration:
   mode: executive-producer
   skill: pipelines/animation/executive-producer
   budget_default_usd: 2.00
+  budget_per_output_minute_usd: 0.60
   max_revisions_per_stage: 3
   max_send_backs: 3
   max_wall_time_minutes: 15
@@ -220,6 +221,7 @@ stages:
       - All referenced asset files exist on disk
       - layer3_skills_read list is present and includes all tools used for generation
       - Real 3D-world briefs include semantic or wireframe diagnostic review before compose
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
 
   - name: edit
     skill: pipelines/animation/edit-director
@@ -276,6 +278,7 @@ stages:
       - Schema-valid render_report artifact
       - Output file exists and passes ffprobe validation
       - self_review_completed is true with per-scene quality notes
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent
 
   - name: publish
     skill: pipelines/animation/publish-director

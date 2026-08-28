@@ -27,6 +27,7 @@ missing Blender frames with pan/zoom effects.
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["edit"]["edit_decisions"]`, `state.artifacts["assets"]["asset_manifest"]` | Edit plan and media assets |
 | Tools | `video_compose`, `audio_mixer`, `video_stitch`, `video_trimmer`, `color_grade`, `audio_enhance` | Render and finishing |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the proposal and asset directors already wrote to |
 | Playbook | Active style playbook | Finish consistency |
 
 ## Process
@@ -53,6 +54,10 @@ print('Remotion note:', info.get('remotion_note'))
 ```
 
 If Remotion is not in the available render engines, stop and report to the user per the Decision Communication Contract. Do not substitute a reduced-fidelity render path without approval.
+
+### 0b. Cost Track The Render
+
+The render itself is a local, $0-API-cost operation, but it still round-trips through the ledger so `cost_log.json` leaves no entry in `estimated`/`reserved` state: `entry_id = tracker.estimate("video_compose", "render", 0.0)`, `tracker.reserve(entry_id, user_approved=True)`, then `tracker.reconcile(entry_id, 0.0, success=True)` once the render finishes (`success=False` if it failed). Do the same for any `color_grade`/`audio_enhance` passes actually run. This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent.
 
 ### 1. Use Frame Treatment Deliberately
 

@@ -65,6 +65,39 @@ Recommended metadata keys:
 - `deliverable_mix`
 - `missing_capabilities`
 
+### 4b. Compute Budget And Seed The Cost Ledger
+
+This is the approval gate — nothing downstream spends until the user approves it. Compute the default budget cap from the pipeline manifest's `orchestration` block (`pipeline_defs/avatar-spokesperson.yaml`), not from `config.yaml`'s flat global total — the manifest is what lets budget scale with target runtime:
+
+```python
+import yaml
+from tools.cost_tracker import CostTracker
+
+manifest = yaml.safe_load(open("pipeline_defs/avatar-spokesperson.yaml"))["orchestration"]
+flat_default = manifest["budget_default_usd"]                   # $2.00 floor
+per_minute_rate = manifest.get("budget_per_output_minute_usd")  # $0.60/min
+
+target_minutes = runtime_target_seconds / 60
+default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
+
+tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
+```
+
+Itemize the tools the chosen avatar path will actually call (`talking_head` or `lip_sync` for the avatar, `tts_selector` for narration, `subtitle_gen`/`image_selector`/`audio_enhance` for support) and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each, so the on-screen figure and `cost_log.json` agree. Record the total as `metadata.cost_estimate` and the cap as `metadata.budget_cap_usd`.
+
+**On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True`): arm the tracker with what was actually approved and clear this step's placeholders.
+
+```python
+tracker.budget_total_usd = approved_budget_usd or default_budget_cap_usd
+for tool_name in {li["tool"] for li in metadata["cost_estimate"]["line_items"]}:
+    tracker.approve_tool(tool_name)
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])
+```
+
+The asset director creates and reserves its OWN entry at the moment it actually spends, passing `user_approved=True` because that call fulfills a line item approved here. Anything outside this plan still trips `ApprovalRequiredError` — surface it per AGENT_GUIDE.md → "Escalate Blockers Explicitly" rather than reserving around it.
+
 ### 5. Quality Gate
 
 - the avatar path is explicit,

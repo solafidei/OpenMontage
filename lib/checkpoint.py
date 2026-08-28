@@ -45,6 +45,7 @@ SUPPLEMENTARY_ARTIFACTS = {
     "source_media_review",  # Required before first planning stage when user media exists
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages
+    "cost_log",             # Persisted budget ledger carried alongside every paid stage
 }
 
 
@@ -92,7 +93,16 @@ HISTORY_DIRNAME = "history"
 
 
 class CheckpointValidationError(ValueError):
-    """Raised when a checkpoint or its canonical artifacts are invalid."""
+    """Raised when a checkpoint or its canonical artifacts are invalid.
+
+    ``field`` names the top-level checkpoint property the schema rejected
+    (None when the failure is not attributable to one). Read paths use it to
+    tolerate exactly one legacy shape without going blind to the rest.
+    """
+
+    def __init__(self, message: str, *, field: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 def _validate_style_playbook(style_playbook: str | None) -> None:
@@ -188,7 +198,10 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
     try:
         jsonschema.validate(instance=checkpoint, schema=_load_checkpoint_schema())
     except jsonschema.ValidationError as exc:
-        raise CheckpointValidationError(f"Checkpoint failed schema validation: {exc.message}") from exc
+        field = str(exc.absolute_path[0]) if exc.absolute_path else None
+        raise CheckpointValidationError(
+            f"Checkpoint failed schema validation: {exc.message}", field=field
+        ) from exc
 
 
 def _checkpoint_path(pipeline_dir: Path, project_id: str, stage: str) -> Path:
@@ -567,13 +580,32 @@ def write_checkpoint(
 def read_checkpoint(
     pipeline_dir: Path, project_id: str, stage: str
 ) -> Optional[dict[str, Any]]:
-    """Read a checkpoint file. Returns None if not found."""
+    """Read a checkpoint file. Returns None if not found.
+
+    Validation errors are logged, not raised: a checkpoint written under an
+    older, looser schema (e.g. a legacy cost_snapshot shape) must still be
+    readable for resume/inspect — write time is where the schema is
+    enforced, not read time.
+    """
     path = _checkpoint_path(pipeline_dir, project_id, stage)
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
         checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
+    try:
+        validate_checkpoint(checkpoint)
+    except CheckpointValidationError as exc:
+        # Only the legacy cost_snapshot shape is tolerated on read — that
+        # object was closed to extra keys after these files were written.
+        # Every other invariant still fails loudly: a checkpoint with a
+        # forged stage or a broken artifact must not resume silently.
+        if exc.field != "cost_snapshot":
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Checkpoint %s carries a legacy cost_snapshot (%s) — returning it "
+            "as-is; the schema only gates new writes.", path, exc,
+        )
     return checkpoint
 
 
@@ -595,7 +627,20 @@ def get_latest_checkpoint(
 
     with open(checkpoints[0], encoding="utf-8") as f:
         checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
+    try:
+        validate_checkpoint(checkpoint)
+    except CheckpointValidationError as exc:
+        # Only the legacy cost_snapshot shape is tolerated on read — that
+        # object was closed to extra keys after these files were written.
+        # Every other invariant still fails loudly: a checkpoint with a
+        # forged stage or a broken artifact must not resume silently.
+        if exc.field != "cost_snapshot":
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Checkpoint %s carries a legacy cost_snapshot (%s) — returning it "
+            "as-is; the schema only gates new writes.", checkpoints[0], exc,
+        )
     return checkpoint
 
 

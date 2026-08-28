@@ -26,6 +26,7 @@ The EP solves all of these by maintaining cumulative state and applying judgment
 | Schemas | All artifact schemas | Validation |
 | Playbook | Active style playbook | Quality constraints |
 | Tools | Full tool registry | Available capabilities |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Opens the project's persisted `cost_log.json` ledger; every director reopens the same one |
 
 ## Cumulative State
 
@@ -73,7 +74,8 @@ EP_STATE:
 1. Load the pipeline manifest (`animated-explainer.yaml`)
 2. Load the playbook (from user selection or default)
 3. Set budget from configuration or user input (default: $2.00)
-4. Initialize EP_STATE
+4. Open the project's cost tracker in one line: `tracker = CostTracker.for_project(project_id)`. This reads the global budget config block (`mode`, `total_usd`, `reserve_pct`, `single_action_approval_usd`, `require_approval_for_new_paid_tool`) and derives `projects/<project_id>/artifacts/cost_log.json` from the project workspace convention — every stage director calls the same one-liner to re-open the same persisted ledger instead of constructing its own tracker.
+5. Initialize EP_STATE
 
 ### Phase 1: Execute Stages Serially
 
@@ -158,7 +160,9 @@ FINAL_QA:
      - Check typography consistency
 
   4. BUDGET RECONCILIATION:
-     - Total actual spend vs. budget
+     - Read `tracker.cost_snapshot()` for total actual spend vs. budget
+     - Every entry in the persisted cost_log must be in a terminal state
+       (completed/failed/refunded) — no entry left `estimated` or `reserved`
      - Log per-stage cost breakdown
 
   5. DECISION:

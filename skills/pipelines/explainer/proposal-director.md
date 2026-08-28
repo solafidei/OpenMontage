@@ -402,6 +402,32 @@ Would you like to:
 - Record the music decision in `proposal_packet.production_plan.music_source`
 - If the user picks a library track, record its path for the asset director
 
+### Step 5c: Compute the Default Budget Cap
+
+Before pricing line items, compute the default budget cap the approval gate will present. Read it from the pipeline manifest's `orchestration` block (`pipeline_defs/animated-explainer.yaml`), not from `config.yaml`'s flat global total — the manifest is what lets budget scale with THIS concept's duration:
+
+```python
+import yaml
+
+manifest = yaml.safe_load(open("pipeline_defs/animated-explainer.yaml"))["orchestration"]
+flat_default = manifest["budget_default_usd"]                    # short-form floor
+per_minute_rate = manifest.get("budget_per_output_minute_usd")   # optional duration-aware rate
+
+concept = next(c for c in packet["concept_options"] if c["id"] == packet["selected_concept"]["concept_id"])
+target_minutes = concept["target_duration_seconds"] / 60
+duration_scaled_usd = (per_minute_rate * target_minutes) if per_minute_rate else 0
+
+default_budget_cap_usd = max(flat_default, duration_scaled_usd)
+```
+
+`budget_per_output_minute_usd` exists because a flat $2.00 cap is right for a 60-second short and wrong for a 14-22 minute episode. The `max()` keeps `budget_default_usd` as the floor for short-form concepts while letting long-form concepts scale: an 18-minute concept at $0.60/min computes to $10.80, which beats the $2.00 floor, so `default_budget_cap_usd` becomes $10.80.
+
+**Show this math to the user at the approval gate (Step 7), not just the final number** — e.g. `max($2.00 flat, $0.60/min × 18 min) = max($2.00, $10.80) = $10.80`.
+
+This computed figure is only the *default* offered at the gate. The user-approved figure (`approval.approved_budget_usd`) always overrides it — raised, lowered, or accepted as-is — and Step 9 arms the tracker with whatever the user actually approved, never the computed default outright.
+
+Record it on the artifact so the number shown at the gate is the number persisted: `cost_estimate["budget_cap_usd"] = default_budget_cap_usd`.
+
 ### Step 6: Build the Cost Estimate
 
 Itemize every paid operation:
@@ -419,15 +445,58 @@ COST ESTIMATE
     Headroom: $1.48 for revisions/regeneration
 ```
 
+**No guessing — every number comes from the tool itself.** For each planned tool call, ask the tool for its own `estimate_cost` through the registry, and seed the project's cost tracker with a matching entry in the same pass. The on-screen line items and `cost_log.json` must never disagree:
+
+```python
+from tools.tool_registry import registry
+from tools.cost_tracker import CostTracker
+
+registry.discover()
+tracker = CostTracker.for_project(project_id)  # same ledger every stage shares
+
+line_items = []
+for planned in planned_tool_calls:  # e.g. {"tool": "tts_selector", "operation": "narration", "inputs": {...}}
+    tool = registry.get(planned["tool"])
+    unit_usd = tool.estimate_cost(planned["inputs"])   # price of ONE call
+    quantity = planned.get("quantity", 1)
+    estimated_usd = round(unit_usd * quantity, 4)
+    tracker.estimate(planned["tool"], planned["operation"], estimated_usd)  # writes an ESTIMATED cost_log entry
+    line_items.append({
+        "tool": planned["tool"],
+        "operation": planned["operation"],
+        "quantity": quantity,
+        "estimated_usd": estimated_usd,
+    })
+
+cost_estimate["line_items"] = line_items
+total_estimated_usd = round(sum(li["estimated_usd"] for li in line_items), 4)
+```
+
+**Two pricing shapes — get `quantity` right or the gate lies.** `estimate_cost` prices *one call*. Tools that price the whole payload — `tts_selector` (the entire narration text), `music_gen` (needs `duration_seconds` in `inputs`, raises without it) — take `quantity: 1` with the complete payload in `inputs`. Unit-priced tools — `image_selector`, `video_selector` — ignore any quantity key you pass them and return a single-unit price, so `quantity` carries the planned unit count and the multiplication happens here. Get this wrong and a 6-clip plan is priced as a single clip — on screen and in the seeded ledger alike. Keep `unit_usd` a local variable: `proposal_packet.schema.json` closes line items to `additionalProperties: false`, so persisting it would fail artifact validation.
+
+By the time this stage checkpoints, `cost_log.json` already holds one `estimated`-status entry per line item above — what the user sees and what the ledger will enforce are the same numbers.
+
+**The budget verdict is computed, not eyeballed.** Compare the total against the tighter of `tracker.usable_budget_usd` — the tracker's remaining budget after the reserve holdback — and `default_budget_cap_usd` from Step 5c, never against the raw budget total:
+
+```python
+usable = min(tracker.usable_budget_usd, default_budget_cap_usd)
+if total_estimated_usd > usable:
+    budget_verdict = "over_budget"
+elif total_estimated_usd > usable * 0.85:
+    budget_verdict = "near_limit"
+else:
+    budget_verdict = "within_budget"
+```
+
 **Rules:**
 - Always show per-item costs, not just the total
-- Always show the budget cap comparison
+- Always show the budget cap comparison — against `default_budget_cap_usd` from Step 5c, not a hardcoded number
 - If over budget, list specific savings options (e.g., "Switch to a cheaper TTS provider: saves $0.18" — check each provider's `estimate_cost` via the registry)
 - Include headroom note — some budget should remain for revisions
 
 ### Step 7: Assemble the Approval Gate
 
-The approval section is where the user commits. Present it as a clear decision point:
+The approval section is where the user commits. Present it as a clear decision point. Show the Step 5c budget math so the default cap isn't a mystery number, then let the user's response override it:
 
 ```
 ────────────────────────────────────────
@@ -435,7 +504,8 @@ PROPOSAL READY FOR APPROVAL
 
 Concept: [selected title]
 Duration: [X] seconds for [platform]
-Estimated cost: $[X.XX] of $[budget] budget
+Default budget cap: max($[flat] flat, $[rate]/min × [target_minutes] min) = $[default_budget_cap_usd]
+Estimated cost: $[X.XX] of $[default_budget_cap_usd] budget
 Production path: [premium/standard/budget/free]
 
 Proceed? (approve / approve with changes / reject)
@@ -449,6 +519,43 @@ Set `approval.status: "pending"` in the artifact. The EP or the user updates thi
 ### Step 8: Submit
 
 Validate the `proposal_packet` artifact against `schemas/artifacts/proposal_packet.schema.json` and submit.
+
+### Step 9: On Approval — Arm the Tracker
+
+When `approval.status` flips to `approved` or `approved_with_changes` (a later turn — see the Gate Reminder below), before handing off to the Script Director, do the handshake that turns the approved plan into the tracker's guard configuration:
+
+```python
+# 1. The approved budget figure becomes the tracker's budget total —
+#    not whatever config.yaml happened to default to.
+tracker.budget_total_usd = approval.approved_budget_usd or total_estimated_usd
+
+# 2. Approve every tool named in the approved plan. This clears the
+#    first-paid-use guard for exactly the tools the user saw and approved.
+for tool_name in {li["tool"] for li in cost_estimate["line_items"]}:
+    tracker.approve_tool(tool_name)
+
+# 3. The Step 6 entries were placeholders — seeded only so the on-screen
+#    estimate and cost_log.json would agree at the gate. They were never
+#    executed and never will be: the stage that actually makes each paid
+#    call (asset-director, compose-director, ...) creates and reserves its
+#    OWN entry at the moment it spends. Refund the placeholders so they
+#    land in a terminal state instead of sitting in `estimated` forever —
+#    and, critically, so they never sit in `reserved` counting twice
+#    against `tracker.usable_budget_usd`.
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])
+```
+
+This decision — which tools get approved, and which of this stage's own entries get refunded — lives here, in the instruction layer.
+
+**The single-action threshold is waived at the point of spend, not here.** Do NOT pre-reserve the line items in this step — a reservation made here is never reconciled (nothing at this stage executes the call), so it would sit in `reserved` state for the rest of the run, silently eating budget out of `usable_budget_usd` on top of whatever the executing stage reserves for real. Instead, every downstream director skill (asset-director, compose-director, ...) passes `user_approved=True` on the `tracker.reserve(entry_id, ...)` call for its OWN entry, exactly when that entry fulfills a line item the user explicitly saw and approved at this gate — see asset-director.md's ledger-discipline block. That is the ONLY place the flag gets set; never blanket-applied to work outside the approved plan.
+
+**The guards still fire for anything outside the approved plan**, and that's correct behavior, not a bug:
+- A tool with no line item from Step 6 trips the first-paid-use guard (`ApprovalRequiredError`) the first time a downstream stage tries to reserve against it.
+- An unplanned action over the single-action threshold trips that guard too, even for an already-approved tool, unless the executing stage recognizes it as approved-plan work and reserves it with `user_approved=True`.
+
+Never let a downstream stage silently skip the asset or substitute a cheaper tool when a guard trips. Surface it as a structured blocker per `AGENT_GUIDE.md` → "Escalate Blockers Explicitly" — what was attempted, what failed, why (approval-required or budget-exceeded), what options exist, and your recommendation — then wait for the user before proceeding.
 
 ## How This Connects Downstream
 

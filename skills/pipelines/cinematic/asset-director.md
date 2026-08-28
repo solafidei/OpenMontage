@@ -28,6 +28,7 @@ Before authoring title cards, name plates, or SVG overlays, read **`skills/meta/
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Scene intent and beat plan |
 | Tools | `subtitle_gen`, `audio_enhance`, `image_selector`, `video_selector`, `pixabay_music` (free, default), `freesound_music` (free), `music_gen` (ElevenLabs, paid) — selectors auto-discover all available providers from the registry. **Default to `pixabay_music` before reaching for `music_gen`.** | Optional support asset creation |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the proposal director already wrote to |
 | Playbook | Active style playbook | Brand and typography consistency |
 
 ## Process
@@ -83,6 +84,23 @@ Before the sample is generated, tell the user exactly which generation path will
 - why it was selected.
 
 If that path fails, stop and ask before trying a different provider, model, or generation mode.
+
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the proposal director and every other stage share. For every paid tool invocation (`video_selector`, `image_selector`, `music_gen`, ...), run the full estimate → reserve → reconcile round trip:
+
+```python
+inputs = {"prompt": prompt, "provider": provider}
+estimated_usd = video_selector.estimate_cost(inputs)
+entry_id = tracker.estimate("video_selector", "hero_shot_3", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills a line item approved at proposal
+
+result = video_selector.execute(inputs)
+actual_usd = result.cost_usd or estimated_usd  # fall back to the estimate if the tool reports $0
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the proposal gate (an extra regeneration, an ad hoc insert); that call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly" rather than reserving around it. If a reservation is made but the call never runs (sample rejected, budget stops the batch), call `tracker.refund(entry_id)` instead of leaving it `reserved`. Free/local tools (`pixabay_music`, title-card renders) still get the same round-trip with `0.0` so every entry lands in a terminal state before compose.
 
 ### 2. Generate Support Assets Only Where Needed
 

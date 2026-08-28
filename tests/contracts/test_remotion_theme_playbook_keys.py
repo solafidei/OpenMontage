@@ -17,22 +17,19 @@ issue #306; that bridge lives in lib/hyperframes_style_bridge.py and is not
 touched here.
 """
 
-from pathlib import Path
-
 import pytest
 import yaml
 
-from styles.playbook_loader import list_playbooks
+from styles.playbook_loader import list_playbooks, resolve_playbook_path
 from tools.video.video_compose import VideoCompose
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-STYLES_DIR = REPO_ROOT / "styles"
 
 PLAYBOOK_NAMES = sorted(list_playbooks())
 
 
 def _raw(name: str) -> dict:
-    return yaml.safe_load((STYLES_DIR / f"{name}.yaml").read_text(encoding="utf-8"))
+    # Resolve through the loader: list_playbooks() includes styles/custom/,
+    # so joining the styles dir directly breaks on every custom playbook.
+    return yaml.safe_load(resolve_playbook_path(name).read_text(encoding="utf-8"))
 
 
 def _theme(name: str) -> dict:

@@ -11,6 +11,7 @@ This stage prepares the support kit around the anchor edit: subtitles, diagrams,
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Support needs and variant plan |
 | Tools | `subtitle_gen`, `tts_selector`, `image_selector`, `video_selector`, `diagram_gen`, `code_snippet`, `music_gen`, `audio_enhance` — selectors auto-discover all available providers from the registry | Optional support asset production |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director already wrote to |
 | Playbook | Active style playbook | Consistency rules |
 
 ## Process
@@ -33,6 +34,23 @@ Before batch-generating support assets, produce one sample of each expensive gen
 2. **Image/video sample** (if generating inserts): Generate one representative visual. Confirm style fits the source footage before batching.
 
 If rejected, adjust parameters and retry (max 3 iterations). Do not batch until approved.
+
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. For every paid support-asset call (`tts_selector`, `image_selector`, `video_selector`, `music_gen`, ...), run the full estimate → reserve → reconcile round trip:
+
+```python
+inputs = {"prompt": prompt, "provider": provider}
+estimated_usd = image_selector.estimate_cost(inputs)
+entry_id = tracker.estimate("image_selector", "diagram_insert_2", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills a line item approved at idea
+
+result = image_selector.execute(inputs)
+actual_usd = result.cost_usd or estimated_usd  # fall back to the estimate if the tool reports $0
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate; that call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the call never runs (sample rejected), call `tracker.refund(entry_id)`. Free/local tools (`diagram_gen`, `code_snippet`, `subtitle_gen`) still get the same round-trip with `0.0` so every entry lands in a terminal state before compose.
 
 ### 2. Generate Only The Support Assets You Need
 

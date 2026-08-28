@@ -174,6 +174,7 @@
         "mode": { "type": "string" },
         "skill": { "type": "string" },
         "budget_default_usd": { "type": "number" },
+        "budget_per_output_minute_usd": { "type": "number", "description": "Optional duration-aware budget rate. When set, the proposal gate's default budget cap is max(budget_default_usd, budget_per_output_minute_usd * target duration in minutes), overridable by the user." },
         "max_revisions_per_stage": { "type": "integer" },
         "max_send_backs": { "type": "integer" },
         "max_wall_time_minutes": { "type": "integer" }

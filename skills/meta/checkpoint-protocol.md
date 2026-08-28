@@ -31,7 +31,24 @@ Gather everything needed for the checkpoint:
 1. **Stage name** — which stage just completed
 2. **Status** — `"completed"` (or `"awaiting_human"` if approval needed)
 3. **Artifacts** — the canonical artifact(s) produced by this stage
-4. **Metadata** — review findings, cost snapshot, timing info
+4. **Cost snapshot** — pulled from the ledger, never from memory. Open the
+   project's tracker and call `cost_snapshot()`; it already emits exactly the
+   canonical keys the checkpoint schema defines:
+
+   ```python
+   from tools.cost_tracker import CostTracker
+
+   tracker = CostTracker.for_project(project_name)
+   cost_snapshot = tracker.cost_snapshot()  # total_spent_usd, total_reserved_usd, budget_remaining_usd
+   cost_snapshot["budget_total_usd"] = tracker.budget_total_usd
+   ```
+
+   Pass this dict straight through as `write_checkpoint`'s `cost_snapshot=`
+   argument (Step 3) — do not hand-write keys like `spent_usd` or
+   `approved_budget_usd`. The checkpoint schema closes `cost_snapshot` to
+   `additionalProperties: false`, so anything outside those four canonical
+   keys fails validation at write time instead of passing silently.
+5. **Metadata** — review findings, timing info
 
 ### Step 3: Write Checkpoint
 
@@ -44,6 +61,7 @@ write_checkpoint(
     stage_name,        # e.g., "idea"
     status,            # "completed" or "awaiting_human"
     artifacts,         # {"brief": {...}} — the stage's output
+    cost_snapshot=cost_snapshot,  # ledger snapshot from Step 2, item 4
 )
 ```
 

@@ -27,6 +27,7 @@ Read `edit_decisions.render_runtime` before anything else. It was locked at prop
 | Playbook | Active style playbook | Quality targets |
 | Tools | `video_compose`, `audio_mixer` | Rendering capabilities |
 | Media profiles | `lib/media_profiles.py` | Output format specs (resolution, codec, bitrate) |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the EP and asset director already wrote to |
 
 ## Process
 
@@ -83,20 +84,32 @@ Before rendering, present the user with audio options and get their preferences.
    - Use 2.0-2.5 words/sec for documentary, 2.5-3.0 for energetic
    - Verify word count before generating TTS
 
-2. **Generate TTS narration:**
+2. **Generate TTS narration** — this is a paid call, so estimate and reserve before it runs, then reconcile with the actual cost the tool result reports (fall back to the estimate if the tool reports zero):
    ```python
    from tools.audio.openai_tts import OpenAITTS
-   result = OpenAITTS().execute({
+   from tools.cost_tracker import CostTracker
+
+   tracker = CostTracker.for_project(project_id)  # same ledger the EP and asset director share
+   tts_inputs = {
        'text': narration_script,
        'voice': '<user-chosen or agent-recommended>',
        'instructions': '<voice direction matching video tone>',
        'output_path': 'path/to/narration.mp3',
-   })
+   }
+   estimated_usd = OpenAITTS().estimate_cost(tts_inputs)
+   entry_id = tracker.estimate("openai_tts", "narration", estimated_usd)
+   # user_approved=True because this call fulfills a line item the user saw and
+   # approved at the proposal gate; omit it for anything outside the approved
+   # plan and escalate a tripped guard as a structured blocker.
+   tracker.reserve(entry_id, user_approved=True)
+
+   result = OpenAITTS().execute(tts_inputs)
    # CRITICAL: Check result.data['audio_duration_seconds'] vs video duration
    # If narration exceeds video by >1s: shorten script and regenerate
+   tracker.reconcile(entry_id, result.cost_usd or estimated_usd, success=result.success)
    ```
 
-3. **Download background music:**
+3. **Download background music** (same estimate → `reserve(entry_id, user_approved=True)` → reconcile discipline, for the same reason as the narration call above; refund the reservation with `tracker.refund(entry_id)` if the download is skipped or cancelled):
    ```python
    from tools.audio.pixabay_music import PixabayMusic
    result = PixabayMusic().execute({
@@ -177,6 +190,8 @@ If using Remotion for animated segments:
 1. Generate Remotion composition data from edit decisions
 2. Call `video_compose` with `operation: "remotion_render"` for animated segments
 3. Assemble Remotion outputs with remaining segments via FFmpeg
+
+**Cost tracking the render itself:** the render is a local, $0-API-cost operation — see `skills/core/remotion.md` / `skills/core/hyperframes.md` § Cost Tracking for the estimate/reserve/reconcile pattern (`reserve` is always `0`; `reconcile` records wall-clock render time). Round-trip it through the same tracker so the persisted `cost_log` leaves no entry in `estimated`/`reserved` state — the compose stage's success criteria checks this.
 
 **Zero-key Remotion render (component-only videos):**
 When all scenes are Remotion component types (hero_title, stat_card, bar_chart, line_chart,

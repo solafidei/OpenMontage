@@ -34,11 +34,30 @@ def _load_playbook_schema() -> dict:
         return json.load(f)
 
 
-def load_playbook(name: str, styles_dir: Optional[Path] = None) -> dict[str, Any]:
-    """Load and validate a style playbook by name.
+def resolve_playbook_path(name: str, styles_dir: Optional[Path] = None) -> Path:
+    """Resolve a playbook name to its file.
 
     Presets live directly in the styles dir; generated playbooks live in its
-    ``custom/`` subdirectory. A preset wins when both exist.
+    ``custom/`` subdirectory. A preset wins when both exist. Anything reading
+    a playbook file by name must go through here — `list_playbooks` returns
+    both kinds, so a caller that only joins the styles dir silently misses
+    every custom playbook.
+    """
+    styles_dir = styles_dir or STYLES_DIR
+    path = styles_dir / f"{name}.yaml"
+    if path.exists():
+        return path
+    custom_path = styles_dir / CUSTOM_SUBDIR / f"{name}.yaml"
+    if custom_path.exists():
+        return custom_path
+    raise FileNotFoundError(
+        f"Playbook not found: {name!r} "
+        f"(searched {styles_dir} and {styles_dir / CUSTOM_SUBDIR})"
+    )
+
+
+def load_playbook(name: str, styles_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Load and validate a style playbook by name.
 
     Args:
         name: Playbook name (without .yaml extension).
@@ -47,15 +66,7 @@ def load_playbook(name: str, styles_dir: Optional[Path] = None) -> dict[str, Any
     Returns:
         Validated playbook dict.
     """
-    styles_dir = styles_dir or STYLES_DIR
-    path = styles_dir / f"{name}.yaml"
-    if not path.exists():
-        path = styles_dir / CUSTOM_SUBDIR / f"{name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Playbook not found: {name!r} "
-            f"(searched {styles_dir} and {styles_dir / CUSTOM_SUBDIR})"
-        )
+    path = resolve_playbook_path(name, styles_dir)
 
     with open(path, encoding="utf-8") as f:
         playbook = yaml.safe_load(f)
