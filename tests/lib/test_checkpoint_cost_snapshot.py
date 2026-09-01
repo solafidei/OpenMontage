@@ -24,6 +24,27 @@ def _set_cost_snapshot(value):
     return _mutate
 
 
+# The genuine legacy shape: an object whose *_usd figures are real numbers,
+# carrying keys the tightened schema no longer allows.
+_LEGACY_SNAPSHOT = {"spent_usd": 0.28, "approved_budget_usd": 2.0}
+
+
+def _legacy_snapshot_masking(mutate):
+    """A genuine legacy cost_snapshot PLUS a violation somewhere else.
+
+    These are the cases where `exc.field != "cost_snapshot"` is the ONLY thing
+    standing between the checkpoint and a silent tolerance: the shape check
+    passes (the snapshot really is legacy), so if the field guard is removed
+    the unrelated violation rides in behind it. Without this family the guard
+    is load-bearing but unpoliced -- every other corruption here is refused by
+    _is_legacy_cost_snapshot before exc.field is ever consulted.
+    """
+    def _mutate(data: dict) -> None:
+        data["cost_snapshot"] = dict(_LEGACY_SNAPSHOT)
+        mutate(data)
+    return _mutate
+
+
 # Every corruption the legacy tolerance must refuse to swallow — i.e. every
 # checkpoint that is NOT the genuine legacy cost_snapshot shape. Shared by all
 # THREE call sites of _validate_tolerating_legacy_cost_snapshot
@@ -93,6 +114,20 @@ NON_COST_SNAPSHOT_CORRUPTIONS = [
     pytest.param(
         _set_cost_snapshot({"spent_usd": float("nan")}),
         id="cost-snapshot-nan-money",
+    ),
+    # --- family 3: a real legacy snapshot masking a violation elsewhere ---
+    # The shape check passes here, so only the field guard refuses these. Both
+    # of its branches are covered: an unattributable root violation (field is
+    # None) and a named non-cost_snapshot property (field == "human_approved").
+    pytest.param(
+        _legacy_snapshot_masking(
+            lambda d: d.__setitem__("rogue_top_level_key", "smuggled")
+        ),
+        id="legacy-snapshot-masking-rogue-top-level-key",
+    ),
+    pytest.param(
+        _legacy_snapshot_masking(lambda d: d.__setitem__("human_approved", "yes")),
+        id="legacy-snapshot-masking-wrong-typed-named-field",
     ),
 ]
 
