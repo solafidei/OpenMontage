@@ -7,6 +7,7 @@ checkpoints to resume pipelines and to present state at human checkpoints.
 from __future__ import annotations
 
 import json
+import math
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
@@ -204,6 +205,70 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
         ) from exc
 
 
+def _is_legacy_cost_snapshot(value: Any) -> bool:
+    """True only for the genuine legacy cost_snapshot shape.
+
+    Legacy files carry an OBJECT of money figures under keys the tightened
+    schema no longer allows (e.g. spent_usd/approved_budget_usd instead of
+    total_spent_usd/budget_total_usd). The money-key convention is the
+    ``_usd`` suffix, not a fixed key list, so no allowlist is hardcoded —
+    what is checked is that every money figure is a real, finite number.
+
+    Anything else under cost_snapshot is corruption, not history: a bare
+    string or null in place of the object, or a ``*_usd`` value that is not
+    a number. Those reach `cost = cp["cost_snapshot"]` in backlot/state.py
+    and `float(cost_snapshot.get("total_spent_usd", 0.0) or 0.0)` in
+    CostTracker.reconstruct_from_snapshot, so they must fail loudly here.
+    Booleans are excluded explicitly: `isinstance(True, int)` is True in
+    Python, and a boolean money figure is corruption.
+    """
+    if not isinstance(value, dict):
+        return False
+    for key, money in value.items():
+        if not (isinstance(key, str) and key.endswith("_usd")):
+            continue
+        if isinstance(money, bool) or not isinstance(money, (int, float)):
+            return False
+        if not math.isfinite(money):
+            return False
+    return True
+
+
+def _validate_tolerating_legacy_cost_snapshot(
+    checkpoint: dict[str, Any], source: Path
+) -> None:
+    """validate_checkpoint(), tolerating exactly the legacy cost_snapshot shape.
+
+    The single definition of the read-side tolerance, used by EVERY path that
+    validates an already-written checkpoint (read_checkpoint,
+    get_latest_checkpoint, _enforce_stage_prerequisites). cost_snapshot was
+    closed to extra keys after legacy files were written; the schema gates
+    new writes, so legacy files must stay both readable AND advanceable —
+    a predecessor a read path accepts, the prerequisite check must accept.
+
+    The waiver is narrowed to that shape by _is_legacy_cost_snapshot: a
+    failure attributed to cost_snapshot is swallowed ONLY when the value is
+    an object whose ``*_usd`` figures are real numbers. Every other
+    invariant — and every other cost_snapshot value — still fails loudly.
+    """
+    try:
+        validate_checkpoint(checkpoint)
+    except CheckpointValidationError as exc:
+        if exc.field != "cost_snapshot":
+            raise
+        snapshot = (
+            checkpoint.get("cost_snapshot")
+            if isinstance(checkpoint, dict) else None
+        )
+        if not _is_legacy_cost_snapshot(snapshot):
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Checkpoint %s carries a legacy cost_snapshot (%s) — accepting it "
+            "as-is; the schema only gates new writes.", source, exc,
+        )
+
+
 def _checkpoint_path(pipeline_dir: Path, project_id: str, stage: str) -> Path:
     return pipeline_dir / project_id / f"checkpoint_{stage}.json"
 
@@ -327,7 +392,7 @@ def _enforce_stage_prerequisites(
         try:
             with open(path, encoding="utf-8") as handle:
                 checkpoint = json.load(handle)
-            validate_checkpoint(checkpoint)
+            _validate_tolerating_legacy_cost_snapshot(checkpoint, path)
         except (OSError, json.JSONDecodeError, CheckpointValidationError):
             incomplete.append(predecessor)
             continue
@@ -622,20 +687,7 @@ def read_checkpoint(
         return None
     with open(path, encoding="utf-8") as f:
         checkpoint = json.load(f)
-    try:
-        validate_checkpoint(checkpoint)
-    except CheckpointValidationError as exc:
-        # Only the legacy cost_snapshot shape is tolerated on read — that
-        # object was closed to extra keys after these files were written.
-        # Every other invariant still fails loudly: a checkpoint with a
-        # forged stage or a broken artifact must not resume silently.
-        if exc.field != "cost_snapshot":
-            raise
-        import logging
-        logging.getLogger(__name__).warning(
-            "Checkpoint %s carries a legacy cost_snapshot (%s) — returning it "
-            "as-is; the schema only gates new writes.", path, exc,
-        )
+    _validate_tolerating_legacy_cost_snapshot(checkpoint, path)
     return checkpoint
 
 
@@ -657,20 +709,7 @@ def get_latest_checkpoint(
 
     with open(checkpoints[0], encoding="utf-8") as f:
         checkpoint = json.load(f)
-    try:
-        validate_checkpoint(checkpoint)
-    except CheckpointValidationError as exc:
-        # Only the legacy cost_snapshot shape is tolerated on read — that
-        # object was closed to extra keys after these files were written.
-        # Every other invariant still fails loudly: a checkpoint with a
-        # forged stage or a broken artifact must not resume silently.
-        if exc.field != "cost_snapshot":
-            raise
-        import logging
-        logging.getLogger(__name__).warning(
-            "Checkpoint %s carries a legacy cost_snapshot (%s) — returning it "
-            "as-is; the schema only gates new writes.", checkpoints[0], exc,
-        )
+    _validate_tolerating_legacy_cost_snapshot(checkpoint, checkpoints[0])
     return checkpoint
 
 
