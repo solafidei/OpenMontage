@@ -301,6 +301,7 @@ Run at **compose** and **publish** stages. Ensures the agent reviewed the actual
    - If missing: **CRITICAL** — "Compose produced a render_report but no final_review. The agent must inspect the rendered output before presenting it."
 2. **Status check**: What is `final_review.status`?
    - `pass` → OK, proceed
+   - `needs_verification` → A check could not measure what it inspects (audio probe failed or timed out, loudness never measured), so the render is *unverified*, not clean. It must not be presented to the user as finished — a human inspects it first. If the pipeline presented anyway: **CRITICAL** — "Self-review could not verify the render but the agent presented it as complete."
    - `revise` → The agent should have fixed issues before presenting. If the pipeline continued anyway: **CRITICAL** — "Self-review found revise-worthy issues but the agent presented anyway."
    - `fail` → The pipeline MUST NOT proceed. If it did: **CRITICAL**
 3. **Check completeness**: All 5 required checks must have data:

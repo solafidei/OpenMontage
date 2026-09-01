@@ -59,6 +59,11 @@ from tools.base_tool import (
 # (-16..-23 LUFS) so it only trips on genuinely under-level programme audio.
 LUFS_DELIVERY_FLOOR = -40.0
 
+# Digital-silence floor. Below this the mix provably carries no audible
+# programme audio; between this and the -40 dB narration heuristic, volume
+# alone cannot distinguish quiet narration from a bed — indeterminate.
+SILENCE_FLOOR_DB = -60.0
+
 
 class VideoCompose(BaseTool):
     name = "video_compose"
@@ -2450,6 +2455,7 @@ class VideoCompose(BaseTool):
             "unexpected_silence": False,
             "clipping_detected": False,
             "mix_intelligible": True,
+            "mean_volume_db": None,
             "issues": [],
         }
         if technical_probe.get("has_audio") and duration > 0:
@@ -2457,7 +2463,7 @@ class VideoCompose(BaseTool):
                 # Use ffmpeg volumedetect to check audio levels
                 cmd = [
                     "ffmpeg", "-i", str(output_path),
-                    "-af", "volumedetect", "-f", "null", "-",
+                    "-vn", "-af", "volumedetect", "-f", "null", "-",
                 ]
                 proc = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=60
@@ -2478,8 +2484,10 @@ class VideoCompose(BaseTool):
                         except (ValueError, IndexError):
                             pass
 
+                audio_spotcheck["mean_volume_db"] = mean_vol  # None => not measured
+
                 if mean_vol is not None:
-                    if mean_vol < -60:
+                    if mean_vol < SILENCE_FLOOR_DB:
                         audio_spotcheck["unexpected_silence"] = True
                         audio_spotcheck["issues"].append(
                             f"Mean volume {mean_vol:.1f} dB — effectively silent"
@@ -2497,11 +2505,17 @@ class VideoCompose(BaseTool):
                         f"Max volume {max_vol:.1f} dB — possible clipping"
                     )
 
+            except Exception as e:
+                audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
+
+            try:
                 # mean_volume is an RMS average a loud music bed satisfies on
                 # its own. Integrated LUFS is the programme-level figure
                 # delivery actually cares about. Negative-only gate.
+                # Its own try: a volumedetect failure must not silently skip
+                # the LUFS probe, nor the reverse.
                 lufs_proc = subprocess.run(
-                    ["ffmpeg", "-i", str(output_path), "-af", "ebur128",
+                    ["ffmpeg", "-i", str(output_path), "-vn", "-af", "ebur128",
                      "-f", "null", "-"],
                     capture_output=True, text=True, timeout=120,
                 )
@@ -2520,21 +2534,88 @@ class VideoCompose(BaseTool):
                         f"{LUFS_DELIVERY_FLOOR} LUFS floor — programme audio too quiet"
                     )
             except Exception as e:
-                audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
+                audio_spotcheck["issues"].append(f"Loudness analysis error: {e}")
 
-        # Narration was promised but no narration-level audio is present.
-        # Volume alone cannot PROVE narration, but its absence disproves it —
-        # so this gate can only fail a render, never confer a pass.
+            # A gate that did not run must say so. Never a silent skip.
+            if "integrated_lufs" not in audio_spotcheck:
+                audio_spotcheck["loudness_verdict"] = (
+                    "indeterminate — integrated loudness not measured; "
+                    "LUFS floor gate did not run"
+                )
+                audio_spotcheck["issues"].append(
+                    "Integrated loudness could not be measured — LUFS floor "
+                    "gate skipped, loudness indeterminate"
+                )
+            else:
+                audio_spotcheck["loudness_verdict"] = (
+                    f"measured — {audio_spotcheck['integrated_lufs']:.1f} LUFS"
+                )
+
+        # Narration was promised. Volume alone cannot PROVE narration, but a
+        # measured silence disproves it — so this gate may only fire on a
+        # measurement that actually happened. Analysis failure or a quiet-but-
+        # nonsilent mix is INDETERMINATE, mirroring the subtitle burn-in
+        # treatment: never assert a verdict nothing measured.
         if edit_decisions:
             narration_expected = bool(
                 ((edit_decisions.get("audio") or {}).get("narration") or {})
                 .get("segments")
             )
-            if narration_expected and not audio_spotcheck["narration_present"]:
-                audio_spotcheck["issues"].append(
-                    "Narration expected in edit_decisions but not detected in "
-                    "the output — narration missing"
-                )
+            if narration_expected:
+                mv = audio_spotcheck.get("mean_volume_db")
+                if audio_spotcheck["narration_present"]:
+                    audio_spotcheck["narration_verdict"] = (
+                        f"measured — narration-level audio present "
+                        f"(mean {mv:.1f} dB)"
+                    )
+                elif (technical_probe.get("valid_container")
+                        and not technical_probe.get("has_audio")):
+                    # ffprobe measured: no audio stream exists at all.
+                    audio_spotcheck["narration_verdict"] = (
+                        "measured — output has no audio stream"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected in edit_decisions but not detected "
+                        "in the output — narration missing"
+                    )
+                elif mv is None:
+                    audio_spotcheck["narration_verdict"] = (
+                        "indeterminate — audio was not measured "
+                        "(volumedetect failed, timed out, or did not run)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected but audio analysis did not "
+                        "complete — narration presence indeterminate, "
+                        "not verified"
+                    )
+                elif mv < SILENCE_FLOOR_DB:
+                    # Strictly below, exactly as the `unexpected_silence`
+                    # check above and the constant's own definition ("BELOW
+                    # this the mix provably carries no audible programme
+                    # audio"). At exactly SILENCE_FLOOR_DB the silence
+                    # detector says "not silent", so this gate must not
+                    # claim a proof it does not have — it falls through to
+                    # indeterminate.
+                    audio_spotcheck["narration_verdict"] = (
+                        f"measured — no audible programme audio "
+                        f"(mean {mv:.1f} dB)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected in edit_decisions but not detected "
+                        "in the output — narration missing"
+                    )
+                else:
+                    audio_spotcheck["narration_verdict"] = (
+                        f"indeterminate — mix level {mv:.1f} dB is too low to "
+                        "distinguish narration from a bed; presence neither "
+                        "proven nor disproven (transcript comparison is the "
+                        "authoritative narration check)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        f"Narration expected but mean level {mv:.1f} dB cannot "
+                        "confirm or refute it — narration presence "
+                        "indeterminate"
+                    )
 
         issues.extend(audio_spotcheck.get("issues", []))
 
@@ -2707,9 +2788,28 @@ class VideoCompose(BaseTool):
             ])
         ]
 
+        # Issues recording a measurement that did NOT happen. Nothing was
+        # disproven, so these are not critical — but nothing was verified
+        # either, so they must not read as a clean pass. Matched by marker
+        # phrase, the same keyword technique the critical list uses; both
+        # markers are tails of the indeterminate issues written above and
+        # appear in no critical or benign issue.
+        indeterminate_issues = [
+            i for i in issues
+            if any(kw in i.lower() for kw in [
+                "presence indeterminate",  # narration never measured
+                "loudness indeterminate",  # LUFS floor gate never ran
+            ])
+        ]
+
         if critical_issues:
             status = "revise"
             recommended_action = "re_render"
+        elif indeterminate_issues:
+            # A gate could not measure what it checks. A human must look;
+            # this render is unverified, not finished.
+            status = "needs_verification"
+            recommended_action = "human_review"
         elif issues:
             status = "pass"
             recommended_action = "present_to_user"
