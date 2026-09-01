@@ -593,6 +593,25 @@ The checkpoint protocol meta skill (`skills/meta/checkpoint-protocol.md`) teache
 - **Approval is per-gate.** An early "go ahead" never covers later gates; explicit full-run pre-authorization must be recorded as a `decision_log` entry (`category: "approval_policy"`) to count.
 - Wait for human to approve, request revision, or abort.
 
+### Compact at closed gates
+
+Session cost is roughly `0.5 x peak context x number of API calls` — quadratic in
+session length. Eviction is the only thing that addresses a quadratic.
+
+**At a closed stage boundary — a checkpoint just written `completed` or
+`awaiting_human` — and only there**, if session context has passed ~150K, run
+`/compact` before starting the next stage. Never mid-stage, never during a render,
+a take comparison, or a visual-QA sweep.
+
+This is safe *because* the state that matters is already durable: the checkpoint
+holds pipeline state and `decision_log.json` holds judgment state. **Log the rulings
+before compacting** — rejections, vetoes, and the reasons behind them. A verdict that
+exists only in the conversation is lost by definition.
+
+Measured on this project's own sessions: ~51.5% fewer context-tokens, versus 61.8%
+for compacting blind — the 10-point difference buys the guarantee that nothing
+in-flight is ever summarized. See `docs/intent/context-cost-spec.md`.
+
 ## Communication Protocol
 
 Agents coordinate through canonical JSON artifacts, checkpoints, pipeline manifests, and the tool registry.

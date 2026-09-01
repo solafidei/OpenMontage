@@ -426,6 +426,36 @@ def _merge_decision_log(
     for decision in new_log.get("decisions", []):
         if decision.get("decision_id") not in existing_ids:
             existing["decisions"].append(decision)
+            existing_ids.add(decision["decision_id"])
+
+    # Self-heal a forked audit trail. Nothing in the codebase writes
+    # <project>/artifacts/decision_log.json, but an agent hand-writing it
+    # bypasses this merge entirely — which is how ask-jess ended up with 11
+    # decisions here and 30 there for 29 hours. Absorb any orphans rather than
+    # letting the canonical log silently disagree with the artifact.
+    artifact_copy = pipeline_dir / project_id / "artifacts" / "decision_log.json"
+    if artifact_copy.exists():
+        try:
+            with open(artifact_copy, encoding="utf-8") as f:
+                side = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            side = None
+        if isinstance(side, dict):
+            orphans = [
+                d for d in side.get("decisions", [])
+                if d.get("decision_id") not in existing_ids
+            ]
+            if orphans:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "decision_log fork: %d decision(s) existed only in "
+                    "artifacts/decision_log.json and were absorbed. Write "
+                    "decision_log through write_checkpoint, not by hand.",
+                    len(orphans),
+                )
+                for d in orphans:
+                    existing["decisions"].append(d)
+                    existing_ids.add(d["decision_id"])
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
