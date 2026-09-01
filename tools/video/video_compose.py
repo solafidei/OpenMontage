@@ -55,6 +55,11 @@ from tools.base_tool import (
 )
 
 
+# Integrated-loudness floor for delivery. Well below any broadcast target
+# (-16..-23 LUFS) so it only trips on genuinely under-level programme audio.
+LUFS_DELIVERY_FLOOR = -40.0
+
+
 class VideoCompose(BaseTool):
     name = "video_compose"
     version = "0.1.0"
@@ -2491,8 +2496,45 @@ class VideoCompose(BaseTool):
                     audio_spotcheck["issues"].append(
                         f"Max volume {max_vol:.1f} dB — possible clipping"
                     )
+
+                # mean_volume is an RMS average a loud music bed satisfies on
+                # its own. Integrated LUFS is the programme-level figure
+                # delivery actually cares about. Negative-only gate.
+                lufs_proc = subprocess.run(
+                    ["ffmpeg", "-i", str(output_path), "-af", "ebur128",
+                     "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                for line in (lufs_proc.stderr or "").split("\n"):
+                    if line.strip().startswith("I:") and "LUFS" in line:
+                        try:
+                            audio_spotcheck["integrated_lufs"] = float(
+                                line.split("I:")[1].strip().split()[0]
+                            )
+                        except (ValueError, IndexError):
+                            pass
+                lufs = audio_spotcheck.get("integrated_lufs")
+                if lufs is not None and lufs < LUFS_DELIVERY_FLOOR:
+                    audio_spotcheck["issues"].append(
+                        f"Integrated loudness {lufs:.1f} LUFS is below the "
+                        f"{LUFS_DELIVERY_FLOOR} LUFS floor — programme audio too quiet"
+                    )
             except Exception as e:
                 audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
+
+        # Narration was promised but no narration-level audio is present.
+        # Volume alone cannot PROVE narration, but its absence disproves it —
+        # so this gate can only fail a render, never confer a pass.
+        if edit_decisions:
+            narration_expected = bool(
+                ((edit_decisions.get("audio") or {}).get("narration") or {})
+                .get("segments")
+            )
+            if narration_expected and not audio_spotcheck["narration_present"]:
+                audio_spotcheck["issues"].append(
+                    "Narration expected in edit_decisions but not detected in "
+                    "the output — narration missing"
+                )
 
         issues.extend(audio_spotcheck.get("issues", []))
 
@@ -2624,9 +2666,14 @@ class VideoCompose(BaseTool):
                         # Check if subtitle_path was used (burned in)
                         sub_source = ed_subs.get("source")
                         if sub_source and Path(sub_source).exists():
-                            # Burned-in subtitles are not detectable as streams
-                            subtitle_check["subtitles_present"] = True
-                            subtitle_check["coverage_ratio"] = 1.0
+                            # Burn-in leaves no subtitle stream, and we never
+                            # inspected the pixels — so presence is UNKNOWN.
+                            # Do not assert it: a fabricated pass here hides a
+                            # failed burn-in behind a clean review.
+                            subtitle_check["inspected"] = False
+                            subtitle_check["verdict"] = (
+                                "indeterminate — burned-in, not inspected"
+                            )
                         else:
                             subtitle_check["issues"].append(
                                 "Subtitles expected but not found in output and "
@@ -2655,6 +2702,8 @@ class VideoCompose(BaseTool):
                 "silent downgrade", "delivery promise violation",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
+                "narration missing",       # promised narration absent
+                "programme audio too quiet",
             ])
         ]
 
