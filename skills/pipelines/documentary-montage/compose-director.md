@@ -67,7 +67,7 @@ Remotion-first on `operation="render"`, even for footage-led pieces.
   the engine change and get approval before using a lower-level
   FFmpeg-only path.
 
-### 0b. Cost Track The Render
+### 0b. Ledger Round-Trip For The Render
 
 Both the FFmpeg body render and the Remotion end-tag render are local, $0-API-cost operations, but they still round-trip through the ledger so `cost_log.json` leaves no entry in `estimated`/`reserved` state: `entry_id = tracker.estimate("video_compose", "render", 0.0)`, `tracker.reserve(entry_id, user_approved=True)`, then `tracker.reconcile(entry_id, 0.0, success=True)` once the render finishes (`success=False` if it failed). This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent.
 

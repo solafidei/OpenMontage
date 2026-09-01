@@ -11,7 +11,11 @@ sys.path.insert(0, str(ROOT))
 from lib.config_model import BudgetMode, OpenMontageConfig
 from lib.paths import PROJECTS_DIR
 from schemas.artifacts import validate_artifact
-from tools.cost_tracker import ApprovalRequiredError, CostTracker
+from tools.cost_tracker import (
+    ApprovalRequiredError,
+    BudgetExceededError,
+    CostTracker,
+)
 
 
 class CostTrackerGovernanceTests(unittest.TestCase):
@@ -231,6 +235,484 @@ class CostTrackerGovernanceTests(unittest.TestCase):
             self.assertEqual(tracker.budget_reserved_usd, 0.0)
 
             persisted = json.loads(log_path.read_text())
+            validate_artifact("cost_log", persisted)
+
+    # ---- Workstream C acceptance: the documented skill blocks, executed ----
+
+    @staticmethod
+    def _documented_arming_total(
+        line_items: list[float],
+        budget_cap_usd: float,
+        reserve_pct: float,
+        approved_budget_usd: float | None = None,
+    ) -> float:
+        """The arming formula exactly as the proposal/idea gates document it
+        (skills/pipelines/*/proposal-director.md → 'On Approval — Arm the
+        Tracker', point 1). Kept as one helper so the behavioral tests below
+        exercise the same arithmetic the skill text instructs."""
+        import math
+
+        total_estimated_usd = round(sum(line_items), 4)
+        min_workable_usd = (
+            math.ceil(total_estimated_usd / (1 - reserve_pct) * 100) / 100 + 0.01
+        )
+        return approved_budget_usd or max(budget_cap_usd, min_workable_usd)
+
+    def test_documented_arming_formula_reserves_full_plan_in_cap_mode(self) -> None:
+        """The pre-fix fallback (`approved_budget_usd or total_estimated_usd`)
+        armed the bare estimate, so usable_budget_usd topped out at
+        (1 - reserve_pct) x total and the plan's FINAL approved reservation
+        could never fit. The documented gross-up must let every planned item
+        reserve and reconcile."""
+        import tempfile
+        from pathlib import Path
+
+        from tools.cost_tracker import BudgetExceededError
+
+        reserve_pct = OpenMontageConfig.load().budget.reserve_pct
+
+        def run_plan(line_items, budget_cap_usd, approved_budget_usd=None):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                log_path = Path(temp_dir) / "cost_log.json"
+                tracker = CostTracker(
+                    budget_total_usd=None,
+                    reserve_pct=reserve_pct,
+                    single_action_approval_usd=0.50,
+                    require_approval_for_new_paid_tool=True,
+                    mode=BudgetMode.CAP,
+                    cost_log_path=log_path,
+                )
+                tracker.budget_total_usd = self._documented_arming_total(
+                    line_items, budget_cap_usd, reserve_pct, approved_budget_usd
+                )
+                for index, _ in enumerate(line_items):
+                    tracker.approve_tool(f"image_selector_{index}")
+                for index, estimated_usd in enumerate(line_items):
+                    entry_id = tracker.estimate(
+                        f"image_selector_{index}", f"plan_item_{index}", estimated_usd
+                    )
+                    tracker.reserve(entry_id, user_approved=True)
+                    tracker.reconcile(entry_id, estimated_usd, success=True)
+                return tracker
+
+        # The critic's own scenario: $0.60 / $0.60 / $0.32, cap deliberately
+        # below the estimate so the min_workable_usd gross-up branch is taken.
+        tracker = run_plan([0.60, 0.60, 0.32], budget_cap_usd=1.00)
+        self.assertAlmostEqual(tracker.budget_total_usd, 1.70, places=6)
+        self.assertAlmostEqual(tracker.budget_spent_usd, 1.52, places=6)
+        for entry in tracker.entries:
+            self.assertEqual(entry["status"], "completed")
+            self.assertNotIn("budget_warning", entry)
+
+        # Exact-cent boundary: 0.54 / (1 - 0.10) == 0.60 exactly, where a bare
+        # ceil() adds zero slack. The designed extra cent must survive it.
+        boundary = run_plan([0.27, 0.27], budget_cap_usd=0.30)
+        self.assertAlmostEqual(boundary.budget_spent_usd, 0.54, places=6)
+        for entry in boundary.entries:
+            self.assertEqual(entry["status"], "completed")
+            self.assertNotIn("budget_warning", entry)
+
+        # A figure the user NAMED is honoured verbatim — the fix is scoped to
+        # the fallback, so an under-provisioned named cap still trips the guard.
+        with self.assertRaises(BudgetExceededError):
+            run_plan([0.60, 0.60, 0.32], budget_cap_usd=1.00, approved_budget_usd=1.52)
+
+    def test_plan_name_keyed_reserve_passes_first_paid_use_guard(self) -> None:
+        """C2: the ledger keys on the PLAN's line-item name. A gate that armed
+        `tts_selector` must let the compose stage book narration under
+        `tts_selector`; booking the concrete provider name instead is exactly
+        the deadlock the old compose-director text instructed."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=10.0,
+                reserve_pct=0.0,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.WARN,
+                cost_log_path=log_path,
+            )
+            tracker.approve_tool("tts_selector")
+
+            entry_id = tracker.estimate(
+                "tts_selector", "narration via openai_tts", 0.18
+            )
+            tracker.reserve(entry_id, user_approved=True)
+            self.assertEqual(tracker.entries[-1]["status"], "reserved")
+            self.assertEqual(
+                tracker.entries[-1]["operation"], "narration via openai_tts"
+            )
+
+            # The pre-fix instruction: book under the concrete provider name.
+            concrete_id = tracker.estimate("openai_tts", "narration", 0.18)
+            with self.assertRaises(ApprovalRequiredError):
+                tracker.reserve(concrete_id, user_approved=True)
+
+    def test_documented_booking_rule_failed_call_books_no_phantom_spend(self) -> None:
+        """C3: `actual_usd = result.cost_usd or estimated_usd` booked the
+        estimate on a FAILED call, and budget_spent_usd counts failed entries —
+        phantom spend that shrinks usable budget and stalls the real retry."""
+        import tempfile
+        from pathlib import Path
+
+        from tools.base_tool import ToolResult
+
+        def book(tracker, entry_id, result, estimated_usd):
+            """The canonical booking block from the skill text, executed."""
+            reported = result.cost_usd or 0.0
+            if result.success:
+                actual_usd = reported if reported > 0 else estimated_usd
+            else:
+                actual_usd = reported
+            tracker.reconcile(entry_id, actual_usd, success=result.success)
+            return actual_usd
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=0.80,  # armed per C1 for a single $0.60 item
+                reserve_pct=OpenMontageConfig.load().budget.reserve_pct,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+            tracker.approve_tool("video_selector")
+
+            entry_id = tracker.estimate("video_selector", "hero_shot", 0.60)
+            tracker.reserve(entry_id, user_approved=True)
+            failed = ToolResult(success=False, cost_usd=0.0, error="provider 500")
+            self.assertEqual(book(tracker, entry_id, failed, 0.60), 0.0)
+
+            entry = tracker.entries[0]
+            self.assertEqual(entry["status"], "failed")
+            self.assertEqual(entry["actual_usd"], 0.0)
+            self.assertEqual(tracker.budget_spent_usd, 0.0)
+
+            # The retry the phantom spend used to block.
+            retry_id = tracker.estimate("video_selector", "hero_shot retry", 0.60)
+            tracker.reserve(retry_id, user_approved=True)
+            self.assertEqual(tracker.entries[-1]["status"], "reserved")
+
+            # Success reporting $0.00 on a paid estimate books the estimate.
+            self.assertEqual(
+                book(tracker, retry_id, ToolResult(success=True, cost_usd=0.0), 0.60),
+                0.60,
+            )
+            self.assertEqual(tracker.budget_spent_usd, 0.60)
+
+            # A positive report is authoritative.
+            third_id = tracker.estimate("video_selector", "insert", 0.05)
+            tracker.reserve(third_id, user_approved=True)
+            self.assertEqual(
+                book(tracker, third_id, ToolResult(success=True, cost_usd=0.04), 0.05),
+                0.04,
+            )
+            self.assertEqual(tracker.entries[-1]["actual_usd"], 0.04)
+
+    def test_music_gen_estimate_contract(self) -> None:
+        """C4's behavioral leg: music_gen.estimate_cost raises on a missing
+        duration_seconds, not on a missing prompt — so the documentary-montage
+        examples must carry duration_seconds in the inputs dict."""
+        from tools.audio.music_gen import MusicGen
+
+        self.assertEqual(
+            MusicGen().estimate_cost({"prompt": "x", "duration_seconds": 90}), 0.15
+        )
+        with self.assertRaises(ValueError):
+            MusicGen().estimate_cost({"prompt": "x"})
+        # A promptless dict carrying duration_seconds returns normally — the
+        # raise keys on duration_seconds alone.
+        self.assertEqual(MusicGen().estimate_cost({"duration_seconds": 90}), 0.15)
+
+    # ---- Workstream G acceptance: the two non-waiver clauses of reserve(),
+    # ---- and the failed-and-charged reconcile path ----
+
+    def test_user_approved_does_not_waive_budget_cap(self) -> None:
+        """G1: `user_approved=True` waives the single-action threshold ONLY.
+        In cap mode an over-budget reservation still raises, and the raise
+        lands BEFORE the status mutation — the entry must stay `estimated`
+        holding no budget, in memory and on disk."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=1.0,
+                reserve_pct=0.0,
+                # Both other clauses provably disarmed: the threshold is far
+                # above the estimate and the first-paid-use guard is off, so
+                # only the budget check can be the actor here.
+                single_action_approval_usd=99.0,
+                require_approval_for_new_paid_tool=False,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+            entry_id = tracker.estimate("paid_video", "generate", 2.0)
+
+            with self.assertRaises(BudgetExceededError):
+                tracker.reserve(entry_id, user_approved=True)
+
+            entry = tracker.entries[0]
+            self.assertEqual(entry["id"], entry_id)
+            self.assertEqual(entry["status"], "estimated")
+            self.assertEqual(entry["reserved_usd"], 0.0)
+            self.assertEqual(tracker.budget_reserved_usd, 0.0)
+
+            persisted = json.loads(log_path.read_text())
+            self.assertEqual(persisted["entries"][0]["status"], "estimated")
+            self.assertEqual(persisted["entries"][0]["reserved_usd"], 0.0)
+            self.assertEqual(persisted["budget_reserved_usd"], 0.0)
+            validate_artifact("cost_log", persisted)
+
+    def test_user_approved_does_not_waive_first_paid_use_guard(self) -> None:
+        """G1: `user_approved=True` does not stand in for `approve_tool`.
+        The estimate sits UNDER the single-action threshold, so the threshold
+        clause cannot be the actor — only the first-paid-use guard can."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=10.0,
+                reserve_pct=0.0,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.WARN,
+                cost_log_path=log_path,
+            )
+            # Deliberately NOT approved.
+            entry_id = tracker.estimate("elevenlabs_tts", "narration", 0.18)
+
+            with self.assertRaises(ApprovalRequiredError) as caught:
+                tracker.reserve(entry_id, user_approved=True)
+            # Distinguishes this from the threshold error's
+            # "exceeds single-action threshold".
+            self.assertIn("First paid use", str(caught.exception))
+            self.assertEqual(tracker.entries[0]["status"], "estimated")
+
+            # Approving the tool — and nothing else — unblocks the same call,
+            # proving the guard, and only the guard, was the blocker.
+            tracker.approve_tool("elevenlabs_tts")
+            tracker.reserve(entry_id, user_approved=True)
+
+            entry = tracker.entries[0]
+            self.assertEqual(entry["status"], "reserved")
+            self.assertEqual(entry["reserved_usd"], 0.18)
+            self.assertTrue(entry["user_approved"])
+
+            persisted = json.loads(log_path.read_text())
+            self.assertEqual(persisted["entries"][0]["status"], "reserved")
+            validate_artifact("cost_log", persisted)
+
+    def test_reconcile_failure_lands_failed_state_and_counts_real_spend(self) -> None:
+        """G6: a failed call that WAS charged. `failed` is terminal (the six
+        manifests' compose criterion), and money spent on a failure is still
+        spent — budget_spent_usd counts FAILED alongside COMPLETED."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=10.0,
+                reserve_pct=0.0,
+                single_action_approval_usd=99.0,
+                require_approval_for_new_paid_tool=False,
+                mode=BudgetMode.WARN,
+                cost_log_path=log_path,
+            )
+            entry_id = tracker.estimate("video_selector", "generate", 0.60)
+            tracker.reserve(entry_id)
+
+            # The provider billed a generation that then failed.
+            tracker.reconcile(entry_id, 0.60, success=False)
+
+            entry = tracker.entries[0]
+            self.assertEqual(entry["status"], "failed")
+            self.assertAlmostEqual(entry["actual_usd"], 0.60)
+            self.assertEqual(entry["reserved_usd"], 0.0)
+            self.assertAlmostEqual(tracker.budget_spent_usd, 0.60)
+            self.assertEqual(tracker.budget_reserved_usd, 0.0)
+            self.assertEqual(tracker.non_terminal_entries(), [])
+
+            persisted = json.loads(log_path.read_text())
+            validate_artifact("cost_log", persisted)
+            self.assertEqual(persisted["entries"][0]["status"], "failed")
+            self.assertAlmostEqual(persisted["budget_spent_usd"], 0.60)
+
+            # Failed and completed spend aggregate.
+            second_id = tracker.estimate("video_selector", "generate retry", 0.60)
+            tracker.reserve(second_id)
+            tracker.reconcile(second_id, 0.60, success=True)
+
+            self.assertEqual(tracker.entries[1]["status"], "completed")
+            self.assertAlmostEqual(tracker.budget_spent_usd, 1.20)
+            self.assertEqual(tracker.budget_reserved_usd, 0.0)
+
+            persisted = json.loads(log_path.read_text())
+            validate_artifact("cost_log", persisted)
+            self.assertAlmostEqual(persisted["budget_spent_usd"], 1.20)
+
+    # ---- Workstream D acceptance: the cap arithmetic the six new manifests
+    # ---- document, and the all-$0 ceremony D0 ruled safe ----
+
+    @staticmethod
+    def _manifest_orchestration(pipeline: str) -> dict:
+        """The live `orchestration:` block of a pipeline manifest.
+
+        Read at test time on purpose (no rate literals below): editing
+        `budget_per_output_minute_usd` in the manifest must flip these
+        tests rather than leave a stale copy of the number passing here.
+        """
+        import yaml
+
+        raw = yaml.safe_load(
+            (ROOT / "pipeline_defs" / f"{pipeline}.yaml").read_text(encoding="utf-8")
+        )
+        return raw["orchestration"]
+
+    @staticmethod
+    def _documented_cap_usd(
+        flat_usd: float, rate_usd: float, output_minutes: float
+    ) -> float:
+        """The default gate cap exactly as the D skills document it:
+        `max(budget_default_usd, budget_per_output_minute_usd x output_minutes)`.
+        The flat figure is a floor, never a ceiling."""
+        return max(flat_usd, round(rate_usd * output_minutes, 2))
+
+    def test_localization_dub_cap_scales_per_localized_minute(self) -> None:
+        """D1.1: localization-dub bills per LOCALIZED minute — source duration
+        x language count — so a 2-language run of a 5-minute source is capped
+        on 10 output minutes, not 5. Rates come from the live manifest."""
+        orchestration = self._manifest_orchestration("localization-dub")
+        flat_usd = orchestration["budget_default_usd"]
+        rate_usd = orchestration["budget_per_output_minute_usd"]
+
+        source_minutes = 5.0
+
+        # The language multiplier IS the semantics under test.
+        two_language_minutes = source_minutes * 2
+        self.assertEqual(two_language_minutes, 10.0)
+        one_language_minutes = source_minutes * 1
+
+        cap_two = self._documented_cap_usd(flat_usd, rate_usd, two_language_minutes)
+        cap_one = self._documented_cap_usd(flat_usd, rate_usd, one_language_minutes)
+
+        # At the manifest's live rate the per-minute branch wins for two
+        # languages (so the cap tracks the extra language)...
+        self.assertGreater(cap_two, flat_usd)
+        self.assertAlmostEqual(cap_two, round(rate_usd * two_language_minutes, 2))
+        # ...and the flat floor wins for one, which is what keeps a short
+        # single-language dub from being capped below workable.
+        self.assertAlmostEqual(cap_one, flat_usd)
+        self.assertGreater(cap_one, round(rate_usd * one_language_minutes, 2))
+
+        # Adding the second language raised the cap: the multiplier is live,
+        # not decorative.
+        self.assertGreater(cap_two, cap_one)
+
+    def test_podcast_output_minutes_sum_across_deliverables(self) -> None:
+        """D1.2: podcast-repurpose caps on the SUM of every deliverable's
+        runtime — 6 clips x 0.5 min plus a 12-minute companion is 15 output
+        minutes, not 12 and not 3. Rates come from the live manifest."""
+        orchestration = self._manifest_orchestration("podcast-repurpose")
+        flat_usd = orchestration["budget_default_usd"]
+        rate_usd = orchestration["budget_per_output_minute_usd"]
+
+        clip_count = 6
+        clip_minutes = 0.5
+        companion_minutes = 12.0
+
+        output_minutes = clip_count * clip_minutes + companion_minutes
+        self.assertEqual(output_minutes, 15.0)
+
+        cap = self._documented_cap_usd(flat_usd, rate_usd, output_minutes)
+
+        # The summed-deliverable branch wins over the flat floor at the
+        # manifest's live rate.
+        self.assertGreater(cap, flat_usd)
+        self.assertAlmostEqual(cap, round(rate_usd * output_minutes, 2))
+
+        # Counting only the companion — the drift this locks out — would
+        # under-cap the run by the whole clip set.
+        companion_only_cap = self._documented_cap_usd(
+            flat_usd, rate_usd, companion_minutes
+        )
+        self.assertLess(companion_only_cap, cap)
+
+    def test_zero_estimate_plan_arms_and_reconciles_clean(self) -> None:
+        """D0's load-bearing ruling, executed: the FULL ledger ceremony on a
+        pipeline that cannot spend (clip-factory: every tool prices $0) is
+        safe. Same arming formula, same approve/estimate/reserve/reconcile
+        blocks, all-$0 data — no exception, no phantom spend, no entry left
+        holding budget, and a schema-valid cost_log on disk. If any of this
+        raised, D1.6's `$0` compose snapshot would be unprovable."""
+        import tempfile
+        from pathlib import Path
+
+        orchestration = self._manifest_orchestration("clip-factory")
+        budget_cap_usd = orchestration["budget_default_usd"]
+        # D1.6: the rate key is deliberately absent — no paid tools to scale.
+        self.assertNotIn("budget_per_output_minute_usd", orchestration)
+
+        reserve_pct = OpenMontageConfig.load().budget.reserve_pct
+
+        # The clip-factory shape: one batched line item per tool batch,
+        # each priced $0.00 — never one entry per clip.
+        plan = [
+            ("subtitle_gen", "subtitles x 12 clips", 0.0),
+            ("audio_enhance", "enhance x 12 clips", 0.0),
+            ("video_compose", "render x 12 clips", 0.0),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=None,
+                reserve_pct=reserve_pct,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+
+            # C1's canonical arming, run on an all-$0 plan: min_workable_usd
+            # is the bare +$0.01, so the manifest's flat cap wins and the
+            # gross-up branch is provably inert rather than degenerate.
+            tracker.budget_total_usd = self._documented_arming_total(
+                [estimated_usd for _, _, estimated_usd in plan],
+                budget_cap_usd,
+                reserve_pct,
+            )
+            self.assertAlmostEqual(tracker.budget_total_usd, budget_cap_usd, places=6)
+
+            for tool, operation, estimated_usd in plan:
+                tracker.approve_tool(tool)
+                entry_id = tracker.estimate(tool, operation, estimated_usd)
+                tracker.reserve(entry_id, user_approved=True)
+                tracker.reconcile(entry_id, estimated_usd, success=True)
+
+            self.assertEqual(tracker.cost_snapshot()["total_spent_usd"], 0.0)
+            self.assertEqual(tracker.cost_snapshot()["total_reserved_usd"], 0.0)
+            self.assertEqual(tracker.non_terminal_entries(), [])
+            self.assertEqual(len(tracker.entries), len(plan))
+            for entry in tracker.entries:
+                self.assertEqual(entry["status"], "completed")
+                self.assertEqual(entry["actual_usd"], 0.0)
+                self.assertNotIn("budget_warning", entry)
+
+            persisted = json.loads(log_path.read_text())
+            self.assertEqual(persisted["budget_spent_usd"], 0.0)
+            self.assertEqual(
+                [entry["status"] for entry in persisted["entries"]],
+                ["completed"] * len(plan),
+            )
             validate_artifact("cost_log", persisted)
 
 

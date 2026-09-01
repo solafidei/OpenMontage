@@ -84,7 +84,7 @@ Before rendering, present the user with audio options and get their preferences.
    - Use 2.0-2.5 words/sec for documentary, 2.5-3.0 for energetic
    - Verify word count before generating TTS
 
-2. **Generate TTS narration** — this is a paid call, so estimate and reserve before it runs, then reconcile with the actual cost the tool result reports (fall back to the estimate if the tool reports zero):
+2. **Generate TTS narration** — this is a paid call, so estimate and reserve before it runs, then reconcile with the actual cost the tool result reports (reconcile per the booking rule below — estimates never substitute for failed-call costs):
    ```python
    from tools.audio.openai_tts import OpenAITTS
    from tools.cost_tracker import CostTracker
@@ -96,8 +96,13 @@ Before rendering, present the user with audio options and get their preferences.
        'instructions': '<voice direction matching video tone>',
        'output_path': 'path/to/narration.mp3',
    }
-   estimated_usd = OpenAITTS().estimate_cost(tts_inputs)
-   entry_id = tracker.estimate("openai_tts", "narration", estimated_usd)
+   estimated_usd = OpenAITTS().estimate_cost(tts_inputs)  # price from the concrete tool
+   # Ledger keys on the PLAN's line-item name: proposal Step 6 plans narration
+   # as "tts_selector", and that is the name Step 9's approve_tool armed. The
+   # concrete provider lives in the operation string and the decision_log
+   # provider_selection entry — see checkpoint-protocol.md, Cost Ledger
+   # Governance.
+   entry_id = tracker.estimate("tts_selector", "narration via openai_tts", estimated_usd)
    # user_approved=True because this call fulfills a line item the user saw and
    # approved at the proposal gate; omit it for anything outside the approved
    # plan and escalate a tripped guard as a structured blocker.
@@ -106,8 +111,27 @@ Before rendering, present the user with audio options and get their preferences.
    result = OpenAITTS().execute(tts_inputs)
    # CRITICAL: Check result.data['audio_duration_seconds'] vs video duration
    # If narration exceeds video by >1s: shorten script and regenerate
-   tracker.reconcile(entry_id, result.cost_usd or estimated_usd, success=result.success)
+
+   # Book what actually happened, never what was hoped.
+   reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+   if result.success:
+       # A positive report is authoritative. 0.0 on success is ambiguous
+       # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+       # book the estimate as the best available record — and say so when you
+       # present the stage's cost snapshot.
+       actual_usd = reported if reported > 0 else estimated_usd
+   else:
+       # A failed call books only what the tool says was charged — almost
+       # always $0.00. NEVER substitute the estimate on failure:
+       # budget_spent_usd counts FAILED entries as well as completed ones
+       # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+       # spend that shrinks usable budget and can block the real retry in cap
+       # mode.
+       actual_usd = reported
+   tracker.reconcile(entry_id, actual_usd, success=result.success)
    ```
+
+   **Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
 
 3. **Download background music** (same estimate → `reserve(entry_id, user_approved=True)` → reconcile discipline, for the same reason as the narration call above; refund the reservation with `tracker.refund(entry_id)` if the download is skipped or cancelled):
    ```python
@@ -142,6 +166,19 @@ Before rendering, present the user with audio options and get their preferences.
      "captions": [ ... word-level captions from WhisperX ... ]
    }
    ```
+
+### Ledger Round-Trip For The Render
+
+The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state. One batched entry covers the whole render, however many Remotion/FFmpeg passes it takes:
+
+```python
+entry_id = tracker.estimate("video_compose", "render", 0.0)
+tracker.reserve(entry_id, user_approved=True)
+# ... run the render (Step 4) ...
+tracker.reconcile(entry_id, 0.0, success=True)   # success=False if the render failed
+```
+
+This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent. Any paid post pass actually run (`audio_enhance`, a paid upscale) gets its own round trip under its plan line-item name, booked with the same rule as the narration call above.
 
 ### Step 3: Prepare Render Inputs
 
@@ -191,7 +228,7 @@ If using Remotion for animated segments:
 2. Call `video_compose` with `operation: "remotion_render"` for animated segments
 3. Assemble Remotion outputs with remaining segments via FFmpeg
 
-**Cost tracking the render itself:** the render is a local, $0-API-cost operation — see `skills/core/remotion.md` / `skills/core/hyperframes.md` § Cost Tracking for the estimate/reserve/reconcile pattern (`reserve` is always `0`; `reconcile` records wall-clock render time). Round-trip it through the same tracker so the persisted `cost_log` leaves no entry in `estimated`/`reserved` state — the compose stage's success criteria checks this.
+**Cost tracking the render itself:** the render is a local, $0-API-cost operation — see `skills/core/remotion.md` / `skills/core/hyperframes.md` § Cost Tracking for the estimate/reserve/reconcile pattern (`reserve` is always `0`; `reconcile` records wall-clock render time). Round-trip it through the same tracker so the persisted `cost_log` leaves no entry in `estimated`/`reserved` state — the compose stage's success criteria checks this. The exact calls are in § Ledger Round-Trip For The Render above; do not open a second entry for the same render.
 
 **Zero-key Remotion render (component-only videos):**
 When all scenes are Remotion component types (hero_title, stat_card, bar_chart, line_chart,

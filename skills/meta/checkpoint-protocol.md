@@ -211,11 +211,52 @@ If `next_stage` is not the first stage:
    If `current_cp` exists and its status is `"in_progress"`, inform the human you are resuming from the middle of the stage.
 3. **Load artifacts**: Load prior artifacts from checkpoints for context. If resuming from `"in_progress"`, first load any schema-valid partial artifact from `current_cp["artifacts"]`. If the partial data is stored in `current_cp["metadata"]["partial_progress"]`, use that draft data and its completion markers (such as `completed_scene_ids`) to skip sub-tasks that are already done.
 4. **Continue**: Continue generation from the next successful step, appending to the partial artifact.
+5. **Sweep the ledger** — see Cost Ledger Governance below.
 
 If a checkpoint exists with status `"awaiting_human"`:
 1. Inform the human: "Stage [name] is awaiting your approval"
 2. Present the checkpoint data for review
 3. Wait for approval before proceeding
+
+### Cost Ledger Governance (shared)
+
+<!-- SYNC: tools/cost_tracker.py recovery API -->
+
+Every stage of every pipeline shares ONE ledger per project — `projects/<project_id>/artifacts/cost_log.json`, opened with `CostTracker.for_project(project_id)`. The rules below are identical in every pipeline; stage director skills point here instead of restating them.
+
+**One name per line of spend, end to end.** Every `tracker.estimate` / `approve_tool` / `reserve` for the same line of work uses the tool name **exactly as it appears in the approved plan's `cost_estimate` line items** — that is what the gate's `approve_tool` loop armed, and the first-paid-use guard compares raw tool-name strings (`CostTracker.reserve`). If the plan named a selector (`tts_selector`), the executing stage books under the selector name even when it invokes a concrete provider directly or the selector routes to one — record the concrete provider in the `operation` string (e.g. `"narration via openai_tts"`) and in the run's `decision_log` `provider_selection` entry. If the plan named a concrete tool (`talking_head`), book under that name. Introducing a new tool name at spend time trips the guard **by design** — that is a structured blocker to escalate, never a cue to rename or self-`approve_tool` around it.
+
+**Book what actually happened, never what was hoped.** Every spending director carries the canonical estimate → reserve → reconcile booking block under its own "Ledger Discipline For Every Paid Call" heading. Read it there and follow it verbatim. Its two load-bearing rules: a FAILED call books only what the tool reports was charged (never the estimate — `CostTracker.budget_spent_usd` counts failed entries, so a substituted estimate is phantom spend that shrinks usable budget and can block the real retry in cap mode), and a success reporting `0.0` on an entry estimated as paid books the estimate, unless the routed provider is known-free, in which case `0.0` is the actual cost.
+
+**Stranded entries.** A crash between `reserve()` and `reconcile()` leaves an entry in `reserved` with no owner — it silently eats `usable_budget_usd` for the rest of the run. A crash between `estimate()` and `reserve()` leaves an `estimated` orphan — it holds no budget, but both shapes guarantee the compose-stage "every entry in a terminal state" criterion fails. On resume (Step 7), after determining `next_stage`, open the tracker and check:
+
+```python
+tracker = CostTracker.for_project(project_id)
+stranded = tracker.non_terminal_entries()   # estimated AND reserved orphans
+```
+
+For each stranded entry:
+
+1. **Escalate, don't guess** — surface a structured blocker (AGENT_GUIDE.md → "Escalate Blockers Explicitly"): tool, operation, reserved amount, timestamp. Never resolve a stranded entry automatically.
+2. **Establish billing truth**: check the call's declared `output_path` on disk (a finished artifact usually means the charge landed), the interrupted stage's `metadata.partial_progress`, and — if the user can — the provider dashboard.
+3. **Resolve** (the rules in `CostTracker.non_terminal_entries()`'s own docstring are the authority):
+   - output exists on disk, or the provider confirmed the charge → `tracker.reconcile(entry_id, known_actual_usd_or_the_entrys_estimated_usd, success=True)` — `success=False` if the output is unusable;
+   - the provider confirmed no charge, or the call never fired → `tracker.refund(entry_id)`;
+   - unknowable → reconcile at the estimate with `success=False` (`tracker.reconcile(entry_id, entry["estimated_usd"], success=False)`) — overstating spend is the safe direction for a budget guard.
+   An `estimated` orphan was never executed → `tracker.refund(entry_id)` (placeholder hygiene, the same rule the proposal/idea gate applies to its own seeded entries), then re-plan the work as a fresh estimate → reserve → reconcile round trip if it is still wanted. Never hand-edit `cost_log.json`.
+4. **Log the ruling** as a `decision_log` entry — `category: "budget_tradeoff"`, `subject: "stranded reservation <entry_id>"` — so the audit trail records who decided the stranded money's fate and why.
+
+Never leave a `reserved` entry in place "to be safe": it mis-states both budget and the terminal-state criterion in one move.
+
+**Someone already resolved it.** A mutator on an entry that has *already* reached a
+terminal state raises `EntryAlreadyTerminalError` — the guard against two resolvers
+racing the same orphan and silently overwriting each other's ruling. It is not a
+failure to route around: re-read the ledger, **accept the record the first resolver
+wrote**, and bill any new work against a **new** `estimate()` entry. Never pass
+`force=True` to "retry" a settled entry — the override exists for a deliberate,
+logged correction, not for losing a race.
+
+**Corrupt ledger.** A corrupt `cost_log.json` raises `CostLogCorruptedError`; its message carries the full recovery call (`CostTracker.reconstruct_from_snapshot`) — follow it, and never delete the ledger or start a fresh one by hand.
 
 ### Sample Checkpoint (Reference-Driven Productions)
 

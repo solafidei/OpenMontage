@@ -69,15 +69,37 @@ from tools.cost_tracker import CostTracker
 
 tracker = CostTracker.for_project(project_id)  # same ledger the idea director opened
 
-inputs = {"prompt": brief["music_plan"]["prompt_seed"]}
+inputs = {
+    "prompt": brief["music_plan"]["prompt_seed"],
+    "duration_seconds": brief["duration_seconds"],  # required — estimate_cost raises without it
+    "output_path": f"projects/{project_id}/assets/music/score_bed.mp3",
+}
 estimated_usd = music_gen.estimate_cost(inputs)
 entry_id = tracker.estimate("music_gen", "score_bed", estimated_usd)
 tracker.reserve(entry_id, user_approved=True)  # this call fulfills the music_plan approved at idea
 
 result = music_gen.execute(inputs)
-actual_usd = result.cost_usd or estimated_usd  # fall back to the estimate if the tool reports $0
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
 tracker.reconcile(entry_id, actual_usd, success=result.success)
 ```
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
 
 `user_approved=True` is for approved-plan work only — omit it for anything outside the plan the user approved at the idea gate (a second generation attempt beyond the sample, an ad hoc paid search tier); that should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the call never runs (sample rejected), call `tracker.refund(entry_id)`. Free retrieval calls (`direct_clip_search`, `corpus_builder`, `clip_search`) still get the same round-trip with `0.0` so every entry lands in a terminal state before compose checks the ledger.
 

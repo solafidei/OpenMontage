@@ -24,7 +24,7 @@ Phase 1 deferred from HyperFrames. `edit_decisions.render_runtime` must be `"rem
 
 ## Process
 
-### 0b. Cost Track The Render
+### 0b. Ledger Round-Trip For The Render
 
 The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state: `entry_id = tracker.estimate("video_compose", "render", 0.0)`, `tracker.reserve(entry_id, user_approved=True)`, then `tracker.reconcile(entry_id, 0.0, success=True)` once the render finishes (`success=False` if it failed). This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent.
 
