@@ -28,6 +28,11 @@ Use `character_spec_generator` for structured drafts. Use `image_selector` only
 after the visual style and character sheet requirements are explicit. Before
 using image generation, read the tool's Layer 3 skills from the registry.
 
+`image_selector` calls here are paid spend under the approved plan — run the full
+Ledger Discipline round trip (see asset-director → Ledger Discipline For Every Paid
+Call) before generating character sheets; this stage's manifest criterion requires a
+ledger entry for every paid call made here.
+
 ## Quality Bar
 
 A character design is ready only when an animator or tool can infer what parts,

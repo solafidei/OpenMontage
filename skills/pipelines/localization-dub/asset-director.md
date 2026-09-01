@@ -11,6 +11,7 @@ This stage produces the localized asset kit: translated subtitle files, dubbed a
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Language plan and transcript package |
 | Tools | `tts_selector`, `subtitle_gen`, `lip_sync`, `audio_enhance` — `tts_selector` auto-discovers all available TTS providers from the registry | Dubbed audio, subtitle, and optional lip-sync production |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director already wrote to |
 | Playbook | Active style playbook | Subtitle and replacement-text rules |
 
 ## Process
@@ -28,6 +29,46 @@ Before batch asset generation:
 4. Wait for approval before proceeding to batch generation
 
 This prevents the most expensive mistake: generating 10+ dubbed assets in a direction the user doesn't like.
+
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. `tts_selector` is the only paid tool on this stage; `subtitle_gen`, `lip_sync` and `audio_enhance` are local/free. Every call — paid or free — runs the full estimate → reserve → reconcile round trip.
+
+Book ONE entry per target language, keyed by the PLAN's line-item name (`tts_selector`), never the concrete provider the selector routes to — the provider belongs in the operation string, alongside the locale, so the entry matches the per-language line item armed at the idea gate:
+
+```python
+lang = "es"  # repeat this round trip once per target language
+inputs = {"text": translated_script_by_language[lang], "language": lang}
+estimated_usd = tts_selector.estimate_cost(inputs)
+entry_id = tracker.estimate("tts_selector", "dub_es via azure_tts", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills the per-language dub line item approved at idea
+
+result = tts_selector.execute(inputs)
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate. **A language added mid-run has no line item at all**, so its first dub call trips the first-paid-use guard: that is the guard working as designed. Do not reserve around it — surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly" and take the language back to the idea gate. If a reservation is made but the call never runs (the hero sample is rejected), call `tracker.refund(entry_id)`.
+
+Free/local tools still get the same round trip with `0.0`, batched — one entry per logical batch, not one per artifact: `tracker.estimate("subtitle_gen", "subtitles x 2 locales", 0.0)` and, when lip sync actually runs, `tracker.estimate("lip_sync", "lip_sync x 6 shots", 0.0)`, each reserved and reconciled the same way so no entry reaches compose in `estimated`/`reserved` state.
 
 ### 2. Generate Dubbed Audio Per Language
 

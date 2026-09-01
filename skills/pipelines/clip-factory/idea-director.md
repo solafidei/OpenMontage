@@ -89,6 +89,60 @@ Recommended metadata keys:
 - `known_visual_constraints`
 - `distribution_goal`
 
+### 5b. Compute Budget And Seed The Cost Ledger
+
+This is the approval gate — nothing downstream spends until the user approves it. Compute the default budget cap from the pipeline manifest's `orchestration` block (`pipeline_defs/clip-factory.yaml`), not from `config.yaml`'s flat global total — the manifest is what the gate's cap must come from:
+
+```python
+import yaml
+from tools.cost_tracker import CostTracker
+
+manifest = yaml.safe_load(open("pipeline_defs/clip-factory.yaml"))["orchestration"]
+
+# No `budget_per_output_minute_usd` on this manifest, and none is wanted: clip-factory
+# exposes zero paid tools (`subtitle_gen`, `audio_enhance`, `video_compose`,
+# `video_trimmer`, `audio_mixer`, `color_grade` all price $0.00), so a per-minute rate
+# would scale a ceiling for spend that cannot occur. The flat default is pure headroom.
+default_budget_cap_usd = manifest["budget_default_usd"]         # $1.00 flat
+
+tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
+```
+
+Itemize the tool batches that will actually be called (`subtitle_gen` for the per-clip subtitle set, `audio_enhance` for the batch audio normalization pass) and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each — one entry per tool batch, never one per clip. Every figure here is `0.00`, and that is the point: the gate presents an explicit `TOTAL ESTIMATED $0.00 of $1.00` rather than silence, and `cost_log.json` proves the $0 rather than merely failing to record it. Record the total as `metadata.cost_estimate` and the cap as `metadata.budget_cap_usd`.
+
+**On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True`): arm the tracker with what was actually approved and clear this step's placeholders.
+
+```python
+import math
+
+# 1. The approved budget figure becomes the tracker's budget total.
+#    A figure the user NAMED is used verbatim — their word is the cap.
+#    A bare "approve" approves the plan AS PRESENTED at the gate: the
+#    estimate within the default cap. Arm with that cap, floored at the
+#    estimate grossed up past the reserve holdback. Arming with the bare
+#    estimate leaves zero headroom: usable budget tops out at
+#    (1 - reserve_pct) x total, so the plan's FINAL reservation would need
+#    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
+#    the tracker (config's budget.reserve_pct via for_project); never
+#    hardcode 0.10.
+total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
+min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
+tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)
+for tool_name in {li["tool"] for li in metadata["cost_estimate"]["line_items"]}:
+    tracker.approve_tool(tool_name)
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])
+```
+
+On an all-$0 clip-factory plan `min_workable_usd` lands at $0.01 and the `max()` is inert — the line stays verbatim anyway. Uniformity with every other pipeline is the drift guard; a "lite" spelling here is how the two versions diverge.
+
+> **If the user's named figure is below `min_workable_usd`, say so at this gate** — the reserve holdback guarantees the guard blocks the plan's final approved item. Ask the user to raise the figure or trim the plan. Never silently arm a total the guard is certain to trip on.
+
+Downstream stages must book under these exact names — see `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance.
+
+The asset director creates and reserves its OWN entry at the moment it actually runs a batch, passing `user_approved=True` because that call fulfills a line item approved here. Anything outside this plan still trips `ApprovalRequiredError` — surface it per AGENT_GUIDE.md → "Escalate Blockers Explicitly" rather than reserving around it.
+
 ### 6. Quality Gate
 
 - the clip count target is realistic,

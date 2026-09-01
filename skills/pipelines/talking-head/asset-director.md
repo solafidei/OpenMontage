@@ -26,6 +26,45 @@ Before batch asset generation:
 
 This prevents the most expensive mistake: generating 10+ assets in a direction the user doesn't like.
 
+### Step 0b: Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. For every paid call (`image_selector` is the only paid tool on this pipeline), run the full estimate → reserve → reconcile round trip:
+
+```python
+# One entry covers the whole overlay batch (image_selector takes one prompt per call).
+overlay_inputs = [{"prompt": p} for p in overlay_prompts]          # 4 planned overlays
+estimated_usd = sum(image_selector.estimate_cost(i) for i in overlay_inputs)
+entry_id = tracker.estimate("image_selector", "overlay_graphics x 4", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills the overlay plan approved at idea
+
+results = [image_selector.execute(i) for i in overlay_inputs]
+batch_success = all(r.success for r in results)
+
+# Book what actually happened, never what was hoped.
+reported = sum(r.cost_usd or 0.0 for r in results)   # ToolResult defaults cost_usd to 0.0
+if batch_success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=batch_success)
+```
+
+**One entry per batch, not per artifact.** The whole overlay set is one `image_selector` batch, so it gets ONE round trip named for the set (`"overlay_graphics x 4"`), not four. The same rule makes the free tools cheap to record: `subtitle_gen` and `audio_mixer` are local, so book one `0.00` round trip per logical batch (e.g. `tracker.estimate("subtitle_gen", "subtitles x 1 track", 0.0)`) — every planned call still lands in a terminal state before compose.
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate (extra overlays beyond the planned set); that call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the call never runs (hero sample rejected), call `tracker.refund(entry_id)`.
+
 ### Step 1: Generate Subtitles
 
 Use the transcription data from the script stage to create:

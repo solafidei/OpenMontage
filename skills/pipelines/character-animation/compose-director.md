@@ -43,6 +43,37 @@ When Playwright is available:
 When Playwright is unavailable, use static artifact checks and FFmpeg frame
 sampling, and report the reduced confidence.
 
+## Ledger Round-Trip For The Render
+
+The render itself is a local, $0-API-cost operation — `character_rig_renderer`,
+`video_compose`, `audio_mixer` and `character_animation_reviewer` are all free.
+Round-trip it through the same tracker so `cost_log.json` leaves no entry in
+`estimated`/`reserved` state. Open the project's tracker here rather than
+assuming one is in scope — `tracker = CostTracker.for_project(project_id)`
+reopens the same `projects/<project_id>/artifacts/cost_log.json` the proposal
+director seeded and the asset director already wrote to, and it is what carries
+the gate-approved cap into this stage's checkpoint (an unopened tracker reports
+config's default budget instead). ONE batched entry covers the whole render,
+however many renderer, reviewer and Remotion/HyperFrames passes it takes:
+
+```python
+from tools.cost_tracker import CostTracker
+
+tracker = CostTracker.for_project(project_id)  # same ledger the proposal director opened
+
+entry_id = tracker.estimate("video_compose", "render", 0.0)
+tracker.reserve(entry_id, user_approved=True)
+# ... run the Review Workflow above: rig render, reviewer, final video_compose ...
+tracker.reconcile(entry_id, 0.0, success=True)   # success=False if the render failed
+```
+
+This is what the compose stage's cost_log success criterion checks — every entry in
+a terminal state with totals matching what the run actually spent. Any paid post
+pass actually run (a paid upscale, a re-generated audio bed) gets its own round trip
+under its plan line-item name, booked with the same rule as the asset-director's
+paid calls. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for
+the shared rules.
+
 ## Quality Bar
 
 Do not present the output as complete when `character_qa_report.status` is

@@ -11,6 +11,7 @@ This stage builds the reusable kit for podcast-derived video assets: subtitles, 
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Deliverable plan and transcript truth |
 | Tools | `subtitle_gen`, `image_selector`, `diagram_gen`, `music_gen`, `audio_enhance` | Asset generation |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director already wrote to |
 | Playbook | Active style playbook | Brand consistency |
 
 ## Process
@@ -33,6 +34,51 @@ Before batch asset generation:
 4. Wait for approval before proceeding to batch generation
 
 This prevents the most expensive mistake: generating 10+ assets in a direction the user doesn't like.
+
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. Most of this stage is free: `subtitle_gen`, `audio_enhance` and the template work are local and cost $0. The paid calls are `music_gen` clip beds and `image_selector` quote/speaker cards. For every paid call, run the full estimate → reserve → reconcile round trip:
+
+```python
+from tools.cost_tracker import CostTracker
+
+tracker = CostTracker.for_project(project_id)  # same ledger the idea director opened
+
+inputs = {
+    "prompt": bed["prompt_seed"],
+    "duration_seconds": bed["duration_seconds"],  # required — music_gen.estimate_cost raises without it
+    "output_path": f"projects/{project_id}/assets/music/clip_bed_hook_1.mp3",
+}
+estimated_usd = music_gen.estimate_cost(inputs)
+entry_id = tracker.estimate("music_gen", "clip_bed_hook_1", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills the deliverable mix approved at idea
+
+result = music_gen.execute(inputs)
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+Card work batches: one entry per same-tool batch, not one per artifact — `entry_id = tracker.estimate("image_selector", "quote_cards x 6", estimated_usd)`, reserve it, then reconcile once the batch lands, booking with the same success/failure rule as above.
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate (a bed for a clip that was not in the approved deliverable mix); that call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the call never runs (the hero sample is rejected), call `tracker.refund(entry_id)`. Free/local tools (`subtitle_gen`, `audio_enhance`) still get the same round-trip with `0.0` — one batched entry per logical batch, e.g. `tracker.estimate("subtitle_gen", "subtitles x 6 clips + companion", 0.0)` — so every entry lands in a terminal state before compose.
 
 ### 2. Treat Topic Graphics As Optional
 

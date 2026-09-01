@@ -11,6 +11,7 @@ This stage builds the shared visual and audio kit for the entire clip batch. The
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Clip plans and rankings |
 | Tools | `subtitle_gen`, `audio_enhance` | Batch-ready subtitles and audio cleanup |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director already wrote to |
 | Playbook | Active style playbook | Subtitle and overlay consistency |
 
 ## Process
@@ -34,6 +35,42 @@ Before batch asset generation:
 4. Wait for approval before proceeding to batch generation
 
 This prevents the most expensive mistake: generating 10+ assets in a direction the user doesn't like.
+
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. Every tool this stage runs (`subtitle_gen`, `audio_enhance`) is local and prices $0.00, and every one of them still gets the full estimate → reserve → reconcile round trip. The lightening on this pipeline is in the DATA, not the protocol: book **one entry per tool batch across the whole clip set**, never one per clip.
+
+```python
+# ONE entry for the whole subtitle batch — not one per clip.
+inputs = {"segments": clip_segments, "format": "srt", "output_path": subtitle_dir}
+estimated_usd = subtitle_gen.estimate_cost(inputs)          # 0.0 — local tool
+entry_id = tracker.estimate("subtitle_gen", "subtitles x 12 clips", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this batch fulfills the plan approved at idea
+
+result = run_subtitle_batch(inputs)   # the whole batch, all clips
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. Every tool on this manifest is such a route, so every entry here reconciles at `0.00`. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate. That call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the batch never runs (hero sample rejected), call `tracker.refund(entry_id)`. A batch that fails outright still reconciles — with `success=False` — so no entry reaches compose in `estimated`/`reserved` state.
 
 ### 2. Generate Per-Clip Subtitles
 

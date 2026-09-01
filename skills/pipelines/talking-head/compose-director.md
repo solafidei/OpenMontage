@@ -19,6 +19,7 @@ Phase 1 deferred from HyperFrames. `edit_decisions.render_runtime` must be `"rem
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | Edit decisions, Asset manifest | Render inputs |
 | Tools | `video_compose`, `audio_mixer` | Rendering |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea and asset directors already wrote to |
 | Media profiles | `lib/media_profiles.py` | Output format |
 
 ## Process
@@ -416,6 +417,19 @@ video_compose.execute({
     "audio_bitrate": "192k",
 })
 ```
+
+### Step 6b: Ledger Round-Trip For The Render
+
+The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state. One batched entry covers the whole render, however many FFmpeg/Remotion passes it takes:
+
+```python
+entry_id = tracker.estimate("video_compose", "render", 0.0)
+tracker.reserve(entry_id, user_approved=True)
+# ... run the enhancement chain, the mix, and the final encode (Step 6) ...
+tracker.reconcile(entry_id, 0.0, success=True)   # success=False if the render failed
+```
+
+The whole enhancement chain on this pipeline is local — `face_enhance`, `eye_enhance`, `color_grade`, `auto_reframe`, `audio_enhance`, `remotion_caption_burn`, `video_stitch`, `visual_qa` all cost $0 — so fold every pass actually run into this one batched entry rather than opening an entry each. This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent. Any paid post pass actually run (a paid upscale, a paid re-voice) gets its own round trip under its plan line-item name, booked with the same rule the asset director uses.
 
 ### Step 7: Visual QA
 

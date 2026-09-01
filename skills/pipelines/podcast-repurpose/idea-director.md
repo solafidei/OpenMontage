@@ -78,6 +78,78 @@ Use `brief.metadata` for the richer podcast-specific contract:
 - `brand_assets_available`
 - `full_episode_companion_feasible`
 
+### 5b. Compute Budget And Seed The Cost Ledger
+
+This is the approval gate — nothing downstream spends until the user approves it. Compute the default budget cap from the pipeline manifest's `orchestration` block (`pipeline_defs/podcast-repurpose.yaml`), not from `config.yaml`'s flat global total — the manifest is what lets budget scale with how much output the deliverable mix actually produces:
+
+```python
+import yaml
+from tools.cost_tracker import CostTracker
+
+manifest = yaml.safe_load(open("pipeline_defs/podcast-repurpose.yaml"))["orchestration"]
+flat_default = manifest["budget_default_usd"]                   # $1.00 floor
+per_minute_rate = manifest.get("budget_per_output_minute_usd")  # $0.30/min
+
+# OUTPUT minutes, summed across the whole deliverable mix — every clip plus
+# the full-episode companion if one is planned. NOT the source runtime, and
+# NOT any single deliverable: a 60-minute episode cut into six 30-second
+# clips is 3 output minutes of clips, not 60.
+target_minutes = sum(d["count"] * d["runtime_minutes"] for d in deliverable_mix)
+default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
+
+tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
+```
+
+Six 30-second clips plus a 12-minute companion computes `6 clips x 0.5 min + 12 min companion = 15 output min` → `max($1.00, $0.30 x 15) = max($1.00, $4.50) = $4.50` — show that sum at the approval gate, not just the final number. If the user trims the clip count or drops the companion at the gate, recompute the sum from the APPROVED plan's minutes, never the pitch's.
+
+Seed one entry per planned paid call. The paid profile here is narrow: `music_gen` beds (one line item per planned bed) and `image_selector` quote/speaker cards (unit cost x count). The podcast audio is content already in hand, so there is no TTS and no video generation. `subtitle_gen`, `audio_enhance` and `transcriber` are local/free — they still get a `0.0` entry, one per logical batch, so every entry starts in a terminal-reachable state:
+
+```python
+for bed in music_plan["beds"]:  # one line item per planned bed
+    bed_inputs = {
+        "prompt": bed["prompt_seed"],
+        "duration_seconds": bed["duration_seconds"],  # required — music_gen.estimate_cost raises without it
+    }
+    tracker.estimate("music_gen", f"clip_bed_{bed['clip_id']}", music_gen.estimate_cost(bed_inputs))
+
+card_inputs = {"query": card_style_seed, "count": card_count}   # quote + speaker cards across the mix
+tracker.estimate("image_selector", f"quote_cards x {card_count}", image_selector.estimate_cost(card_inputs))
+tracker.estimate("subtitle_gen", f"subtitles x {deliverable_count}", 0.0)
+```
+
+Record `metadata.cost_estimate` (itemized) and `metadata.budget_cap_usd` on the brief so the on-screen figure and `cost_log.json` agree.
+
+**On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True` — see `skills/meta/checkpoint-protocol.md`): arm the tracker with what was actually approved, and clear the placeholder entries this step seeded.
+
+```python
+import math
+
+# 1. The approved budget figure becomes the tracker's budget total.
+#    A figure the user NAMED is used verbatim — their word is the cap.
+#    A bare "approve" approves the plan AS PRESENTED at the gate: the
+#    estimate within the default cap. Arm with that cap, floored at the
+#    estimate grossed up past the reserve holdback. Arming with the bare
+#    estimate leaves zero headroom: usable budget tops out at
+#    (1 - reserve_pct) x total, so the plan's FINAL reservation would need
+#    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
+#    the tracker (config's budget.reserve_pct via for_project); never
+#    hardcode 0.10.
+total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
+min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
+tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)
+for tool_name in {li["tool"] for li in metadata["cost_estimate"]["line_items"]}:
+    tracker.approve_tool(tool_name)
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])
+```
+
+> **If the user's named figure is below `min_workable_usd`, say so at this gate** — the reserve holdback guarantees the guard blocks the plan's final approved item. Ask the user to raise the figure or trim the plan. Never silently arm a total the guard is certain to trip on.
+
+Downstream stages must book under these exact names — see `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance.
+
+The asset director creates and reserves its OWN entry at the moment it actually spends, passing `user_approved=True` because that call fulfills a line item approved here. Anything outside this plan still trips `ApprovalRequiredError` — surface it per AGENT_GUIDE.md → "Escalate Blockers Explicitly" rather than reserving around it.
+
 ### 6. Quality Gate
 
 - the deliverable mix matches the actual source,

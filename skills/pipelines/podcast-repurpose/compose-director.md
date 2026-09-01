@@ -19,6 +19,7 @@ Phase 1 deferred from HyperFrames. `edit_decisions.render_runtime` must be `"rem
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["edit"]["edit_decisions"]`, `state.artifacts["assets"]["asset_manifest"]` | Output plans and asset paths |
 | Tools | `video_compose`, `audio_mixer` | Rendering and mix control |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea and asset directors already wrote to |
 | Playbook | Active style playbook | Brand consistency |
 
 ## Process
@@ -63,6 +64,19 @@ Recommended metadata keys:
 - `audio_notes`
 - `subtitle_checks`
 - `failed_outputs`
+
+### 6. Ledger Round-Trip For The Render
+
+The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state. One batched entry covers every deliverable render, however many Remotion/FFmpeg passes it takes; open it before Step 1 and close it once Step 4 has verified the outputs:
+
+```python
+entry_id = tracker.estimate("video_compose", "render x 6 clips + companion", 0.0)
+tracker.reserve(entry_id, user_approved=True)
+# ... render every deliverable (Steps 1-4) ...
+tracker.reconcile(entry_id, 0.0, success=True)   # success=False if the render failed
+```
+
+This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent. `audio_mixer`, `video_trimmer` and `audio_enhance` are local and free, so they ride the same batched `$0.00` entry rather than earning one each. Any genuinely paid post pass actually run (a paid upscale, a re-cut music bed) gets its own round trip under its plan line-item name, booked with the same rule as the asset director's paid calls.
 
 ## Common Pitfalls
 

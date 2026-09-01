@@ -52,6 +52,43 @@ Before batch asset generation:
 
 This prevents the most expensive mistake: generating 10+ assets in a direction the user doesn't like.
 
+### 1c. Ledger Discipline For Every Paid Call
+
+Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea director and every other stage share. This sits ahead of the hero sample deliberately: the sample's TTS or card generation is this pipeline's first paid spend. For every paid call (`tts_selector`, `image_selector`), run the full estimate → reserve → reconcile round trip:
+
+```python
+inputs = {"text": narration_text, "voice": chosen_voice}
+estimated_usd = tts_selector.estimate_cost(inputs)
+entry_id = tracker.estimate("tts_selector", "narration via openai_tts", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # this call fulfills the narration line item approved at idea
+
+result = tts_selector.execute(inputs)
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+Book under the name the approved plan used (`tts_selector`, `image_selector`) and put the routed provider in the operation string — never key the entry on the concrete provider name, or the first-paid-use guard trips on approved work.
+
+**Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate (regenerating narration after the brief switched production mode); that call should hit the single-action guard like any unplanned spend, which is the guard working as intended. Surface a tripped guard as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly." If a reservation is made but the call never runs (hero sample rejected), call `tracker.refund(entry_id)`. Free/local tools (`subtitle_gen`, `diagram_gen`, `audio_enhance`) still get the same round-trip with `0.0` so every entry lands in a terminal state before compose — one batched entry per logical batch, not one per artifact (e.g. `tracker.estimate("subtitle_gen", "subtitles x 8 cues", 0.0)`).
+
 ### 2. Generate Subtitles First
 
 Rules:

@@ -12,7 +12,7 @@ default_checkpoint_policy: guided
 orchestration:
   mode: executive-producer
   skill: pipelines/clip-factory/executive-producer
-  budget_default_usd: 1.00
+  budget_default_usd: 1.00  # no per-minute rate: no paid tools in this manifest — re-add budget_per_output_minute_usd if a paid tool is ever added
   max_revisions_per_stage: 3
   max_send_backs: 3
   max_wall_time_minutes: 12
@@ -131,6 +131,7 @@ stages:
     success_criteria:
       - Schema-valid asset_manifest artifact
       - Assets exist for every planned clip
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
 
   - name: edit
     skill: pipelines/clip-factory/edit-director
@@ -184,6 +185,7 @@ stages:
     success_criteria:
       - Schema-valid render_report artifact
       - All clip output files exist and pass ffprobe validation
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent
 
   - name: publish
     skill: pipelines/clip-factory/publish-director
