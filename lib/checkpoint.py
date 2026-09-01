@@ -467,6 +467,46 @@ def _decision_log_path(pipeline_dir: Path, project_id: str) -> Path:
     return pipeline_dir / project_id / "decision_log.json"
 
 
+def _usable_decisions(payload: Any, source: str) -> list[dict[str, Any]]:
+    """The decisions[] entries in ``payload`` carrying a usable decision_id.
+
+    An entry is usable when it is a dict whose "decision_id" is a non-empty
+    string. Anything else — non-dict entries, a decisions value that is not
+    a list, a payload that is not a dict — is skipped with a warning, never
+    raised: decision-log merging must not be able to abort a checkpoint
+    write. Skipped entries are left untouched in their source file (this
+    function never writes), so nothing is destroyed: repair the entry and
+    the next checkpoint write absorbs it.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    decisions = payload.get("decisions") if isinstance(payload, dict) else None
+    if not isinstance(decisions, list):
+        if payload is not None:
+            log.warning(
+                "decision_log merge: %s has no decisions[] list — nothing "
+                "merged from it. Write decision_log through write_checkpoint, "
+                "not by hand.", source,
+            )
+        return []
+    kept: list[dict[str, Any]] = []
+    malformed = 0
+    for d in decisions:
+        did = d.get("decision_id") if isinstance(d, dict) else None
+        if isinstance(did, str) and did:
+            kept.append(d)
+        else:
+            malformed += 1
+    if malformed:
+        log.warning(
+            "decision_log merge: skipped %d malformed entrie(s) in %s (each "
+            "needs a string decision_id). They were left in place — repair "
+            "them and the next checkpoint write absorbs them.",
+            malformed, source,
+        )
+    return kept
+
+
 def _merge_decision_log(
     pipeline_dir: Path, project_id: str, new_log: dict[str, Any]
 ) -> None:
@@ -487,44 +527,94 @@ def _merge_decision_log(
             "decisions": [],
         }
 
-    existing_ids = {d["decision_id"] for d in existing.get("decisions", [])}
-    for decision in new_log.get("decisions", []):
-        if decision.get("decision_id") not in existing_ids:
+    # A code-written canonical log only reaches a broken container shape by
+    # hand-editing. Entry-level damage is tolerated (kept verbatim below);
+    # container-level damage gets a pointed error, not a bare AttributeError.
+    if not isinstance(existing, dict) or not isinstance(
+        existing.get("decisions"), list
+    ):
+        raise CheckpointValidationError(
+            f"{path} is hand-damaged: expected {{\"decisions\": [...]}} — "
+            "restore the container shape; entries inside it are preserved "
+            "verbatim",
+            field="decision_log",
+        )
+
+    # Canonical entries are kept verbatim (a hand-broken entry here is
+    # preserved, not dropped) — only the id set is built defensively, through
+    # the SAME well-formedness definition the side file gets. Filtering on
+    # isinstance(d, dict) alone was not enough: a hand-written decision_id
+    # that is a list or a dict is unhashable, and building the set from it
+    # raised a bare TypeError that aborted the whole checkpoint write — the
+    # crash class this self-heal exists to remove.
+    existing_ids = {d["decision_id"] for d in _usable_decisions(existing, str(path))}
+    for decision in _usable_decisions(new_log, "artifacts['decision_log']"):
+        did = decision["decision_id"]
+        if did not in existing_ids:
             existing["decisions"].append(decision)
-            existing_ids.add(decision["decision_id"])
+            existing_ids.add(did)
 
     # Self-heal a forked audit trail. Nothing in the codebase writes
     # <project>/artifacts/decision_log.json, but an agent hand-writing it
     # bypasses this merge entirely — which is how ask-jess ended up with 11
-    # decisions here and 30 there for 29 hours. Absorb any orphans rather than
-    # letting the canonical log silently disagree with the artifact.
+    # decisions here and 30 there for 29 hours. Absorb any well-formed
+    # orphans (exactly once each) rather than letting the canonical log
+    # silently disagree with the artifact. This file is by definition
+    # hand-written and never schema-validated: it must not be able to
+    # crash a checkpoint write, no matter what it contains.
     artifact_copy = pipeline_dir / project_id / "artifacts" / "decision_log.json"
     if artifact_copy.exists():
         try:
             with open(artifact_copy, encoding="utf-8") as f:
                 side = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
             side = None
-        if isinstance(side, dict):
-            orphans = [
-                d for d in side.get("decisions", [])
-                if d.get("decision_id") not in existing_ids
-            ]
-            if orphans:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "decision_log fork: %d decision(s) existed only in "
-                    "artifacts/decision_log.json and were absorbed. Write "
-                    "decision_log through write_checkpoint, not by hand.",
-                    len(orphans),
-                )
-                for d in orphans:
-                    existing["decisions"].append(d)
-                    existing_ids.add(d["decision_id"])
+            import logging
+            logging.getLogger(__name__).warning(
+                "artifacts/decision_log.json is unreadable (%s) — orphan "
+                "absorption skipped. Write decision_log through "
+                "write_checkpoint, not by hand.", exc,
+            )
+        absorbed = 0
+        for d in _usable_decisions(side, str(artifact_copy)):
+            did = d["decision_id"]
+            if did in existing_ids:
+                continue          # membership re-checked per entry: a
+            existing["decisions"].append(d)   # duplicate side id absorbs once
+            existing_ids.add(did)
+            absorbed += 1
+        if absorbed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "decision_log fork: %d decision(s) existed only in "
+                "artifacts/decision_log.json and were absorbed. Write "
+                "decision_log through write_checkpoint, not by hand.",
+                absorbed,
+            )
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2)
+    # tmp + os.replace: the canonical audit log gets the same crash safety
+    # as the checkpoint itself (write_checkpoint's idiom, this file)
+    # — a truncated decision_log.json would brick every later merge's
+    # json.load and with it every checkpoint write.
+    # The tmp name is unique per writer: every stage of a project merges into
+    # this one file, so a single fixed ".json.tmp" was a shared scratch path —
+    # two stages checkpointing concurrently both wrote it, the first
+    # os.replace consumed it, and the second died with FileNotFoundError,
+    # losing its decision AND aborting its checkpoint write.
+    import os
+    import uuid
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def write_checkpoint(
