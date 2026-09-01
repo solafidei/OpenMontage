@@ -1,7 +1,7 @@
 # Spec: gate-anchored compaction with a judgment note
 
-Status: **proposed, awaiting go-ahead**. Intent confirmed in
-[`context-cost.md`](context-cost.md).
+Status: **shipped** — rollout steps 1–3 landed; step 4 (measurement) open.
+Intent confirmed in [`context-cost.md`](context-cost.md).
 
 ## Problem
 
@@ -55,7 +55,7 @@ Measured gate positions (deduped call index):
 Fire at a stage boundary **only when both** hold:
 
 - `write_checkpoint()` has just written `status` of `completed` or `awaiting_human`
-  ([`lib/checkpoint.py:435`](../../lib/checkpoint.py#L435)), and
+  ([`lib/checkpoint.py:620`](../../lib/checkpoint.py#L620)), and
 - effective context exceeds a **150K floor**.
 
 Never fire mid-stage. Never fire while a render, a take comparison, or a visual-QA
@@ -68,20 +68,66 @@ The checkpoint already carries *pipeline* state. It does not carry *judgment* st
 That is precisely what a compaction summary drops silently and what you would feel the
 loss of.
 
-Before each fire, append to `projects/<id>/artifacts/decision_log.json`
-(append-only, spans stages, one readable document — the name already appears in
-[`scripts/backlot_screenshot_stage.py`](../../scripts/backlot_screenshot_stage.py)):
+Judgment state goes through the **supported decision-log path**: schema-valid entries in
+the `decision_log` artifact of the gate checkpoint, which `write_checkpoint()` merges
+into the canonical `projects/<id>/decision_log.json` via `_merge_decision_log()`
+([`lib/checkpoint.py:510`](../../lib/checkpoint.py#L510)). **Never hand-write
+`projects/<id>/artifacts/decision_log.json`** — nothing in the codebase writes that
+file, Backlot prefers it over the canonical log when both exist
+([`backlot/state.py`](../../backlot/state.py), artifact-first fallback), and
+hand-writing it is exactly the fork Rollout step 2 had to backfill. The self-heal in
+`_merge_decision_log()` absorbs residual forks, but it is a repair path, not a write path.
+
+One entry per verdict, valid against
+[`schemas/artifacts/decision_log.schema.json`](../../schemas/artifacts/decision_log.schema.json):
 
 ```json
-{ "stage": "render", "at": "<iso8601>",
-  "rejections": [{"subject": "take 3", "reason": "mouth drift @0:04", "evidence": "scratchpad/mouth/s4_sheet.png"}],
-  "rulings":    [{"ruling": "warm grade vetoed", "scope": "all scenes"}],
-  "open":       ["scene 2 audio sync unverified"],
-  "measured":   {"loudness_lufs": -16.2, "fps": 24} }
+{ "version": "1.0", "project_id": "<id>", "decisions": [
+  { "decision_id": "d-041", "stage": "render",
+    "category": "visual_accuracy_check",
+    "subject": "scene 4 take selection",
+    "options_considered": [
+      { "option_id": "take_3", "label": "take 3", "score": 0.2,
+        "reason": "best pacing",
+        "rejected_because": "mouth drift @0:04 — evidence: scratchpad/mouth/s4_sheet.png" },
+      { "option_id": "take_5", "label": "take 5", "score": 0.9,
+        "reason": "clean lip sync at the approved pacing" } ],
+    "selected": "take_5",
+    "reason": "take 3 vetoed for mouth drift; take 5 clean at the same pacing" } ] }
 ```
 
+carried on the gate write itself:
+
+```python
+write_checkpoint(pipeline_dir, project_id, stage, status,
+    artifacts={..., "decision_log": judgment_log},   # the object above
+    metadata={"open": ["scene 2 audio sync unverified"],
+              "measured": {"loudness_lufs": -16.2, "fps": 24}})
+```
+
+Mapping the note's old fields:
+
+- **rejections / rulings** → one decision each. QA verdicts use
+  `category: "visual_accuracy_check"`. A ruling that overturns a logged choice
+  ("warm grade vetoed") reuses the superseded decision's **(category, subject)** pair —
+  AGENT_GUIDE → "Re-log Changed Decisions". Evidence is a path inside
+  `reason`/`rejected_because`: the schema is `additionalProperties: false`, so there is
+  no evidence field to invent.
+- **open / measured** → the checkpoint's free-form `metadata` object — pipeline state,
+  not judgment. Values already durable in a stage artifact (`render_report`, `review`)
+  are not duplicated.
+
+`decision_id` must be **new**: read `projects/<id>/decision_log.json` and take the next
+`d-NNN`. The merge silently drops an entry whose id already exists — a reused id loses
+the ruling.
+
+A ruling that lands *after* the gate write (mid-`awaiting_human` conversation) is made
+durable the same way: re-write the same stage checkpoint carrying the extra entries —
+the merge appends only new ids, so re-writes are additive, never a rewrite.
+
 Rules: verdicts and their **reasons**, never a narrative retelling. Evidence by path,
-never by re-embedding the image. Append, never rewrite.
+never by re-embedding the image. Append, never rewrite — supersede with a new entry on
+the same (category, subject).
 
 ### 3. What carries forward
 
@@ -127,7 +173,7 @@ This spec is disqualified if it violates any of these:
 2. **DONE (mechanism already existed)** — no new code was needed. `write_checkpoint()`
    already merges `artifacts["decision_log"]` into a cumulative project-level
    `decision_log.json` via `_merge_decision_log()`
-   ([`lib/checkpoint.py:405`](../../lib/checkpoint.py#L405)), and the
+   ([`lib/checkpoint.py:510`](../../lib/checkpoint.py#L510)), and the
    `decision_log` artifact is fully schema'd
    ([`schemas/artifacts/decision_log.schema.json`](../../schemas/artifacts/decision_log.schema.json))
    with a `visual_accuracy_check` category that fits QA verdicts.
@@ -137,9 +183,11 @@ This spec is disqualified if it violates any of these:
    hand-wrote it during the session, bypassing the merge (a Rule Zero violation).
    Backfilled via `_merge_decision_log()`; root is now the complete 30-decision trail.
    `only-in-root` was 0, so the backfill was purely additive. The other two projects
-   already agreed. **The writer is still unfixed — this will recur.**
-3. Add the `AGENT_GUIDE.md` rule to compact at a closed stage when context exceeds 150K.
-   **HELD** at your instruction.
+   already agreed. **The writer was section 2 of this spec** — it instructed the
+   hand-append; now corrected to route through `write_checkpoint()`.
+   `_merge_decision_log()` additionally absorbs any residual fork as a repair path.
+3. **DONE** — landed as `AGENT_GUIDE.md` → "Compact at closed gates" (under Human
+   Checkpoint Protocol), which cites this spec as its authority.
 4. Measure one episode. If the decision log holds, keep going; if anything you ruled on
    went missing, fix the schema before trusting the mechanism.
 

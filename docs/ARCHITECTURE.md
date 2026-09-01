@@ -310,7 +310,8 @@ reconcile(entry_id, $)     # records actual spend
 | `cap` | Reject operations that exceed remaining budget |
 
 ### Controls
-- **Total budget** (default: $10.00)
+- **Total budget** (default: $15.00 — `budget.total_usd` in `config.yaml`, the single
+  source; `CostTracker` resolves it from config when constructed without an explicit budget)
 - **Reserve holdback** (default: 10%) — kept as safety margin
 - **Single-action approval threshold** (default: $0.50) — pause for approval above this
 - **New paid tool approval** — first-time use of any paid tool requires confirmation
@@ -353,7 +354,7 @@ llm:
 
 budget:
   mode: warn
-  total_usd: 10.00
+  total_usd: 15.00
   reserve_pct: 0.10
   single_action_approval_usd: 0.50
 
