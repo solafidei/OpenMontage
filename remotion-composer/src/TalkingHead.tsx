@@ -6,7 +6,12 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
+import {
+  CaptionOverlay,
+  CaptionPreset,
+  CaptionSafeZone,
+  WordCaption,
+} from "./components/CaptionOverlay";
 import { resolveAsset } from "./lib/resolveAsset";
 import { TextCard } from "./components/TextCard";
 import { StatCard } from "./components/StatCard";
@@ -308,6 +313,10 @@ export interface TalkingHeadProps {
   captionFontFamily?: string;
   // Pass "" for CJK captions (no inter-word spacing); defaults to " ".
   captionWordSeparator?: string;
+  // Opt-in caption look; omit for the shipped one.
+  captionPreset?: CaptionPreset;
+  // Proportional 9:16 safe zone; overrides whatever the preset sets.
+  captionSafeZone?: CaptionSafeZone;
 }
 
 export const TalkingHead: React.FC<TalkingHeadProps> = ({
@@ -318,11 +327,19 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
   fontSize = 52,
   highlightColor = "#22D3EE",
   captionColor = "#FFFFFF",
-  captionBackgroundColor = "rgba(0, 0, 0, 0.65)",
+  captionBackgroundColor,
   captionFontFamily,
   captionWordSeparator,
+  captionPreset = "default",
+  captionSafeZone,
 }) => {
   const { fps } = useVideoConfig();
+
+  // reel_pop carries its own stroke, so the pill that keeps the default look
+  // legible only muddies it. Explicit callers still win either way.
+  const resolvedCaptionBackground =
+    captionBackgroundColor ??
+    (captionPreset === "reel_pop" ? "transparent" : "rgba(0, 0, 0, 0.65)");
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
@@ -355,10 +372,12 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
         wordsPerPage={wordsPerPage}
         fontSize={fontSize}
         highlightColor={highlightColor}
-        backgroundColor={captionBackgroundColor}
+        backgroundColor={resolvedCaptionBackground}
         color={captionColor}
+        preset={captionPreset}
         {...(captionFontFamily ? { fontFamily: captionFontFamily } : {})}
         {...(captionWordSeparator !== undefined ? { wordSeparator: captionWordSeparator } : {})}
+        {...(captionSafeZone ? { safeZone: captionSafeZone } : {})}
       />
     </AbsoluteFill>
   );
