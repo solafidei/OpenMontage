@@ -150,3 +150,42 @@ def test_landscape_profile_keeps_padding(tmp_path):
          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
     )
     assert max(raw) <= 20
+
+
+def _first_audio_sample_energy(path: Path, seconds: float = 0.5) -> float:
+    """Mean absolute amplitude of the opening of the audio track."""
+    raw = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-t", str(seconds),
+         "-f", "s16le", "-ac", "1", "-ar", "8000", "-"],
+    )
+    samples = [int.from_bytes(raw[i:i + 2], "little", signed=True)
+               for i in range(0, len(raw), 2)]
+    return sum(abs(s) for s in samples) / max(len(samples), 1)
+
+
+def test_audio_start_seconds_seeks_the_bed(tmp_path):
+    """A batch cutting each reel from its own window of one track needs the bed
+    to start at that window, not at t=0."""
+    src = tmp_path / "in.mp4"
+    _make_clip(src, d=3)
+    # Two seconds of silence, then a tone: seeking past the silence is audible.
+    bed = tmp_path / "bed.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono:d=2",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000:duration=3",
+         "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1", str(bed)],
+        capture_output=True, check=True,
+    )
+
+    from_zero = tmp_path / "zero.mp4"
+    seeked = tmp_path / "seeked.mp4"
+    for out, start in ((from_zero, None), (seeked, 2.0)):
+        inputs = {"operation": "compose", "edit_decisions": _edit_decisions(src),
+                  "audio_path": str(bed), "output_path": str(out)}
+        if start is not None:
+            inputs["audio_start_seconds"] = start
+        r = VideoCompose().execute(inputs)
+        assert r.success, r.error
+
+    assert _first_audio_sample_energy(from_zero) < 50, "expected silence at t=0"
+    assert _first_audio_sample_energy(seeked) > 1000, "seek did not skip the silence"

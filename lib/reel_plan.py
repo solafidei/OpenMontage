@@ -64,7 +64,9 @@ def materialise(spine: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
                       "source": entry["subtitle_source"]},
         "metadata": dict(spine.get("metadata") or {}, reel_id=entry["reel_id"]),
     }
-    for carried in ("renderer_family", "composition_mode", "transitions", "effects"):
+    # edit_decisions is additionalProperties:false at the root — only real properties
+    # may be carried, or the materialised reel fails validation at compose.
+    for carried in ("renderer_family", "composition_mode", "transitions"):
         if spine.get(carried):
             reel[carried] = spine[carried]
     return reel

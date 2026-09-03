@@ -176,6 +176,9 @@ picture = VideoCompose().execute({
     "asset_manifest": asset_manifest,
     "profile": "instagram_reels",
     "audio_path": asset_by_id[entry["music_asset_id"]]["path"],
+    # The bed starts at the reel's window, not at t=0 — `video_compose` seeks the
+    # audio input with -ss. The normalised track is whole; the reel is a slice of it.
+    "audio_start_seconds": entry.get("audio_offset_seconds", 0.0),
     "batch_look": spine["metadata"]["batch_look"],   # {"grade": "talking_head_standard", "sharpen": "sharpen_light"}
     "output_path": f"projects/{project_id}/renders/{entry['reel_id']}-picture.mp4",
 })
@@ -376,6 +379,15 @@ it, `issues_found[]` entries are prefixed with their reel id, and the full per-r
 table goes in `metadata.per_reel` (`checks` is `additionalProperties: false` — do not
 add a key there). `recommended_action: "re_render"` for a fixable reel,
 `"revise_edit"` when the cut list is at fault.
+
+`checks` requires **all five** of `technical_probe`, `visual_spotcheck`, `audio_spotcheck`,
+`promise_preservation` and `subtitle_check` — omitting any one fails `write_checkpoint`
+*after* the whole sitting has already rendered, which is the most expensive place to
+discover it. Four you measure on the masters. `promise_preservation` is the delivery-promise
+check, and this pipeline's promise is the two-plane split itself: every reel is real
+operator footage cut to its own track, no still-image substitution and no runtime swap. Pass
+it when `edit_decisions.render_runtime` came through as `ffmpeg`, every cut resolved to a
+video file, and `runtime_swap_detected` is false; fail it the moment any of those slipped.
 
 ### 7. Quality Gate
 

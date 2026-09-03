@@ -100,10 +100,9 @@ if missing:
     raise RuntimeError(f"reel_plan reels with no rendered output: {missing}")
 ```
 
-**`reel_plan` is not yet a registered artifact.** It is absent from `ARTIFACT_NAMES`
-(`schemas/artifacts/__init__.py:13-35`), and `lib/checkpoint.py:156-158` skips validation for any
-artifact name it does not know — so `reel_plan` rode into the edit checkpoint **unvalidated**. It is
-the last hand-guard before publish, so check the whole shape, not the four keys you happen to use:
+**`reel_plan` is schema-validated at write time** (`schemas/artifacts/reel_plan.schema.json`),
+so its shape reached you intact. What the schema does not check is whether the ids inside it
+resolve, and by here they must — so check the whole entry, not the four keys you happen to use:
 every entry needs `reel_id`, `track_id`, `music_asset_id`, `subtitle_source`, `subtitle_srt_source`,
 `hook`, `cut_ids`, `corrections` and `caption_confidence`, `reel_id` values are unique, and the
 `cut_ids` partition `edit_decisions.cuts[]` exactly.

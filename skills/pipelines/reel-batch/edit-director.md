@@ -357,6 +357,10 @@ for reel in scene_meta["reels"]:
         "music_asset_id": idx["music_asset_id"],              # an asset id
         "subtitle_source": idx["subtitle_json_asset_id"],     # an asset id
         "subtitle_srt_source": idx["subtitle_srt_asset_id"],  # an asset id
+        # The reel's in-point into its normalised track. Without it compose muxes
+        # every reel's bed from t=0 and a batch cut from one track opens five times
+        # on the same seconds of audio, none of them the ones the captions match.
+        "audio_offset_seconds": sr["window"]["offset_seconds"],
         "hook": sr["hook"]["text"],                           # a string
         "cut_ids": idx["cut_ids"],                            # reel order
         "corrections": sr.get("corrections", {}),
@@ -403,7 +407,7 @@ for r in reel_plan["reels"]:
     for key in ("music_asset_id", "subtitle_source", "subtitle_srt_source"):
         assert r[key] in asset_ids                     # nothing else checks this
     assert reel_seconds([c for c in spine["cuts"]
-                         if c["id"].startswith(prefix)]) <= 10.0
+                         if c["id"].startswith(prefix)]) <= 9.8
 ```
 
 `assert_no_reuse` walks the live claims and raises if two reels overlap on one
@@ -418,7 +422,11 @@ claimed the segments — this is the last stage that can fix a collision cheaply
   every `source` an `asset_manifest` id; every cut has `provenance` and a
   one-line `reason`.
 - Every `polish` value inside its bounds; no `whip` on a sub-0.4s cut.
-- `reel_seconds(...) <= 10.0` for every reel.
+- `reel_seconds(...) <= 9.8` for every reel. The budget is 9.8, not 10.0, because the
+  rendered file is reliably longer than the filter graph: each segment pads to whole frames
+  at 30fps, `zoompan` re-times at its own fps, and the caption pass re-encodes again. A reel
+  budgeted at exactly 10.0 lands near 10.1 and fails compose's own probe gate — which stays
+  at 10.0, because that gate measures the actual deliverable.
 - `metadata.batch_look` survives `look_filters(look, "operator_footage")`; no
   grain; no `color_grade` profile name.
 - `subtitles` set, `subtitles.source` absent, `audio.music` absent.

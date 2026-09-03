@@ -186,6 +186,14 @@ class VideoCompose(BaseTool):
                 },
             },
             "audio_path": {"type": "string", "description": "Mixed audio to mux into output"},
+            "audio_start_seconds": {
+                "type": "number",
+                "description": (
+                    "In-point into audio_path, seconds. The bed is muxed from here "
+                    "rather than from t=0 — a batch that cuts each reel to its own "
+                    "window of one long track needs the bed to start at that window."
+                ),
+            },
             "profile": {
                 "type": "string",
                 "description": (
@@ -721,6 +729,12 @@ class VideoCompose(BaseTool):
             cmd = ["ffmpeg", "-y", "-i", str(final_input)]
 
             if audio_path and Path(audio_path).exists():
+                # -ss BEFORE -i seeks the input, so the bed starts at the reel's
+                # window instead of at t=0. Without it, every reel cut from one
+                # long track gets the same opening seconds of audio.
+                audio_start = float(inputs.get("audio_start_seconds") or 0.0)
+                if audio_start > 0:
+                    cmd.extend(["-ss", f"{audio_start:.3f}"])
                 cmd.extend(["-i", audio_path])
 
             # Determine if profile requires re-encoding (resize/fps change)

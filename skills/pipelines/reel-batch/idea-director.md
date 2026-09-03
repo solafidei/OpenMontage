@@ -35,6 +35,11 @@ index = FootageLibrary().execute({
     "footage_dir": operator_footage_dir,          # searched recursively
     "corpus_dir": f"projects/{project_id}/corpus",
     "cuts_per_reel": 5,                           # a 10s reel at ~2s a cut
+    # Without this the floor defaults to 1.5s, so every segment in [1.5, 2.0) counts
+    # toward usable_segments and therefore toward max_reels and cutaway_count — while
+    # no 2.0s slot can actually use one. The valve would promise reels the pool cannot
+    # fill, and the shortfall would surface two stages later as a false gate-2 stall.
+    "min_segment_seconds": 10.0 / 5,              # the planned hold, not the tool default
 })
 if not index.success:                     # BOTH failure modes still return a full data payload
     raise SystemExit(index.error)         # read index.error first — the two below are not the same failure

@@ -201,7 +201,10 @@ class SubtitleGen(BaseTool):
                     "end": buf[-1]["end"],
                     "text": buf_text,
                     "words": [
-                        {"word": b["word"].strip(), "start": b["start"], "end": b["end"]}
+                        # Carry the whole word through, not three picked fields:
+                        # transcriber's per-word `probability` is what a caption stage
+                        # gates on, and rebuilding the dict silently dropped it.
+                        {**b, "word": b["word"].strip()}
                         for b in buf
                     ],
                 })
@@ -219,7 +222,7 @@ class SubtitleGen(BaseTool):
                 "end": buf[-1]["end"],
                 "text": buf_text,
                 "words": [
-                    {"word": b["word"].strip(), "start": b["start"], "end": b["end"]}
+                    {**b, "word": b["word"].strip()}
                     for b in buf
                 ],
             })

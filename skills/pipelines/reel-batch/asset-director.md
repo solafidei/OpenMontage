@@ -152,7 +152,12 @@ for reel in scene_plan["metadata"]["reels"]:
             # named from outside one. `slot["cut_id"]` is a KeyError.
             unfilled.append((reel["reel_id"], slot["id"]))
             continue
-        start, end = rec.interval                        # lib/corpus.py:117-125
+        # Gate 2 beat-snapped this cut and the clip ledger claimed exactly these
+        # seconds, so the SLOT is the geometry. `rec.interval` is the whole indexed
+        # segment (1.5-6.0s, tools/video/footage_library.py), which is longer than the
+        # ~2.0s hold the beat grid planned — writing it here renders a reel that
+        # overruns its own budget and drifts off every beat after the first cut.
+        start, end = slot["in_seconds"], slot["out_seconds"]
         # local_path is ABSOLUTE for operator rows — the pool lives outside the corpus
         # and is never copied (tools/video/footage_library.py:349-352); the join still
         # resolves, because an absolute right-hand side wins.
@@ -226,14 +231,26 @@ One prompt, one clip, one cut, one ledger entry. The list to iterate is
 `cut_id` and the `prompt` that passed `refuse_media_references` at gate 2:
 
 ```python
-generated = {}
+generated, dropped = {}, []
 for sf in scene_plan["metadata"]["shortfall"]:
     # sf = {"reel_id": "reel_02", "cut_id": "reel_02-03", "prompt": "...", "why": "..."}
     # Run the paid booking block above verbatim, with sf["prompt"] as the single
     # element of inputs["prompts"] and f"cutaway_{sf['cut_id']}_kling_video" as the
     # ledger operation. It leaves `result` bound to the ToolResult:
+    if not result.success:
+        # cutaway_gen returns success=False with a partial `data` payload rather than
+        # raising (tools/video/cutaway_gen.py). Binding [0] blind turns a recoverable
+        # failure into an IndexError and takes the whole sitting down with one clip.
+        dropped.append((sf["reel_id"], sf["cut_id"], result.error))
+        continue
     generated[sf["cut_id"]] = result.data["cutaways"][0]   # one prompt in, one row out
 ```
+
+A `dropped` entry is not a stage failure. Reconcile its ledger entry `success=False`,
+then either retry it once or drop that reel — `ClipLedger.for_project(project_id)
+.release_reel(reel_id)` returns its segments to the pool so the remaining reels can use
+them — and say which you did. A four-reel sitting delivered is worth more than a
+five-reel sitting that died on one clip.
 
 Each row carries `output_path`, `flash_seconds`, `cost_usd`, `cached` and
 `provenance: "ai_generated"` (`tools/video/cutaway_gen.py:413-427`). `sf["cut_id"]` is what

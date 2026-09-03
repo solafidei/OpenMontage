@@ -28,6 +28,11 @@
             "description": "Asset id of this reel's word-level caption JSON."
           },
           "subtitle_srt_source": { "type": "string" },
+          "audio_offset_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "In-point into the normalised track, from script.metadata.reels[].window.offset_seconds. Compose muxes the bed from here; without it every reel of a batch cut from one track gets the same opening seconds."
+          },
           "hook": {
             "type": "string",
             "description": "The hook card's text. The timing that places it is on the cut list."
@@ -42,7 +47,17 @@
             "type": "object",
             "description": "Per-reel caption corrections: wrong word (lowercase) -> replacement."
           },
-          "caption_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          "caption_confidence": {
+            "type": "object",
+            "description": "Carried verbatim from script.metadata.reels[].caption_confidence. Compose re-reports these off what it actually burned; a mismatch means a word changed between approval and render.",
+            "required": ["min", "mean", "low_confidence_words"],
+            "properties": {
+              "min": { "type": "number", "minimum": 0, "maximum": 1 },
+              "mean": { "type": "number", "minimum": 0, "maximum": 1 },
+              "low_confidence_words": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
         },
         "additionalProperties": false
       }

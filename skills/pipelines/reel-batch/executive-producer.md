@@ -53,10 +53,11 @@ are what a finished sitting is checked against.
 | Schemas | `schemas/artifacts/` | Checkpoint-time validation |
 | Playbook | `clean-professional` (recommended) | Quality constraints |
 
-**`reel_plan` has no registered schema yet** (issue #47). `lib/checkpoint.py:157-158` skips
-validation for any artifact name it does not know, so a malformed `reel_plan` will ride
-into a checkpoint unnoticed. Until #47 lands, the `edit` stage's own `success_criteria` are
-the only guard — check them by hand at G5.
+**`reel_plan` is schema-validated at the `edit` checkpoint**
+(`schemas/artifacts/reel_plan.schema.json`, registered in `ARTIFACT_NAMES`). A malformed one
+is a hard `CheckpointValidationError`, not a silent pass. What the schema cannot see is
+cross-artifact truth — that `cut_ids` partition the spine exactly, and that each
+`music_asset_id` names a real asset. Those are G5's job.
 
 ## Run Order
 
@@ -212,7 +213,7 @@ G5 — after EDIT
   - Every reel_plan entry carries reel_id, track_id, music_asset_id, subtitle_source,
     subtitle_srt_source, hook (a string), cut_ids[], corrections, caption_confidence —
     with music_asset_id / subtitle_source / subtitle_srt_source being asset_manifest
-    asset ids, NOT paths? Nothing validates reel_plan, so this bullet is the only guard.
+    asset ids, NOT paths? The schema types the shape; only this bullet checks the ids resolve.
   - Per-reel axes are in reel_plan, NOT smuggled into edit_decisions.metadata?
   - `edit_decisions.metadata.batch_look` survives `look_filters(look, "operator_footage")`
     — a `face_enhance` preset in the `grade` slot, no `grain` key, no `color_grade` profile

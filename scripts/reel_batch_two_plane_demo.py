@@ -45,8 +45,11 @@ REEL_SECONDS = 10.0
 CUTS_PER_REEL = 5
 CUT_SECONDS = REEL_SECONDS / CUTS_PER_REEL
 
-# One look for the whole sitting — same grade, grain and sharpen on every reel.
-BATCH_LOOK = {"grade": "high_contrast", "grain": 4, "sharpen": "sharpen_light"}
+# One look for the whole sitting, and it must be identity-safe: every cut here is
+# `operator_footage`, and `look_filters` raises PolishError on a colour-grade profile
+# or any grain applied to a locked cut (lib/polish_filters.py). A face preset in the
+# `grade` slot resolves against FACE_PRESETS first and is permitted.
+BATCH_LOOK = {"grade": "talking_head_standard", "sharpen": "sharpen_light"}
 
 # Per-cut picture polish, cycled across the cut list.
 POLISH = [
@@ -118,6 +121,10 @@ def build_spine(clips: list[Path], reels: int) -> dict:
                 "source": str(clip),
                 "in_seconds": start,
                 "out_seconds": round(start + CUT_SECONDS, 2),
+                # Declared at ingest, never inferred from pixels (spec R5). It is what
+                # the identity gate reads per cut — without it the look guard cannot
+                # fire and the demo would prove less than it appears to.
+                "provenance": "operator_footage",
                 "polish": dict(POLISH[i % len(POLISH)]),
             })
     return {

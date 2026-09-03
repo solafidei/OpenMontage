@@ -129,6 +129,21 @@ reel's `cut_policy` into the plan as a recorded fact: the policy is already bake
 Rank the pool against the slot's one-line description, then take the first candidate
 long enough to fill it.
 
+**Hold segments back for the reels still to plan.** Claiming greedily reel by reel spends
+the pool front-to-back, so the whole shortfall lands in the last reel or two — three armed
+cutaways stacking into `reel_05`. Gate 1 priced one flash accent *per reel* and step 9
+asserts that cap (decision log #6), so a greedy pass fails the gate having already claimed
+half the pool. Before ranking, reserve one segment for every remaining reel's minimum:
+
+```python
+reels_after = len(reel_ids) - reel_index - 1        # reels not yet planned
+floor = reels_after * (cuts_per_reel - 1)           # each still needs cuts-1 of its own
+budget = len(available) - floor                     # segments this reel may claim
+```
+
+A reel that runs out of `budget` before its slots are full takes its one flash accent and
+moves on. That is the same arithmetic gate 1 used, applied per reel instead of per batch.
+
 ```python
 from lib.clip_embedder import embed_texts       # lib/clip_embedder.py:131
 
@@ -371,6 +386,8 @@ sitting the pool covered end to end has no ruling to log and writes `scene_plan`
 ### 9. Quality Gate
 
 ```python
+from collections import Counter
+
 reels = scene_plan["metadata"]["reels"]        # the artifact assembled in step 8
 batch_reel_ids = set(reel_ids)
 
@@ -383,6 +400,10 @@ assert len(claimed) == sum(1 for r in reels for c in r["cuts"]
 assert len(shortfall) == sum(1 for r in reels for c in r["cuts"]
                              if c["provenance"] == "ai_generated")
 assert len(shortfall) <= armed_cutaways        # brief.metadata.cutaway_count, step 1
+# Decision log #6: at most ONE AI flash a reel. The gate-1 ceiling caps the reel COUNT,
+# and the line above caps the batch TOTAL — neither stops three armed cutaways stacking
+# into one reel, which is the outcome that makes a reel mostly generated footage.
+assert max(Counter(sf["reel_id"] for sf in shortfall).values() or [0]) <= 1
 for r in reels:
     assert r["total_seconds"] <= 10.0
     assert all(c.get("beat_seconds") is not None and
@@ -390,9 +411,8 @@ for r in reels:
 ```
 
 By eye: one reel group per planned reel; one `scenes[]` entry per cut, ids matching; every
-hook ending at or before its reel's `snap_grid[2]`; every shortfall carrying a `cut_id` and
-a prompt that passed `refuse_media_references`; and at most one shortfall cut per reel, the
-cap the flash accent is priced under.
+hook ending at or before its reel's `snap_grid[2]`; and every shortfall carrying a `cut_id`
+and a prompt that passed `refuse_media_references`.
 
 ## Present For Approval — Gate 2
 

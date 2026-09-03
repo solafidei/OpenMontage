@@ -39,6 +39,17 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({
 
   // Staggered letter-by-letter spring
   const titleChars = title.split("");
+  // Group the characters into words so flexWrap breaks between words, not inside
+  // them. Each char keeps its GLOBAL index, so the stagger and the accent colour
+  // are identical to the per-character version — only the wrapping changes.
+  const titleWords: { chars: string[]; offset: number }[] = [];
+  {
+    let offset = 0;
+    for (const word of title.split(/(\s+)/)) {
+      if (word.length > 0) titleWords.push({ chars: word.split(""), offset });
+      offset += word.length;
+    }
+  }
 
   return (
     <AbsoluteFill
@@ -62,30 +73,35 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({
             gap: 0,
           }}
         >
-          {titleChars.map((char, i) => {
-            const delay = i * 1.2;
-            const charSpring = spring({
-              frame: frame - delay,
-              fps,
-              config: { damping: 12, stiffness: 150 },
-            });
+          {titleWords.map((word, w) => (
+            <span key={w} style={{ display: "inline-flex", whiteSpace: "pre" }}>
+              {word.chars.map((char, c) => {
+                const i = word.offset + c;
+                const delay = i * 1.2;
+                const charSpring = spring({
+                  frame: frame - delay,
+                  fps,
+                  config: { damping: 12, stiffness: 150 },
+                });
 
-            return (
-              <span
-                key={i}
-                style={{
-                  display: "inline-block",
-                  opacity: charSpring,
-                  transform: `translateY(${interpolate(charSpring, [0, 1], [30, 0])}px)`,
-                  color: i < 8 ? accentColor : textColor, // Accent first word
-                  whiteSpace: char === " " ? "pre" : undefined,
-                  minWidth: char === " " ? "0.3em" : undefined,
-                }}
-              >
-                {char}
-              </span>
-            );
-          })}
+                return (
+                  <span
+                    key={c}
+                    style={{
+                      display: "inline-block",
+                      opacity: charSpring,
+                      transform: `translateY(${interpolate(charSpring, [0, 1], [30, 0])}px)`,
+                      color: i < 8 ? accentColor : textColor, // Accent first word
+                      whiteSpace: char === " " ? "pre" : undefined,
+                      minWidth: char === " " ? "0.3em" : undefined,
+                    }}
+                  >
+                    {char}
+                  </span>
+                );
+              })}
+            </span>
+          ))}
         </div>
 
         {/* Subtitle */}
