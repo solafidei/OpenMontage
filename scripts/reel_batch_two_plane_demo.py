@@ -235,12 +235,54 @@ def probe(path: Path) -> str:
     return f"{w}x{h}  {float(d):.2f}s  audio={a or 'NONE'}"
 
 
+def _write_project_artifacts(project_dir: Path, plan: dict, tracks: list[Path]) -> None:
+    """The two artifacts Backlot needs to draw one card per reel.
+
+    The board reads `reel_plan` for the reels and `asset_manifest` to resolve
+    each `music_asset_id` to a filename. It finds the finished files by
+    convention (`renders/<reel_id>.mp4`), so nothing here records a path — a
+    `reel_plan` entry is `additionalProperties: false` and could not carry one.
+    """
+    import json
+
+    artifacts = project_dir / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+
+    (artifacts / "reel_plan.json").write_text(
+        json.dumps(plan, indent=2), encoding="utf-8"
+    )
+    (artifacts / "asset_manifest.json").write_text(
+        json.dumps({
+            "version": "1.0",
+            "assets": [
+                {
+                    "id": entry["music_asset_id"],
+                    "type": "music",
+                    "path": str(tracks[i % len(tracks)]),
+                    "source_tool": "audio_mixer",
+                    "scene_id": entry["reel_id"],
+                }
+                for i, entry in enumerate(plan["reels"])
+            ],
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reels", type=int, default=1)
     ap.add_argument("--clips", nargs="*", default=DEFAULT_CLIPS)
     ap.add_argument("--tracks", nargs="*", default=DEFAULT_TRACKS)
     ap.add_argument("--out", default="renders/reel-batch-demo")
+    ap.add_argument(
+        "--project",
+        help=(
+            "Render into projects/<id>/renders/ and write the reel_plan and "
+            "asset_manifest artifacts, so `python -m backlot open <id>` shows "
+            "one card per reel. Overrides --out."
+        ),
+    )
     args = ap.parse_args()
 
     def _resolve(paths: list[str], what: str) -> list[Path]:
@@ -255,7 +297,11 @@ def main() -> int:
     if len(tracks) < args.reels:
         print(f"note: {len(tracks)} track(s) for {args.reels} reels — cycling. "
               f"A real sitting gives every reel its own.")
-    out_dir = Path(args.out) if Path(args.out).is_absolute() else REPO / args.out
+    project_dir = (REPO / "projects" / args.project) if args.project else None
+    if project_dir is not None:
+        out_dir = project_dir / "renders"
+    else:
+        out_dir = Path(args.out) if Path(args.out).is_absolute() else REPO / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
     spine = build_spine(clips, args.reels)
@@ -277,6 +323,10 @@ def main() -> int:
         print(f"  picture (ffmpeg)   {r['picture_s']:6.1f}s   {probe(r['picture'])}")
         print(f"  text ({r['engine'] or 'remotion'})  {r['text_s']:6.1f}s   {probe(r['final'])}")
         print(f"  -> {r['final']}")
+
+    if project_dir is not None:
+        _write_project_artifacts(project_dir, plan, tracks)
+        print(f"\nboard: python -m backlot open {args.project}")
 
     print("\n" + "=" * 72)
     print(f"TOTAL {total:.1f}s for {args.reels} reel(s)  "

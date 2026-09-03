@@ -1040,3 +1040,20 @@ body:not(.first) .approval-review { animation: none; }
   .approval-review-foot button { width: 100%; }
   .approval-status { white-space: normal; }
 }
+
+/* ---------- reels (batch pipelines: N deliverables, not N versions) ---------- */
+.reel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.reel-card { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 12px; overflow: hidden; transition: border-color .15s, transform .15s; }
+.reel-card:hover { border-color: #34343e; transform: translateY(-2px); }
+.reel-card.pending { opacity: .6; }
+/* 9:16 — these are vertical deliverables and a 16:9 well would letterbox them. */
+.reel-poster { aspect-ratio: 9/16; background: var(--surface-2); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.reel-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.reel-pending { font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); color: var(--muted); letter-spacing: .08em; }
+.reel-body { padding: 10px 11px 12px; }
+.reel-id { font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); letter-spacing: .1em; color: var(--muted); text-transform: uppercase; }
+.reel-hook { margin-top: 5px; font-size: calc(13px * var(--fs-scale)); line-height: 1.35; }
+.reel-facts { margin-top: 7px; font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); color: var(--muted); }
+.reel-path { margin-top: 5px; font-family: var(--mono); font-size: calc(9px * var(--fs-scale)); color: var(--muted); opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reel-modal-video { margin-top: 14px; display: flex; justify-content: center; }
+.reel-modal-video video { max-height: 72vh; max-width: 100%; border-radius: 10px; }

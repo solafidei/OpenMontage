@@ -354,3 +354,115 @@ class TestStoryboardVisualSelection:
         assert card["visual"]["exists"] is True
         assert card["visual"]["path"].endswith("real.png")
         assert [t["path"].split("/")[-1] for t in card["takes"]] == ["real.png"]
+
+
+# ----------------------------------------------------------------------
+# Reel cards (#50). A batch is N deliverables, not N versions of one.
+# ----------------------------------------------------------------------
+
+
+def _reel_batch_project(root: Path, *, rendered: int = 5, reels: int = 5) -> Path:
+    p = _make_project(root, "reel-batch-001")
+    _write(p / "artifacts" / "reel_plan.json", {
+        "version": "1.0",
+        "reels": [
+            {
+                "reel_id": f"reel_{n:02d}",
+                "music_asset_id": f"asset_track_{n:02d}",
+                "subtitle_source": f"assets/captions/reel_{n:02d}.json",
+                "hook": f"hook line for reel {n}",
+                "cut_ids": [f"reel_{n:02d}-{c:02d}" for c in range(1, 5)],
+            }
+            for n in range(1, reels + 1)
+        ],
+    })
+    _write(p / "artifacts" / "asset_manifest.json", {
+        "version": "1.0",
+        "assets": [
+            {"id": f"asset_track_{n:02d}", "type": "music",
+             "path": f"assets/music/track_{n:02d}.mp3",
+             "source_tool": "audio_mixer", "scene_id": f"reel_{n:02d}"}
+            for n in range(1, reels + 1)
+        ],
+    })
+    for n in range(1, rendered + 1):
+        # The two-plane render leaves the un-captioned master beside the real one.
+        (p / "renders" / f"reel_{n:02d}.mp4").write_bytes(b"finished")
+        (p / "renders" / f"reel_{n:02d}-picture.mp4").write_bytes(b"intermediate")
+    return p
+
+
+def test_reel_batch_shows_one_card_per_reel(projects_root):
+    """Five reels, five cards — each with its own hook, track and cut count."""
+    _reel_batch_project(projects_root)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert [r["reel_id"] for r in s["reels"]] == [f"reel_{n:02d}" for n in range(1, 6)]
+    for n, card in enumerate(s["reels"], start=1):
+        assert card["hook"] == f"hook line for reel {n}"
+        assert card["track"] == f"track_{n:02d}.mp3"
+        assert card["cut_count"] == 4
+        assert card["output"] == f"renders/reel_{n:02d}.mp4"
+
+
+def test_reel_cards_do_not_point_at_the_picture_intermediate(projects_root):
+    """`<reel_id>-picture.mp4` is a working master, not a deliverable.
+
+    Ten files in renders/ for a five-reel batch is what made the board show
+    "10 versions" of one video. They stay listed — that file is what you look
+    at when the captions are wrong — but they are flagged, and no reel card
+    resolves to one.
+    """
+    _reel_batch_project(projects_root)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert all(not c["output"].endswith("-picture.mp4") for c in s["reels"])
+    flagged = {Path(r["path"]).name for r in s["media"]["renders"] if r.get("intermediate")}
+    assert flagged == {f"reel_{n:02d}-picture.mp4" for n in range(1, 6)}
+    # And the deliverables themselves are never flagged.
+    assert all(
+        not r.get("intermediate")
+        for r in s["media"]["renders"]
+        if not Path(r["path"]).stem.endswith("-picture")
+    )
+
+
+def test_a_reel_with_no_render_yet_still_gets_a_card(projects_root):
+    """Mid-batch is the normal state — two done, three to go."""
+    _reel_batch_project(projects_root, rendered=2)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert len(s["reels"]) == 5
+    assert [bool(c["output"]) for c in s["reels"]] == [True, True, False, False, False]
+
+
+def test_a_project_with_no_reel_plan_renders_with_no_reels(projects_root):
+    """The board is an observer. Twelve pipelines have no reel_plan and must
+    look exactly as they did — `reels` is None, not an empty section."""
+    p = _make_project(projects_root, "ordinary-project")
+    _write(p / "artifacts" / "scene_plan.json", SCENE_PLAN)
+
+    s = load_board_state(p)
+
+    assert s["reels"] is None
+
+
+@pytest.mark.parametrize("plan", [
+    {},                                        # no reels key
+    {"version": "1.0", "reels": []},           # written but empty
+    {"version": "1.0", "reels": "not a list"},  # half-written / wrong type
+    {"version": "1.0", "reels": [{"hook": "no reel_id"}]},
+])
+def test_a_malformed_reel_plan_never_breaks_the_board(projects_root, plan):
+    """`load_board_state` never raises — a board that crashes on a half-written
+    artifact is worse than a board with one section missing."""
+    p = _make_project(projects_root, "half-written")
+    _write(p / "artifacts" / "reel_plan.json", plan)
+
+    s = load_board_state(p)
+
+    assert s["reels"] is None
+    assert s["project_id"] == "half-written"

@@ -240,6 +240,7 @@ ARTIFACT_FILES = {
     "final_review": "final_review.json",
     "publish_log": "publish_log.json",
     "decision_log": "decision_log.json",
+    "reel_plan": "reel_plan.json",
 }
 
 
@@ -499,6 +500,76 @@ def _build_storyboard(
 # Media discovery
 # ---------------------------------------------------------------------------
 
+def _build_reels(
+    project_dir: Path, artifacts: dict[str, dict], media: dict[str, list[dict]]
+) -> Optional[list[dict]]:
+    """One card per reel for a batch pipeline, or None when this is not one.
+
+    The board is an observer: a missing, malformed or half-written `reel_plan`
+    must render nothing rather than break a production. Everything here is
+    read-time — `reel_plan` entries are `additionalProperties: false`, so the
+    join between a reel and its finished file cannot be stored in the artifact.
+
+    Per-reel COST is deliberately absent. `cost_log` entries are
+    `additionalProperties: false` with no `deliverable_id`, so reel identity
+    exists only inside the free-text `operation` string
+    (`tools/cost_tracker.py`) and nothing parses it. Showing a number here
+    would mean scraping that string; a real per-reel readout needs a schema
+    field and belongs to its own issue.
+    """
+    plan = artifacts.get("reel_plan") or {}
+    entries = plan.get("reels")
+    if not isinstance(entries, list) or not entries:
+        return None
+
+    assets = {
+        a.get("id"): a
+        for a in ((artifacts.get("asset_manifest") or {}).get("assets") or [])
+        if isinstance(a, dict) and a.get("id")
+    }
+    # `render_report` names the outputs when the compose stage wrote one;
+    # otherwise fall back to the convention (`renders/<reel_id>.mp4`).
+    reported = (
+        ((artifacts.get("render_report") or {}).get("metadata") or {}).get("reel_outputs")
+        or {}
+    )
+    by_stem = {
+        Path(r["path"]).stem: r["path"]
+        for r in media.get("renders", [])
+        if not r.get("intermediate")
+    }
+
+    cards: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        reel_id = entry.get("reel_id")
+        if not reel_id:
+            continue
+
+        track = assets.get(entry.get("music_asset_id")) or {}
+        track_path = track.get("path") or ""
+        hook = entry.get("hook")
+        if isinstance(hook, dict):
+            hook = hook.get("text")
+
+        output = reported.get(reel_id) or by_stem.get(str(reel_id))
+        if output and not (project_dir / output).exists():
+            output = None
+
+        cards.append({
+            "reel_id": reel_id,
+            "hook": hook or None,
+            "track": Path(track_path).name if track_path else (
+                entry.get("track_id") or entry.get("music_asset_id") or None
+            ),
+            "cut_count": len(entry.get("cut_ids") or []),
+            "output": output,
+            "subtitle_source": entry.get("subtitle_source"),
+        })
+    return cards or None
+
+
 def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
     """Discovered media files (renders, loose assets, snapshots)."""
     renders: list[dict] = []
@@ -529,6 +600,16 @@ def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
             for f in sorted(d.iterdir()):
                 if f.suffix.lower() in MEDIA_IMAGE_EXT and f.is_file():
                     snapshots.append({"path": _rel(project_dir, f)})
+
+    # A two-plane render leaves `<name>-picture.mp4` beside `<name>.mp4` — the
+    # un-captioned working master. Flagged, not dropped: it is the file to look
+    # at when the captions are wrong, and it is only an intermediate when the
+    # finished master actually exists beside it.
+    finished = {Path(r["path"]).stem for r in renders}
+    for entry in renders:
+        stem = Path(entry["path"]).stem
+        if stem.endswith("-picture") and stem[: -len("-picture")] in finished:
+            entry["intermediate"] = True
 
     renders.sort(key=lambda r: r.get("mtime", 0), reverse=True)
     return {"renders": renders, "snapshots": snapshots, "music": music}
@@ -609,6 +690,10 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
     events = read_events(project_dir, limit=250)
     storyboard = _build_storyboard(project_dir, artifacts, events)
     media = _scan_media(project_dir)
+    try:
+        reels = _build_reels(project_dir, artifacts, media)
+    except Exception:  # the board never blocks a production
+        reels = None
 
     stages = _build_stage_rail(pipeline_meta, checkpoints, history)
 
@@ -649,6 +734,7 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
         "artifacts": artifacts,
         "storyboard": storyboard,
         "media": media,
+        "reels": reels,
         "events": events,
         "cost": cost,
         "last_activity": last_activity,

@@ -211,9 +211,11 @@ stages:
 | `character-animation` | animation | Local rigged cartoon characters with SVG rigs, pose libraries, GSAP timelines, and HyperFrames rendering |
 | `cinematic` | cinematic | Trailer, teaser, mood-driven edits |
 | `clip-factory` | custom | Batch short-form clips from long source |
+| `documentary-montage` | documentary | Footage-led montage episodes from an archive corpus |
 | `hybrid` | hybrid | Source footage + AI-generated support visuals |
 | `localization-dub` | custom | Subtitle, dub, and translate existing video |
 | `podcast-repurpose` | hybrid | Podcast highlights to video |
+| `reel-batch` | hybrid | Batches of vertical reels beat-cut from one footage pool |
 | `screen-demo` | screen_recording | Software screen recordings and walkthroughs |
 | `talking-head` | talking_head | Footage-led speaker videos |
 | `framework-smoke` | custom | Minimal smoke test for framework validation |

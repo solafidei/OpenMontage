@@ -562,6 +562,25 @@ function openNarrModal(card) {
   modal.classList.add("open");
 }
 
+function openReelModal(projectId, reel) {
+  modal.innerHTML = "";
+  const meta = [reel.reel_id, reel.track ? `♪ ${reel.track}` : null,
+                reel.cut_count ? `${reel.cut_count} cuts` : null]
+    .filter(Boolean).join(" · ");
+  modal.append(
+    el("span", { class: "modal-close", onclick: closeModal }, "ESC · CLOSE"),
+    el("div", { class: "modal-page" },
+      el("div", { class: "sp-meta" }, meta),
+      reel.hook ? el("div", { class: "reel-hook" }, reel.hook) : null,
+      el("div", { class: "reel-modal-video" },
+        el("video", {
+          src: mediaURL(projectId, reel.output), controls: "",
+          preload: "metadata", autoplay: "",
+        }))),
+  );
+  modal.classList.add("open");
+}
+
 function closeModal() { modal.classList.remove("open"); }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
@@ -816,8 +835,49 @@ function renderStoryboard(s) {
 // renders + degraded media
 // ---------------------------------------------------------------------------
 
+function renderReels(s) {
+  // Batch pipelines produce N deliverables, not N versions of one. Absent a
+  // reel_plan this returns null and the board looks exactly as it did.
+  const reels = s.reels;
+  if (!Array.isArray(reels) || !reels.length) return null;
+
+  const grid = el("div", { class: "reel-grid" });
+  for (const reel of reels) {
+    const poster = reel.output
+      ? el("img", { src: thumbURL(s.project_id, reel.output, 480), loading: "lazy", alt: "" })
+      : el("span", { class: "reel-pending" }, "not rendered yet");
+    const facts = [
+      reel.track ? `♪ ${reel.track}` : null,
+      reel.cut_count ? `${reel.cut_count} cut${reel.cut_count === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join("  ·  ");
+
+    const card = el("div", { class: `reel-card${reel.output ? "" : " pending"}` },
+      el("div", { class: "reel-poster" }, poster),
+      el("div", { class: "reel-body" },
+        el("div", { class: "reel-id" }, reel.reel_id),
+        reel.hook ? el("div", { class: "reel-hook" }, reel.hook) : null,
+        el("div", { class: "reel-facts" }, facts || "—"),
+        reel.output
+          ? el("div", { class: "reel-path" }, reel.output)
+          : null));
+    if (reel.output) {
+      card.addEventListener("click", () => openReelModal(s.project_id, reel));
+      card.style.cursor = "pointer";
+    }
+    grid.append(card);
+  }
+
+  const rendered = reels.filter((r) => r.output).length;
+  return el("div", {},
+    el("div", { class: "section-title" }, "Reels",
+      el("span", { class: "meta" }, `${rendered} of ${reels.length} rendered`)),
+    grid);
+}
+
 function renderRenders(s) {
-  const renders = s.media.renders;
+  // A two-plane render leaves an un-captioned `-picture` master beside each
+  // deliverable. Listing both turned a five-reel batch into "10 versions".
+  const renders = s.media.renders.filter((r) => !r.intermediate);
   if (!renders.length) return null;
   if (activeRender >= renders.length) activeRender = 0;
   const current = renders[activeRender];
@@ -1084,16 +1144,17 @@ function render() {
   // never pushes them below the fold — the column flows beside the rail.
   const storyboard = renderStoryboard(s);
   const found = renderFoundMedia(s);
+  const reels = renderReels(s);
   const renders = renderRenders(s);
 
   if (approvalReview || script || decisions || activity) {
-    for (const section of [storyboard, found, renders]) {
+    for (const section of [reels, storyboard, found, renders]) {
       if (section) main.append(section);
     }
     const hasAside = Boolean(decisions || activity);
     app.append(el("div", { class: `board${hasAside ? "" : " solo"}` }, main, hasAside ? aside : null));
   } else {
-    for (const section of [storyboard, found, renders]) {
+    for (const section of [reels, storyboard, found, renders]) {
       if (section) app.append(section);
     }
   }
@@ -1112,6 +1173,7 @@ function normalize(s) {
   s.media.renders = Array.isArray(s.media.renders) ? s.media.renders : [];
   s.media.snapshots = Array.isArray(s.media.snapshots) ? s.media.snapshots : [];
   s.media.music = Array.isArray(s.media.music) ? s.media.music : [];
+  s.reels = Array.isArray(s.reels) ? s.reels : null;
   s.events = Array.isArray(s.events) ? s.events : [];
   if (s.storyboard && Array.isArray(s.storyboard.scenes)) {
     for (const c of s.storyboard.scenes) {
