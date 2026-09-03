@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from tools.base_tool import ToolResult, ToolStatus
-from tools.video.video_selector import VideoSelector
+from tools.video.video_selector import ProviderPinUnresolvedError, VideoSelector
 
 
 class _StubTool:
@@ -321,3 +321,215 @@ def test_ark_local_reference_routes_without_fal_upload(rankings, monkeypatch, tm
     assert "image_url" not in ark.last_execute_inputs
     assert result.data["selected_tool"] == "seedance_ark"
     assert result.data["selected_provider"] == "ark"
+
+
+# ---------------------------------------------------------------------------
+# #40 / spec §2.3 D1-D3 — estimate integrity
+#
+# The shipped probe table (verified by execution against the live registry):
+#
+#     allowed_providers=None              -> $1.5200   (seedance standard default)
+#     allowed_providers=["kling"]         -> $0.1000
+#     allowed_providers=["gemini_omni"]   -> $0.5000
+#     allowed_providers=["fal"]           -> $0.0000   <- no-candidate branch
+#     allowed_providers=["typo_provider"] -> $0.0000
+#
+# The two zeros were the defect: a $0.00 estimate is exempt from BOTH cost_tracker
+# approval guards, so a mistyped pin seeded an unguarded line item that only failed
+# later in execute(). They must raise now. The three prices are pinned twice — on the
+# provider tools (the live dollar figures) and through the selector with stubs (the
+# routing), so a re-pricing or a re-route fails CI instead of silently changing a batch.
+# ---------------------------------------------------------------------------
+
+def _probe_providers() -> list[_StubTool]:
+    """Stand-ins priced at the live probe figures."""
+    return [
+        _StubTool("seedance_video", "seedance", cost=1.52),
+        _StubTool("kling_video", "kling", cost=0.10),
+        _StubTool("gemini_omni_video", "gemini_omni", cost=0.50),
+    ]
+
+
+@pytest.fixture()
+def probe_selector(rankings):
+    """A selector over the three probe providers, seedance ranked top (the default route)."""
+    providers = _probe_providers()
+    rankings.extend([
+        _ScoreStub("seedance_video", "seedance", 0.90),
+        _ScoreStub("gemini_omni_video", "gemini_omni", 0.70),
+        _ScoreStub("kling_video", "kling", 0.60),
+    ])
+    sel = VideoSelector()
+    sel._providers = lambda: providers  # type: ignore[assignment]
+    return sel
+
+
+def test_live_probe_prices_are_pinned():
+    """The dollar figures the cost model is derived from (spec §5.2)."""
+    from tools.video.kling_video import KlingVideo
+    from tools.video.seedance_video import SeedanceVideo
+    from tools.video.gemini_omni_video import GeminiOmniVideo
+
+    five_seconds = {"prompt": "gym b-roll", "duration": "5"}
+    assert KlingVideo().estimate_cost(five_seconds) == pytest.approx(0.10)
+    assert GeminiOmniVideo().estimate_cost(five_seconds) == pytest.approx(0.50)
+    assert SeedanceVideo().estimate_cost(five_seconds) == pytest.approx(1.52)
+
+
+def test_unpinned_estimate_routes_to_the_expensive_default(probe_selector):
+    """D1 — no pin means the top-ranked (expensive) provider prices the clip."""
+    assert probe_selector.estimate_cost({"prompt": "x"}) == pytest.approx(1.52)
+
+
+def test_pinned_estimates_price_the_pinned_provider(probe_selector):
+    """A resolvable pin prices that provider, not the top-ranked one."""
+    assert probe_selector.estimate_cost(
+        {"prompt": "x", "allowed_providers": ["kling"]}
+    ) == pytest.approx(0.10)
+    assert probe_selector.estimate_cost(
+        {"prompt": "x", "allowed_providers": ["gemini_omni"]}
+    ) == pytest.approx(0.50)
+
+
+@pytest.mark.parametrize("pin", [["fal"], ["typo_provider"]])
+def test_unresolvable_pin_raises_instead_of_estimating_zero(probe_selector, pin):
+    """D2 — an unresolvable pin must raise, never return an unguardable $0.00."""
+    with pytest.raises(ProviderPinUnresolvedError) as excinfo:
+        probe_selector.estimate_cost({"prompt": "x", "allowed_providers": pin})
+    assert "allowed_providers" in str(excinfo.value)
+
+
+def test_pin_on_an_unavailable_provider_raises(rankings):
+    """A pin naming a real-but-unavailable provider is unresolvable too."""
+    kling = _StubTool("kling_video", "kling", status=ToolStatus.UNAVAILABLE, cost=0.10)
+    seedance = _StubTool("seedance_video", "seedance", cost=1.52)
+    rankings.extend([
+        _ScoreStub("seedance_video", "seedance", 0.90),
+        _ScoreStub("kling_video", "kling", 0.60),
+    ])
+    sel = VideoSelector()
+    sel._providers = lambda: [kling, seedance]  # type: ignore[assignment]
+
+    with pytest.raises(ProviderPinUnresolvedError):
+        sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]})
+
+
+def test_unpinned_estimate_with_no_providers_still_returns_zero():
+    """Backward compatibility: only a PIN turns the zero branch into a raise."""
+    sel = VideoSelector()
+    sel._providers = lambda: []  # type: ignore[assignment]
+    assert sel.estimate_cost({"prompt": "x"}) == 0.0
+
+
+# --- D3: the estimate/execute split ---------------------------------------
+
+def test_execute_flags_divergence_from_the_estimated_pin(probe_selector):
+    """D3 — pricing with ["kling"] then executing unpinned is a 15x under-price.
+
+    It slips both approval guards ($0.10 < $0.50), so the selector records the
+    divergence on the result where a reviewer (and this test) can see it.
+    """
+    gate_inputs = {"prompt": "x", "allowed_providers": ["kling"]}
+    assert probe_selector.estimate_cost(gate_inputs) == pytest.approx(0.10)
+
+    result = probe_selector.execute({"prompt": "x"})  # pin dropped
+
+    assert result.success is True
+    divergence = result.data["estimate_divergence"]
+    assert divergence["estimated_provider"] == "kling"
+    assert divergence["executed_provider"] == "seedance"
+    assert divergence["estimated_usd"] == pytest.approx(0.10)
+    assert divergence["executed_estimate_usd"] == pytest.approx(1.52)
+    assert divergence["estimated_routing"]["allowed_providers"] == ["kling"]
+    assert divergence["executed_routing"]["allowed_providers"] == []
+
+
+def test_execute_with_the_estimated_inputs_reports_no_divergence(probe_selector):
+    """The rule the directors follow: build the inputs dict once, pass the same one."""
+    inputs = {"prompt": "x", "allowed_providers": ["kling"], "duration": "5"}
+    estimated = probe_selector.estimate_cost(inputs)
+
+    result = probe_selector.execute(inputs)
+
+    assert result.success is True
+    assert "estimate_divergence" not in result.data
+    assert result.data["executed_estimate_usd"] == pytest.approx(estimated)
+
+
+def test_execute_without_a_prior_estimate_reports_no_divergence(probe_selector):
+    """Nothing to diverge from — but the executed price is still recorded."""
+    result = probe_selector.execute({"prompt": "x"})
+
+    assert "estimate_divergence" not in result.data
+    assert result.data["executed_estimate_usd"] == pytest.approx(1.52)
+
+
+# ---------------------------------------------------------------------------
+# Live routing — no stubs. The tests above patch rank_providers, so they
+# police the selector's plumbing but say nothing about what the REAL scorer
+# does with the REAL registry. The cost model in spec §5 rests on that, so
+# it gets its own check.
+# ---------------------------------------------------------------------------
+def _live_selector():
+    from tools.tool_registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.discover()
+    return registry.get("video_selector")
+
+
+def _kling_is_live() -> bool:
+    from tools.video.kling_video import KlingVideo
+    from tools.base_tool import ToolStatus
+
+    return KlingVideo().get_status() == ToolStatus.AVAILABLE
+
+
+@pytest.mark.skipif(not _kling_is_live(), reason="kling_video not credentialed here")
+def test_pinning_actually_redirects_the_real_scorer():
+    """The whole cost model assumes a pin changes where the money goes.
+
+    No monkeypatch: real registry, real rank_providers, real prices. If
+    allowed_providers stopped being honoured by the scorer, every figure in
+    spec §5 would be fiction and this is the test that would say so.
+    """
+    sel = _live_selector()
+    clip = {"prompt": "gym atmosphere", "duration": "5", "aspect_ratio": "9:16"}
+
+    unpinned = sel.estimate_cost(dict(clip))
+    pinned = sel.estimate_cost({**clip, "allowed_providers": ["kling"]})
+
+    from tools.video.kling_video import KlingVideo
+
+    assert pinned == pytest.approx(KlingVideo().estimate_cost(clip)), (
+        "a kling pin must price at kling's own rate, not the selector's default"
+    )
+    assert unpinned > pinned, (
+        f"unpinned ({unpinned}) should route somewhere pricier than a kling "
+        f"pin ({pinned}); if these converge the pin has stopped mattering"
+    )
+
+
+@pytest.mark.skipif(not _kling_is_live(), reason="kling_video not credentialed here")
+def test_five_reel_shortfall_costs_fifty_cents():
+    """Spec §5.3: a full five-reel pool shortfall is 5 x $0.10 = $0.50."""
+    sel = _live_selector()
+    clip = {
+        "prompt": "gym atmosphere",
+        "duration": "5",
+        "aspect_ratio": "9:16",
+        "allowed_providers": ["kling"],
+    }
+    assert sum(sel.estimate_cost(dict(clip)) for _ in range(5)) == pytest.approx(0.50)
+
+
+def test_rank_operation_still_prices_free_under_an_unresolvable_pin():
+    """The guard protects PAID line items; a ranking query is free and read-only.
+
+    Raising here would be a behaviour regression for callers that only ever
+    wanted the shortlist.
+    """
+    sel = _live_selector()
+    assert sel.estimate_cost(
+        {"prompt": "x", "operation": "rank", "allowed_providers": ["typo_provider"]}
+    ) == 0.0

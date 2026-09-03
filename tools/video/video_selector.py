@@ -12,9 +12,21 @@ import os
 from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
 
 
+class ProviderPinUnresolvedError(ValueError):
+    """An ``allowed_providers`` pin matched no live video provider.
+
+    Raised by :meth:`VideoSelector.estimate_cost` instead of returning $0.00.
+    A zero estimate is exempt from BOTH cost_tracker approval guards
+    (``estimated > single_action_approval_usd`` and
+    ``require_approval_for_new_paid_tool and estimated > 0``), so a mistyped or
+    unavailable pin used to seed an unguarded line item that only blew up later
+    in ``execute()``.
+    """
+
+
 class VideoSelector(BaseTool):
     name = "video_selector"
-    version = "0.3.1"
+    version = "0.4.0"
     tier = ToolTier.GENERATE
     capability = "video_generation"
     provider = "selector"
@@ -27,6 +39,9 @@ class VideoSelector(BaseTool):
     MOTION_REQUIRED_OPERATIONS = frozenset({"image_to_video", "reference_to_video", "video_edit"})
     # Default score gap for the preferred_provider override (see input_schema).
     PREFERRED_PROVIDER_GAP = 0.15
+    # Routing slice + price of the most recent estimate_cost call on this instance.
+    # Set by estimate_cost, read by execute to detect an estimate/execute divergence.
+    _last_estimate: dict[str, object] | None = None
 
     capabilities = [
         "text_to_video", "image_to_video", "reference_to_video", "video_edit", "stock_video",
@@ -292,11 +307,95 @@ class VideoSelector(BaseTool):
         return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, object]) -> float:
-        candidates = self._filter_candidates(inputs, self._providers())
-        if not candidates:
+        """Price ONE call through the provider this brief would actually route to.
+
+        Pass the SAME inputs dict to :meth:`execute`. The routing slice of that
+        dict (``allowed_providers`` / ``preferred_provider`` / ``operation`` /
+        ``model`` / ``duration``) is remembered here, and ``execute`` stamps
+        ``estimate_divergence`` on its result when it is handed a different one —
+        pricing with ``allowed_providers=["kling"]`` ($0.10) and then executing
+        unpinned (seedance, $1.52) is a 15x under-price that slips both approval
+        guards, and it must not stay silent.
+
+        Raises :class:`ProviderPinUnresolvedError` when an ``allowed_providers``
+        pin resolves to no live provider, rather than returning an unguardable $0.00.
+        """
+        providers = self._providers()
+        candidates = self._filter_candidates(inputs, providers)
+        tool = None
+        if candidates:
+            tool, _ = self._select_best_tool(
+                inputs, candidates, self._prepare_task_context(inputs)
+            )
+        if tool is None:
+            # 'rank' is a free, read-only query — it priced at $0.00 before this
+            # hardening and must keep doing so. The guard exists to stop an
+            # unresolvable pin seeding an unguarded PAID line item; refusing a
+            # ranking request would be a behaviour regression for callers that
+            # only ever wanted the shortlist.
+            if inputs.get("allowed_providers") and inputs.get("operation") != "rank":
+                raise ProviderPinUnresolvedError(
+                    f"allowed_providers={list(inputs['allowed_providers'])} matches no "
+                    f"available video provider for operation "
+                    f"{inputs.get('operation', 'text_to_video')!r} "
+                    f"(live providers: {sorted({t.provider for t in providers})}). "
+                    "Fix the pin — a $0.00 estimate would bypass both approval guards."
+                )
             return 0.0
-        tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_cost(inputs) if tool else 0.0
+        cost = tool.estimate_cost(inputs)
+        self._last_estimate = {
+            "routing": self._routing_slice(inputs),
+            "provider": tool.provider,
+            "estimated_usd": cost,
+        }
+        return cost
+
+    @staticmethod
+    def _routing_slice(inputs: dict[str, object]) -> dict[str, object]:
+        """The part of an inputs dict that decides which provider bills, and how much."""
+        return {
+            "allowed_providers": sorted(str(p) for p in (inputs.get("allowed_providers") or [])),
+            "preferred_provider": str(inputs.get("preferred_provider", "auto")),
+            "operation": str(inputs.get("operation", "text_to_video")),
+            "model": str(inputs.get("model", "")),
+            "duration": str(inputs.get("duration", "")),
+        }
+
+    def _estimate_divergence(
+        self, inputs: dict[str, object], tool: BaseTool
+    ) -> dict[str, object] | None:
+        """Compare this execution's routing slice against the last estimate's.
+
+        Returns None when no estimate was taken on this selector, or when the
+        estimate priced exactly what is now being executed.
+        """
+        # One estimate answers for exactly one execution. The registry hands
+        # out a single VideoSelector for the whole run, so a baseline left
+        # standing would be compared against an unrelated later stage and
+        # stamp a divergence that never happened.
+        prior = self._last_estimate
+        self._last_estimate = None
+        if not prior:
+            return None
+        routing = self._routing_slice(inputs)
+        if routing == prior["routing"]:
+            return None
+        return {
+            "estimated_routing": prior["routing"],
+            "executed_routing": routing,
+            "estimated_provider": prior["provider"],
+            "executed_provider": tool.provider,
+            "estimated_usd": prior["estimated_usd"],
+            "executed_estimate_usd": self._safe_estimate(tool, inputs),
+        }
+
+    @staticmethod
+    def _safe_estimate(tool: BaseTool, inputs: dict[str, object]) -> float | None:
+        """A provider's own price for these inputs, or None if it declines to price them."""
+        try:
+            return tool.estimate_cost(inputs)
+        except Exception:
+            return None
 
     def estimate_runtime(self, inputs: dict[str, object]) -> float:
         candidates = self._providers()
@@ -329,7 +428,11 @@ class VideoSelector(BaseTool):
         task_context = self._prepare_task_context(inputs)
         tool, score = self._select_best_tool(inputs, candidates, task_context)
         if tool is None:
-            return ToolResult(success=False, error="No video generation provider available.")
+            pinned = list(inputs.get("allowed_providers") or [])
+            detail = f" for allowed_providers={pinned}" if pinned else ""
+            return ToolResult(
+                success=False, error=f"No video generation provider available{detail}."
+            )
 
         # Adapt input keys: stock tools use 'query' while generators use 'prompt'
         adapted = dict(inputs)
@@ -351,6 +454,13 @@ class VideoSelector(BaseTool):
 
         result = tool.execute(adapted)
         if result.success:
+            # Estimate integrity: record what this call actually priced at, and flag
+            # it when the routing differs from what estimate_cost was asked to price
+            # (a pinned gate + an unpinned execution is a silent under-price).
+            result.data["executed_estimate_usd"] = self._safe_estimate(tool, inputs)
+            divergence = self._estimate_divergence(inputs, tool)
+            if divergence:
+                result.data["estimate_divergence"] = divergence
             result.data.setdefault("selected_tool", tool.name)
             result.data["selected_provider"] = tool.provider
             result.data["selection_reason"] = score.explain() if score else f"Selected {tool.provider} ({tool.name})"
