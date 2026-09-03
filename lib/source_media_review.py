@@ -38,7 +38,9 @@ def detect_media_type(path: Path) -> Optional[str]:
     return None
 
 
-def _probe_video(path: Path, tool_registry: Any) -> dict[str, Any]:
+def _probe_video(
+    path: Path, tool_registry: Any, frames_dir: Optional[Path] = None
+) -> dict[str, Any]:
     """Probe a video file using audio_probe (ffprobe wrapper) and frame_sampler."""
     result: dict[str, Any] = {"technical_probe": {}, "representative_frames": [], "quality_risks": []}
 
@@ -88,13 +90,22 @@ def _probe_video(path: Path, tool_registry: Any) -> dict[str, Any]:
         if frame_sampler:
             duration = result["technical_probe"].get("duration_seconds", 0)
             timestamps = _sample_timestamps(duration, count=4)
+            out_dir = frames_dir or (path.parent / ".source_review_frames")
             sample_result = frame_sampler.execute({
                 "input_path": str(path),
+                # `strategy` is required by frame_sampler's schema and read
+                # unguarded in its execute(); omitting it raised KeyError into
+                # the except below, so representative_frames never populated.
+                "strategy": "timestamps",
                 "timestamps": timestamps,
-                "output_dir": str(path.parent / ".source_review_frames"),
+                "output_dir": str(Path(out_dir) / path.stem),
             })
             if sample_result.success:
-                result["representative_frames"] = sample_result.data.get("frame_paths", [])
+                # The tool returns `frames`: [{path, timestamp_seconds, index}].
+                # There has never been a `frame_paths` key.
+                result["representative_frames"] = [
+                    f["path"] for f in sample_result.data.get("frames", []) if f.get("path")
+                ]
     except Exception as e:
         logger.warning("frame_sampler failed for %s: %s", path, e)
 
@@ -221,7 +232,10 @@ def review_source_media(
 
     Args:
         files: Paths to user-supplied media files.
-        context: Dict with optional keys like 'pipeline_type', 'project_dir'.
+        context: Dict with optional keys like 'pipeline_type', 'project_dir',
+            'transcribe' (default True — set False when only the picture matters,
+            e.g. indexing a footage pool), and 'frames_dir' (where sampled frames
+            are written; defaults to a dot-folder beside each source file).
         tool_registry: The tool registry instance (for accessing analysis tools).
 
     Returns:
@@ -240,6 +254,8 @@ def review_source_media(
     reviewed_files: list[dict[str, Any]] = []
     all_implications: list[str] = []
     summaries: list[str] = []
+    frames_dir = context.get("frames_dir")
+    want_transcript = context.get("transcribe", True)
 
     for file_path in files:
         media_type = detect_media_type(file_path)
@@ -259,7 +275,7 @@ def review_source_media(
 
         # Probe based on media type
         if media_type == "video":
-            probe_data = _probe_video(file_path, tool_registry)
+            probe_data = _probe_video(file_path, tool_registry, frames_dir)
         elif media_type == "audio":
             probe_data = _probe_audio(file_path, tool_registry)
         else:
@@ -270,7 +286,11 @@ def review_source_media(
         entry["representative_frames"] = probe_data.get("representative_frames", [])
 
         # Attempt transcription for audio/video
-        transcript = _transcribe_if_available(file_path, media_type, tool_registry)
+        transcript = (
+            _transcribe_if_available(file_path, media_type, tool_registry)
+            if want_transcript
+            else None
+        )
         if transcript:
             entry["transcript_summary"] = transcript
 

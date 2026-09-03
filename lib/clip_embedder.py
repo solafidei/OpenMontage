@@ -23,6 +23,8 @@ That intelligence lives in the corpus manager and retrieval skills.
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 from typing import Iterable, Sequence, Union
 
@@ -47,8 +49,29 @@ def _load() -> None:
     from transformers import CLIPModel, CLIPProcessor  # type: ignore
 
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    _PROCESSOR = CLIPProcessor.from_pretrained(_MODEL_ID)
-    _MODEL = CLIPModel.from_pretrained(_MODEL_ID).to(_DEVICE)
+
+    # Cached weights only. Every tool that embeds declares
+    # resource_profile.network_required=False, and without this that is false:
+    # transformers contacts huggingface.co on each load even when the weights
+    # are already on disk, which on a merely-faulty network costs minutes of
+    # retry backoff before anything is embedded.
+    #
+    # local_files_only is passed at the call rather than via HF_HUB_OFFLINE
+    # because the hub reads that env var into a module constant at import
+    # time, so setting it later silently does nothing.
+    #
+    # Set OPENMONTAGE_CLIP_DOWNLOAD=1 for the one-off first fetch.
+    offline = os.environ.get("OPENMONTAGE_CLIP_DOWNLOAD") != "1"
+    try:
+        _PROCESSOR = CLIPProcessor.from_pretrained(_MODEL_ID, local_files_only=offline)
+        _MODEL = CLIPModel.from_pretrained(_MODEL_ID, local_files_only=offline).to(_DEVICE)
+    except OSError as exc:
+        if not offline:
+            raise
+        raise OSError(
+            f"CLIP weights for {_MODEL_ID} are not in the local cache. Run once with "
+            "OPENMONTAGE_CLIP_DOWNLOAD=1 to fetch them, then embedding works offline."
+        ) from exc
     _MODEL.eval()
 
 
