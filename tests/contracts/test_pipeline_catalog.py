@@ -112,9 +112,12 @@ def _table_pipelines(relative_path: str, heading: str) -> set[str]:
         if not stripped:
             continue
         if not stripped.startswith("|"):
-            if names:
-                break
-            continue
+            # Stop at the first prose after the HEADING, not after the first
+            # row. AGENT_GUIDE.md carries several other tables; skipping
+            # onwards when this section had no table at all would silently
+            # report the Layer-3 skills table as the pipeline list, and the
+            # sync assertion would then pass against the wrong data.
+            break
         # Delimiter rows differ in dash count across the three files.
         if re.fullmatch(r"\|[-\s|:]+\|", stripped):
             continue

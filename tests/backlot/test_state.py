@@ -466,3 +466,108 @@ def test_a_malformed_reel_plan_never_breaks_the_board(projects_root, plan):
 
     assert s["reels"] is None
     assert s["project_id"] == "half-written"
+
+
+def test_reel_output_comes_from_the_compose_checkpoint_when_it_has_one(projects_root):
+    """`reel_outputs` lives on the compose CHECKPOINT's partial_progress.
+
+    Not on `render_report` — that was a branch that could never fire, so every
+    card silently fell through to the filename convention and a mid-batch board
+    could not show what the run already knew. Here the checkpoint names a file
+    the convention would never find.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    (p / "renders" / "hand_named_master.mp4").write_bytes(b"finished")
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {
+            "completed_reel_ids": ["reel_01"],
+            "reel_outputs": {"reel_01": "renders/hand_named_master.mp4"},
+        }},
+    })
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_01"]["output"] == "renders/hand_named_master.mp4"
+    # The other four have neither a report nor a file.
+    assert [by_id[f"reel_{n:02d}"]["output"] for n in range(2, 6)] == [None] * 4
+
+
+def test_a_checkpoint_reported_output_cannot_escape_the_project(projects_root):
+    """The checkpoint is agent-written, so this is a trust boundary.
+
+    `/media` serves only within the project directory (security fix F-04), so a
+    card pointing outside it would 404 at best and serve the wrong file at
+    worst. The card degrades to "not rendered yet" rather than to a bad link.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {"reel_outputs": {
+            "reel_01": "../../../etc/passwd",
+            "reel_02": "/etc/passwd",
+        }}},
+    })
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_01"]["output"] is None
+    assert by_id["reel_02"]["output"] is None
+
+
+def test_a_reported_output_that_is_the_picture_intermediate_is_refused(projects_root):
+    """Even named outright, the un-captioned master is not the deliverable."""
+    p = _reel_batch_project(projects_root, rendered=1)
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {
+            "reel_outputs": {"reel_02": "renders/reel_02-picture.mp4"},
+        }},
+    })
+    (p / "renders" / "reel_02-picture.mp4").write_bytes(b"intermediate")
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_02"]["output"] is None
+
+
+def test_a_lone_picture_file_is_never_offered_as_a_deliverable(projects_root):
+    """A crashed batch leaves `<reel_id>-picture.mp4` with no master beside it.
+
+    Nothing marks it `intermediate` then — that flag needs a finished sibling —
+    so the only thing keeping it off the card is the stem-keyed lookup:
+    `reel_01-picture` is not `reel_01`. This pins that naming contract. Rename
+    the intermediate to a suffix-free scheme and the un-captioned cut starts
+    showing up as the finished reel.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    (p / "renders" / "reel_01-picture.mp4").write_bytes(b"crashed mid-batch")
+
+    s = load_board_state(p)
+
+    assert s["reels"][0]["output"] is None
+
+
+def test_one_bad_reel_entry_costs_that_card_and_not_the_section(projects_root):
+    """Four cards beat none. A batch board is most useful when something is
+    already wrong, so it must survive a half-written entry."""
+    p = _reel_batch_project(projects_root)
+    plan = json.loads((p / "artifacts" / "reel_plan.json").read_text(encoding="utf-8"))
+    plan["reels"][2]["cut_ids"] = {"not": "a list"}
+    plan["reels"][3]["reel_id"] = ["also", "wrong"]
+    # An unhashable music_asset_id raises inside the card builder rather than
+    # being type-checked away — that is the case the try/except is for.
+    plan["reels"][4]["music_asset_id"] = {"unhashable": True}
+    _write(p / "artifacts" / "reel_plan.json", plan)
+
+    s = load_board_state(p)
+
+    ids = [c["reel_id"] for c in s["reels"]]
+    assert "reel_04" not in ids           # unusable id — dropped
+    assert "reel_05" not in ids           # raised while resolving its track
+    assert ids == ["reel_01", "reel_02", "reel_03"]
+    # A wrong-typed cut_ids costs the count, not the card.
+    assert next(c for c in s["reels"] if c["reel_id"] == "reel_03")["cut_count"] == 0

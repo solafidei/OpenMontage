@@ -733,7 +733,8 @@ class CostTrackerGovernanceTests(unittest.TestCase):
     def test_reel_batch_output_minutes_sum_across_reels(self) -> None:
         """The cap is priced on the batch, not on one reel.
 
-        Five ten-second reels are 0.8333 output minutes. At the manifest's
+        Five ten-second reels are 0.8333 output minutes (the figure the
+        manifest's own orchestration comment documents). At the manifest's
         live rate that prices below the flat floor, so the floor governs —
         and the floor must still clear `min_workable_usd` for the spec's
         worst-case $0.50 sitting, or a bare "approve" drops the operator into
@@ -744,8 +745,13 @@ class CostTrackerGovernanceTests(unittest.TestCase):
         rate_usd = orchestration["budget_per_output_minute_usd"]
         reserve_pct = OpenMontageConfig.load().budget.reserve_pct
 
+        one_reel_minutes = self._reel_batch_output_minutes(1)
         five_reel_minutes = self._reel_batch_output_minutes(5)
-        self.assertAlmostEqual(five_reel_minutes, 0.8333, places=4)
+
+        # The claim in this test's name: minutes are a batch total, not a reel
+        # figure. Asserted as a relation rather than against a copied 0.8333,
+        # so changing REEL_SECONDS moves the test instead of reddening it.
+        self.assertAlmostEqual(five_reel_minutes, 5 * one_reel_minutes)
 
         cap = self._documented_cap_usd(flat_usd, rate_usd, five_reel_minutes)
 
@@ -774,14 +780,16 @@ class CostTrackerGovernanceTests(unittest.TestCase):
         constant equals itself: at five reels the floor governs and the rate
         is decorative, so only a batch large enough to cross over shows the
         rate is live at all. Twenty ten-second reels is 3.3333 minutes.
+
+        Both figures are derived from REEL_SECONDS and the manifest, never
+        copied — an earlier version pinned them as literals, which meant
+        changing the reel length reddened the test instead of moving it.
         """
         orchestration = self._manifest_orchestration("reel-batch")
         flat_usd = orchestration["budget_default_usd"]
         rate_usd = orchestration["budget_per_output_minute_usd"]
 
         twenty_reel_minutes = self._reel_batch_output_minutes(20)
-        self.assertAlmostEqual(twenty_reel_minutes, 3.3333, places=4)
-
         cap = self._documented_cap_usd(flat_usd, rate_usd, twenty_reel_minutes)
 
         self.assertAlmostEqual(cap, round(rate_usd * twenty_reel_minutes, 2))
@@ -858,8 +866,12 @@ class CostTrackerGovernanceTests(unittest.TestCase):
         resolves them differently: reel 4 was RESERVED, so the call may have
         fired and been billed — reconcile at its estimate with success=False,
         because overstating is the safe direction for a budget guard. Reel 5
-        was only ESTIMATED, a placeholder that never executed — refund it, or
-        it holds phantom spend against the retry.
+        was only ESTIMATED, a placeholder that never executed — refund it,
+        which is placeholder hygiene rather than a budget correction: an
+        `estimated` entry holds no money (only `reserved` does), so what a
+        refund buys is a terminal state. A ledger with a non-terminal entry
+        cannot be reconciled, and `reconcile` would instead book spend that
+        never happened.
         """
         import tempfile
 
@@ -946,12 +958,22 @@ class CostTrackerGovernanceTests(unittest.TestCase):
         """The negative control, and the whole justification for per-reel booking.
 
         Booking one entry for the batch is what the batching rule would ask
-        for. Abort at reel three and there is no `reconcile` argument that is
-        both terminal and honest: settle at the estimate and the ledger claims
-        spend that never happened, and the correction is refused because the
-        entry has already settled. The overstatement is larger than a whole
-        reel — which is the number that matters in cap mode, where phantom
-        spend shrinks the budget the retry has to work in.
+        for. Abort at reel three and no settlement of that entry is honest,
+        because a batch entry has ONE status and the batch has two outcomes:
+        three reels billed and finished, two that never fired.
+
+        - `success=True` marks the entry `completed` — the ledger then says
+          the whole batch succeeded, and `completed_reel_ids` disagrees.
+        - `success=False` marks it `failed` — the three finished reels are now
+          recorded as a failure, and a resume reads that as work to redo.
+        - Either way one amount stands for five reels: settle at the estimate
+          and $0.20 of phantom spend shrinks the cap-mode budget the retry has
+          to work in; settle at the true $0.30 and the status is still a lie.
+
+        And it is one-shot: the entry is terminal, so whichever lie you told
+        is the one that stays. Per-reel booking gives each reel its own status
+        and its own number, which is the only shape that can describe a
+        partial batch at all.
         """
         import tempfile
 
@@ -977,7 +999,8 @@ class CostTrackerGovernanceTests(unittest.TestCase):
             # Three of five reels got their cutaway before the abort.
             honest_usd = reels_completed * per_reel_usd
 
-            # The only terminal move available: settle at the estimate.
+            # Settle at the estimate — the move an agent makes when it cannot
+            # attribute spend to individual reels.
             tracker.reconcile(entry_id, batch_estimate_usd, success=False)
 
             overstatement_usd = tracker.budget_spent_usd - honest_usd
@@ -988,6 +1011,12 @@ class CostTrackerGovernanceTests(unittest.TestCase):
                 "a single batched entry must overstate by more than one reel — "
                 "otherwise per-reel booking buys nothing",
             )
+
+            # The status is the half that no amount can fix. Three reels
+            # finished and this entry calls the batch a failure; had it been
+            # settled at the honest $0.30 with success=True it would call the
+            # two that never ran a success. One status, two outcomes.
+            self.assertEqual(tracker.entries[0]["status"], "failed")
 
             # And the correction is refused BY TYPE. Asserting on the class
             # rather than the message ties this to tools/cost_tracker.py's

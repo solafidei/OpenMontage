@@ -1600,14 +1600,27 @@ class VideoCompose(BaseTool):
         # whose declaration contradicts its producer is the failure this gate
         # exists for — an operator clip relabelled `ai_generated` is an operator
         # clip with its identity protection switched off.
-        assets_by_id = {
-            a.get("id"): a for a in (asset_manifest or {}).get("assets", []) if a.get("id")
-        }
+        # Keyed by BOTH id and path, because `_render` resolves a cut's `source`
+        # either way (`if source_id in asset_lookup` — else it is opened as a
+        # path). Keyed on id alone, naming the operator's clip by its filename
+        # instead of its manifest id walked straight past this check while the
+        # corroborating row sat in the same manifest. `setdefault` so the first
+        # row wins: a duplicate id appended later must not shadow the original.
+        assets_by_ref: dict[str, dict] = {}
+        for asset in (asset_manifest or {}).get("assets", []):
+            for key in (asset.get("id"), asset.get("path")):
+                if key:
+                    assets_by_ref.setdefault(key, asset)
+
+        # What the manifest says each cut's pixels are, where it knows.
+        implied: dict[str, str] = {}
         for cut in edit_decisions.get("cuts") or []:
-            asset = assets_by_id.get(cut.get("source"))
+            asset = assets_by_ref.get(cut.get("source"))
             if not asset:
                 continue
             expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
+            if expected:
+                implied[cut.get("id")] = expected
             declared = cut.get("provenance")
             if expected and declared and declared != expected:
                 blocks.append(
@@ -1626,13 +1639,39 @@ class VideoCompose(BaseTool):
         if batch_look:
             from lib.polish_filters import PolishError, look_filters
 
-            for cut in edit_decisions.get("cuts") or []:
-                try:
-                    look_filters(batch_look, cut.get("provenance"))
-                except PolishError as e:
-                    blocks.append(
-                        f"Identity violation on cut {cut.get('id')!r}: {e}"
-                    )
+            # One look for the whole batch, so it is one verdict per distinct
+            # provenance — not one line per cut. A hundred-cut batch used to
+            # emit a hundred identical lines.
+            #
+            # Unlocked first, which separates the two reasons `look_filters`
+            # raises: a name it cannot resolve is a typo in the look, and
+            # calling that an "identity violation" sent whoever hit it looking
+            # for a provenance bug that was not there.
+            try:
+                look_filters(batch_look, None)
+            except PolishError as e:
+                blocks.append(f"Invalid batch_look: {e}")
+            else:
+                by_provenance: dict[str | None, list[str]] = {}
+                for cut in edit_decisions.get("cuts") or []:
+                    # A cut that omits `provenance` falls back to what its
+                    # asset row implies. Omission was the softer hole: the
+                    # manifest said `footage_library` and the gate let a colour
+                    # grade through anyway, because the word was missing from
+                    # the cut. Where the manifest knows, silence is no waiver.
+                    provenance = cut.get("provenance") or implied.get(cut.get("id"))
+                    by_provenance.setdefault(provenance, []).append(cut.get("id"))
+
+                for provenance, cut_ids in by_provenance.items():
+                    try:
+                        look_filters(batch_look, provenance)
+                    except PolishError as e:
+                        shown = ", ".join(repr(c) for c in cut_ids[:3])
+                        more = f" (+{len(cut_ids) - 3} more)" if len(cut_ids) > 3 else ""
+                        blocks.append(
+                            f"Identity violation on {len(cut_ids)} "
+                            f"{provenance!r} cut(s) — {shown}{more}: {e}"
+                        )
 
         # Log warnings
         for w in warnings:

@@ -134,7 +134,7 @@ value the closed enum (`:227`) would reject — for this pipeline the value is
 Leave `metadata.compose_target` **unset**: `compose-director` renders at
 `profile: instagram_reels` (1080x1920, `lib/media_profiles.py:70-79`) and a
 portrait profile flips fit to `cover` on its own
-(`tools/video/video_compose.py:510-515`), while an explicit
+(`tools/video/video_compose.py:522-527`), while an explicit
 `compose_target.fit` beats the profile (`:502-504`) — a stray `"pad"` here
 letterboxes all five reels.
 
@@ -252,7 +252,7 @@ identically on every cut of every reel. `edit_decisions` has no typed slot for
 it, so it rides in `metadata.batch_look` — `metadata` is open (no
 `additionalProperties: false`, `schemas/artifacts/edit_decisions.schema.json:263-271`),
 the same route `compose_target`
-already takes to the renderer (`tools/video/video_compose.py:496-503`).
+already takes to the renderer (`tools/video/video_compose.py:508-515`).
 `compose-director` hands it over as `video_compose`'s `batch_look` input
 (`:205-219`, grade/grain/sharpen at `:215-217`), read at `:485` and applied per
 cut at `:623-626`.
@@ -290,7 +290,7 @@ except PolishError as exc:
 
 Leave `grain` out entirely: it is refused on every operator cut anyway, and
 `look_filters` never bounds its magnitude — only `video_compose`'s input schema
-declares `minimum: 0` (`tools/video/video_compose.py:216`).
+declares `minimum: 0` (`tools/video/video_compose.py:236`).
 
 ### 5. Caption Style — `reel_pop` And The 9:16 Safe Zone
 
@@ -331,7 +331,7 @@ own lower UI band (`:125-133`).
 
 **Do not set `subtitles.source` on the spine.** One `source` cannot name five
 subtitle files, and `_compose` reads `subtitles["source"]` *without* checking
-`enabled` (`tools/video/video_compose.py:538-540`) — a source left here burns a
+`enabled` (`tools/video/video_compose.py:550-552`) — a source left here burns a
 static SRT into the picture plane underneath the Remotion pop captions: two
 caption tracks, one video. The per-reel caption asset id lives in
 `reel_plan.subtitle_source`; for the same reason the per-reel track lives in

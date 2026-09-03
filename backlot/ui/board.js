@@ -876,9 +876,14 @@ function renderReels(s) {
 
 function renderRenders(s) {
   // A two-plane render leaves an un-captioned `-picture` master beside each
-  // deliverable. Listing both turned a five-reel batch into "10 versions".
-  const renders = s.media.renders.filter((r) => !r.intermediate);
-  if (!renders.length) return null;
+  // deliverable, which turned a five-reel batch into "10 versions". They stay
+  // listed and marked — that file is what you look at when the captions are
+  // wrong — but deliverables come first and the count names only them.
+  const all = s.media.renders;
+  if (!all.length) return null;
+  const renders = [...all.filter((r) => !r.intermediate),
+                   ...all.filter((r) => r.intermediate)];
+  const finished = all.length - all.filter((r) => r.intermediate).length;
   if (activeRender >= renders.length) activeRender = 0;
   const current = renders[activeRender];
   // Full re-renders (every SSE refresh) must not reset an in-progress
@@ -903,12 +908,14 @@ function renderRenders(s) {
     renders.map((r, i) => el("span", {
       class: `v${i === activeRender ? " active" : ""}`,
       onclick: () => { activeRender = i; render(); },
-    }, `${r.path.split("/").pop()}${r.at_root ? " · root" : ""}`)),
+    }, `${r.path.split("/").pop()}${r.at_root ? " · root" : ""}${r.intermediate ? " · picture" : ""}`)),
     el("span", { style: "margin-left:auto" }, `${(current.size / 1048576).toFixed(1)} MB`),
   );
   return el("div", {},
     el("div", { class: "section-title" }, "Renders",
-      el("span", { class: "meta" }, `${renders.length} version${renders.length === 1 ? "" : "s"}`)),
+      el("span", { class: "meta" },
+        `${finished} deliverable${finished === 1 ? "" : "s"}` +
+        (finished < renders.length ? ` · ${renders.length - finished} picture master${renders.length - finished === 1 ? "" : "s"}` : ""))),
     el("div", { class: "render-hero" }, video),
     versions);
 }

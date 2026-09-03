@@ -16,7 +16,7 @@ number. A brief written before the pool is indexed is a guess.
 | Schema | `brief.schema.json`, `source_media_review.schema.json` | Artifact validation — brief's root is `additionalProperties: false`, so batch detail lives in `metadata` |
 | Tool | `footage_library` (`tools/video/footage_library.py`) | Indexes the pool as identity-locked corpus segments |
 | Tool | `video_selector` (`tools/video/video_selector.py`) | Prices the pinned cutaway route — the only paid line in this pipeline |
-| Preflight | `registry.provider_menu_summary()["composition_runtimes"]` | Which runtimes exist on this machine (`AGENT_GUIDE.md:279`) |
+| Preflight | `registry.provider_menu_summary()["composition_runtimes"]` | Which runtimes exist on this machine (`AGENT_GUIDE.md:280`) |
 | Meta | `skills/meta/reviewer.md`, `skills/meta/checkpoint-protocol.md` | Self-review; checkpoint shape + Cost Ledger Governance |
 | Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Opens the ledger every later stage reopens |
 
@@ -126,7 +126,7 @@ the extra 0.4s being the probe between planes. That demo locks
 `profile: instagram_reels` (`:123-131`), then `remotion_caption_burn` (`:138-153`).
 
 Lock `render_runtime = "ffmpeg"` for the batch — the value `edit_decisions` carries and
-`video_compose` routes on (`tools/video/video_compose.py:1595-1621`). The Remotion text
+`video_compose` routes on (`tools/video/video_compose.py:1701-1727`). The Remotion text
 plane is a separate pass, not a runtime swap. Then log it:
 
 ```json

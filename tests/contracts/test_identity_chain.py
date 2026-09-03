@@ -23,19 +23,24 @@ WHAT THIS DOES NOT PROVE
 A director that labels an operator clip `ai_generated` in an `edit_decisions`
 with no matching asset-manifest row passes every check in this file. Link 4's
 cross-check narrows that gap — it catches the relabelling whenever the asset
-came from `footage_library` or `cutaway_gen`, which is every asset the
-reel-batch pipeline produces — but a hand-placed file with a hand-written
-provenance has nothing to be checked against. Default-deny at ingest is what
-makes the remaining gap small: the whole pool is locked, so mislabelling takes
-an active override rather than an omission.
+came from `footage_library` or `cutaway_gen`, whether the cut names that asset
+by its id or by its path, which between them is every asset the reel-batch
+pipeline produces — but a hand-placed file with a hand-written provenance has
+nothing to be checked against. And `source_tool` is itself written by the same
+agent that writes `provenance`: the cross-check catches a downstream rewrite
+and an inconsistent pair, not an author who lies in both fields at once.
+Default-deny at ingest is what makes the remaining gap small: the whole pool is
+locked, so mislabelling takes an active override rather than an omission.
 
-**Omission is the softer hole.** A cut with no `provenance` key at all is not
-blocked; `look_filters` treats it as unlocked and every grade resolves. The
-schema types `provenance` but does not require it. This is deliberate — the
-field is meaningless for the twelve pipelines that never touch operator
-footage — and it is why the reel-batch edit-director sets it on every cut and
-`test_reel_plan.py` asserts the spine carries it. It is a real limit, and it is
-how a demo in this repo once appeared to prove the guard while bypassing it.
+**Omission is closed only where the manifest knows.** A cut with no
+`provenance` key falls back to what its asset row implies, so silence is not a
+waiver when the asset came from `footage_library` or `cutaway_gen`. It still is
+one when nothing in the manifest matches the cut's `source` — an unreferenced
+file has no second opinion to fall back on. The schema types `provenance` but
+does not require it, deliberately: the field is meaningless for the thirteen
+pipelines that never touch operator footage. Omission was how a demo in this
+repo once appeared to prove the guard while bypassing it, which is why the
+fallback exists.
 
 **`faceswap` remains reachable by hand.** The skill exists in the tree and
 nothing stops an operator invoking it outside this pipeline. That is doctrine
@@ -434,3 +439,183 @@ def test_doctrine_puts_face_regeneration_out_of_scope(relative: str) -> None:
     assert any("out of scope" in p.lower() for p in paragraphs), (
         f"{relative} mentions faceswap but no paragraph puts it out of scope"
     )
+
+
+# ----------------------------------------------------------------------
+# The three ways round link 4 that an adversarial pass found
+# ----------------------------------------------------------------------
+
+
+def _one_cut_render(tmp_path, cut: dict, *, assets: list[dict], look=None) -> "ToolResult":
+    return VideoCompose().execute({
+        "operation": "render",
+        "edit_decisions": {
+            "version": "1.0",
+            "renderer_family": "documentary-montage",
+            "render_runtime": "ffmpeg",
+            "cuts": [cut],
+        },
+        "asset_manifest": {"version": "1.0", "assets": assets},
+        "batch_look": look,
+        "output_path": str(tmp_path / "out.mp4"),
+    })
+
+
+POOL_ASSET = {
+    "id": "asset_reel_01_01", "type": "video", "path": "/pool/rack_pulls_A.mp4",
+    "source_tool": "footage_library", "scene_id": "reel_01-01",
+}
+UNSAFE_LOOK = {"grade": "high_contrast", "grain": 4}
+
+
+@pytest.mark.parametrize("source", ["asset_reel_01_01", "/pool/rack_pulls_A.mp4"],
+                         ids=["by asset id", "by file path"])
+def test_the_cross_check_finds_the_asset_however_the_cut_names_it(
+    tmp_path, monkeypatch, source: str
+) -> None:
+    """`_render` accepts a `source` that is an asset id OR a file path.
+
+    The gate originally indexed the manifest by id alone, so naming the
+    operator's clip by its filename walked straight past the cross-check while
+    the corroborating row sat in the same manifest — and `_compose` then opened
+    the path and graded the face. Both spellings must reach the same row.
+    """
+    _no_renderer_runs(monkeypatch, source)
+
+    result = _one_cut_render(
+        tmp_path,
+        {"id": "reel_01-01", "source": source, "in_seconds": 0.0,
+         "out_seconds": 1.9, "provenance": "ai_generated"},
+        assets=[POOL_ASSET],
+    )
+
+    assert not result.success, f"a cut sourced {source!r} skipped the cross-check"
+    assert "Identity violation" in (result.error or "")
+
+
+@pytest.mark.parametrize("source", ["asset_reel_01_01", "/pool/rack_pulls_A.mp4"],
+                         ids=["by asset id", "by file path"])
+def test_omitting_provenance_is_not_a_waiver_when_the_manifest_knows(
+    tmp_path, monkeypatch, source: str
+) -> None:
+    """Silence used to disarm the look guard even with the answer in hand.
+
+    `look_filters` reads one word; no word meant "not locked", so a cut that
+    simply omitted `provenance` took a colour grade and grain — while its own
+    asset row said `footage_library`. Omission is the failure mode that
+    actually happens, because it needs no intent.
+    """
+    _no_renderer_runs(monkeypatch, source)
+
+    result = _one_cut_render(
+        tmp_path,
+        {"id": "reel_01-01", "source": source, "in_seconds": 0.0, "out_seconds": 1.9},
+        assets=[POOL_ASSET],
+        look=UNSAFE_LOOK,
+    )
+
+    assert not result.success, "an unlabelled cut from a known pool asset was graded"
+    assert "identity-safe" in (result.error or "")
+
+
+def test_a_shadow_asset_row_cannot_disarm_the_cross_check(tmp_path, monkeypatch) -> None:
+    """Appending a duplicate id with a benign `source_tool` must not win.
+
+    A dict comprehension keyed on id lets the LAST row win, so one appended
+    line — same id, `source_tool` outside the map — silently switched the
+    check off for that cut. First row wins now.
+    """
+    _no_renderer_runs(monkeypatch, "shadow")
+
+    result = _one_cut_render(
+        tmp_path,
+        {"id": "reel_01-01", "source": "asset_reel_01_01", "in_seconds": 0.0,
+         "out_seconds": 1.9, "provenance": "ai_generated"},
+        assets=[
+            POOL_ASSET,
+            {**POOL_ASSET, "source_tool": "stock_search", "path": "/elsewhere/x.mp4"},
+        ],
+    )
+
+    assert not result.success, "a shadow manifest row disarmed the cross-check"
+
+
+def test_an_unreferenced_source_still_renders(tmp_path, monkeypatch) -> None:
+    """The limit, asserted so it stays a limit and does not quietly widen.
+
+    A cut whose `source` matches no manifest row has no second opinion. It
+    renders, and the file docstring says so. If this ever starts failing, the
+    gate has become a default-deny on every pipeline that hands compose a bare
+    path — which is most of them.
+    """
+    sentinel = ToolResult(success=True, data={})
+    for method in ("_render_via_ffmpeg", "_compose", "_remotion_render"):
+        monkeypatch.setattr(VideoCompose, method, lambda *a, **k: sentinel)
+    monkeypatch.setattr(VideoCompose, "_run_final_review", lambda *a, **k: {})
+
+    result = _one_cut_render(
+        tmp_path,
+        {"id": "reel_01-01", "source": "/elsewhere/stock.mp4",
+         "in_seconds": 0.0, "out_seconds": 1.9},
+        assets=[POOL_ASSET],
+        look=UNSAFE_LOOK,
+    )
+
+    assert result.success, f"an unreferenced source was blocked — {result.error}"
+
+
+def test_a_typo_in_the_look_is_not_reported_as_an_identity_violation(
+    tmp_path, monkeypatch
+) -> None:
+    """`look_filters` raises for two unrelated reasons, and they read alike.
+
+    An unresolvable preset name is a typo in the batch look; calling that an
+    "identity violation" sends whoever hit it hunting a provenance bug that is
+    not there. The look is validated unlocked first, which separates them.
+    """
+    _no_renderer_runs(monkeypatch, "typo")
+
+    result = _one_cut_render(
+        tmp_path,
+        {"id": "reel_01-01", "source": "flash_01", "in_seconds": 0.0,
+         "out_seconds": 0.6, "provenance": "ai_generated"},
+        assets=[{"id": "flash_01", "type": "video", "path": "/gen/chalk.mp4",
+                 "source_tool": "cutaway_gen", "scene_id": "reel_01-03"}],
+        look={"grade": "high_contrst"},
+    )
+
+    assert not result.success
+    assert "Invalid batch_look" in (result.error or "")
+    assert "Identity violation" not in (result.error or "")
+
+
+def test_one_look_verdict_per_provenance_not_one_per_cut(tmp_path, monkeypatch) -> None:
+    """A batch look is one decision, so it is one line — not one per cut.
+
+    Five reels is twenty-five cuts, and the block message repeated the same
+    sentence twenty-five times. It names the count and the first few ids
+    instead.
+    """
+    _no_renderer_runs(monkeypatch, "many")
+
+    cuts = [
+        {"id": f"reel_01-{n:02d}", "source": "asset_reel_01_01",
+         "in_seconds": 0.0, "out_seconds": 1.0, "provenance": "operator_footage"}
+        for n in range(1, 26)
+    ]
+    result = VideoCompose().execute({
+        "operation": "render",
+        "edit_decisions": {"version": "1.0", "renderer_family": "documentary-montage",
+                           "render_runtime": "ffmpeg", "cuts": cuts},
+        "asset_manifest": {"version": "1.0", "assets": [POOL_ASSET]},
+        "batch_look": UNSAFE_LOOK,
+        "output_path": str(tmp_path / "out.mp4"),
+    })
+
+    assert not result.success
+    violations = [
+        line for line in (result.error or "").splitlines()
+        if "Identity violation" in line
+    ]
+    assert len(violations) == 1, f"one look, {len(violations)} verdicts"
+    assert "25" in violations[0] and "reel_01-01" in violations[0]

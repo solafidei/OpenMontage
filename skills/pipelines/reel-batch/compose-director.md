@@ -20,7 +20,7 @@ into a single pass.
 
 | Plane | Runtime | Why it cannot be the other engine |
 |---|---|---|
-| Picture (cuts, punch-in, speed ramp, flash, whip, grade, grain, sharpen) | **ffmpeg** | The polish splices into the per-cut re-encode's `vf_parts` (`tools/video/video_compose.py:613-627` → `lib/polish_filters.py:194-240`). Remotion's only grading hook is a CSS `filter`: no curves, no per-channel balance, no grain, no continuous ramp. |
+| Picture (cuts, punch-in, speed ramp, flash, whip, grade, grain, sharpen) | **ffmpeg** | The polish splices into the per-cut re-encode's `vf_parts` (`tools/video/video_compose.py:625-639` → `lib/polish_filters.py:194-240`). Remotion's only grading hook is a CSS `filter`: no curves, no per-channel balance, no grain, no continuous ramp. |
 | Text (word captions + hook overlay) | **remotion** | `remotion_caption_burn` is Remotion-only by its own module docstring (`tools/video/remotion_caption_burn.py:18-30`) — the `TalkingHead` composition id and the `WordCaption` prop shape are welded to the React stack in `remotion-composer/`. ffmpeg cannot do pop captions at all. |
 
 `edit_decisions.render_runtime` governs the **picture** plane and MUST read
@@ -48,7 +48,7 @@ every batch; do not pretend the option never existed.
 
 reel-batch has no `proposal_packet` artifact, so `video_compose`'s in-tool swap check
 reads its baseline from `edit_decisions.metadata.proposal_render_runtime`
-(`tools/video/video_compose.py:2701-2708`). Confirm the edit stage carried that key —
+(`tools/video/video_compose.py:2811-2818`). Confirm the edit stage carried that key —
 without it the check returns `runtime_swap_check: "skipped — …"` (`:2710-2715`) and
 the reviewer, not the tool, owns the comparison.
 
@@ -71,7 +71,7 @@ audio-carrying 1080x1920 master; the text plane takes that master as a plain vid
 input and burns one caption/overlay layer over it. No third pass, no round trip.
 
 What the batch shares — grade, grain, sharpen — is one `batch_look` dict passed
-identically to every reel (`tools/video/video_compose.py:205-218`). What differs per
+identically to every reel (`tools/video/video_compose.py:225-239`). What differs per
 reel — track, hook, caption line, cut list — comes out of `reel_plan`.
 
 ## Process
@@ -150,7 +150,7 @@ have — failing loudly is the feature. It takes cuts in `entry["cut_ids"]` orde
 is reel order, not spine order.
 
 `materialise` carries `spine["metadata"]` forward, which keeps
-`proposal_render_runtime` in front of the tool's runtime-swap check (`tools/video/video_compose.py:2701-2708`) and preserves the
+`proposal_render_runtime` in front of the tool's runtime-swap check (`tools/video/video_compose.py:2811-2818`) and preserves the
 project-level `identity_lock` arming flag for the record. **`identity_lock` is not what
 the identity gate reads.** The gate that actually fires is per cut:
 `lib/polish_filters.py:160` computes `locked = provenance == OPERATOR_FOOTAGE` from
@@ -165,7 +165,7 @@ is why Step 1 copies whole cut objects rather than rebuilding them.
 
 One call per reel. `profile: "instagram_reels"` resolves 1080x1920 @ 30fps and, being
 portrait, flips the fit mode to `cover` so landscape source fills the frame instead of
-letterboxing into black bars (`tools/video/video_compose.py:505-516`).
+letterboxing into black bars (`tools/video/video_compose.py:517-528`).
 
 ```python
 from tools.video.video_compose import VideoCompose
@@ -273,7 +273,7 @@ burn = RemotionCaptionBurn().execute(burn_inputs)
   no pill (`:115-124`). `bottom: 0.18` is what clears Instagram's own lower UI band
   (`:125-132`).
 - `fps` must match the input; the picture plane pins `-r 30` in the per-segment encode
-  (`tools/video/video_compose.py:647`; whole flag block `:642-648`), so 30 it is.
+  (`tools/video/video_compose.py:667`; whole flag block `:662-670`), so 30 it is.
 
 ### 4. Checkpoint After Every Reel
 

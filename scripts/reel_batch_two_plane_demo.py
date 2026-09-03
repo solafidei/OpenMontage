@@ -235,6 +235,31 @@ def probe(path: Path) -> str:
     return f"{w}x{h}  {float(d):.2f}s  audio={a or 'NONE'}"
 
 
+_DEMO_MARKER = ".two-plane-demo"
+
+
+def _refuse_to_eat_a_real_project(project_dir: Path) -> None:
+    """Called BEFORE anything renders, which is the only time it helps.
+
+    `--project ask-jess` would rewrite a 22-asset manifest down to one line of
+    demo music. Checking at write time is too late — by then ffmpeg has already
+    dropped two files into someone's renders/ directory. The artifacts folder
+    is the tell; a previous run of this demo leaves a marker that says it is
+    safe to overwrite.
+    """
+    artifacts = project_dir / "artifacts"
+    if (
+        artifacts.exists()
+        and any(artifacts.iterdir())
+        and not (artifacts / _DEMO_MARKER).exists()
+    ):
+        raise SystemExit(
+            f"{project_dir} already holds artifacts and was not written by this "
+            f"demo. Refusing to touch it — pass a fresh --project id, or delete "
+            f"{artifacts} first if it really is scratch."
+        )
+
+
 def _write_project_artifacts(project_dir: Path, plan: dict, tracks: list[Path]) -> None:
     """The two artifacts Backlot needs to draw one card per reel.
 
@@ -247,12 +272,16 @@ def _write_project_artifacts(project_dir: Path, plan: dict, tracks: list[Path]) 
 
     artifacts = project_dir / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / _DEMO_MARKER).write_text(
+        "Written by scripts/reel_batch_two_plane_demo.py --project. Its presence "
+        "is what lets a re-run overwrite this directory.\n",
+        encoding="utf-8",
+    )
 
     (artifacts / "reel_plan.json").write_text(
         json.dumps(plan, indent=2), encoding="utf-8"
     )
-    (artifacts / "asset_manifest.json").write_text(
-        json.dumps({
+    manifest = {
             "version": "1.0",
             "assets": [
                 {
@@ -264,9 +293,16 @@ def _write_project_artifacts(project_dir: Path, plan: dict, tracks: list[Path]) 
                 }
                 for i, entry in enumerate(plan["reels"])
             ],
-        }, indent=2),
-        encoding="utf-8",
+    }
+    (artifacts / "asset_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
     )
+
+    # Written, then checked — a demo that produces artifacts the pipeline would
+    # reject is worse than one that produces none.
+    from schemas.artifacts import validate_artifact
+    validate_artifact("reel_plan", plan)
+    validate_artifact("asset_manifest", manifest)
 
 
 def main() -> int:
@@ -292,6 +328,9 @@ def main() -> int:
             raise SystemExit(f"{what} not found: {missing}")
         return resolved
 
+    if args.reels < 1:
+        raise SystemExit("--reels must be at least 1")
+
     clips = _resolve(args.clips, "clips")
     tracks = _resolve(args.tracks, "tracks")
     if len(tracks) < args.reels:
@@ -299,6 +338,7 @@ def main() -> int:
               f"A real sitting gives every reel its own.")
     project_dir = (REPO / "projects" / args.project) if args.project else None
     if project_dir is not None:
+        _refuse_to_eat_a_real_project(project_dir)
         out_dir = project_dir / "renders"
     else:
         out_dir = Path(args.out) if Path(args.out).is_absolute() else REPO / args.out

@@ -723,8 +723,8 @@ def test_architecture_doc_budget_matches_config() -> None:
 
 
 # ----------------------------------------------------------------------
-# reel-batch (#49e): the pinned cutaway route, and the one-dict rule that
-# makes the pin stick.
+# reel-batch (#49e): per-reel booking, the pinned cutaway route, and the
+# one-dict rule that makes the pin stick.
 # ----------------------------------------------------------------------
 
 
@@ -737,14 +737,141 @@ def _python_fences(text: str, containing: str) -> list[str]:
     ]
 
 
+def _parse_fence(block: str, relative_path: str):
+    """`ast.parse` a doc fence with an error that names the file.
+
+    A fence excerpted at an indent raises a bare stdlib IndentationError whose
+    line numbers refer to nothing the reader can see.
+    """
+    import ast
+    import textwrap
+
+    try:
+        return ast.parse(textwrap.dedent(block))
+    except SyntaxError as e:  # IndentationError is a subclass
+        raise AssertionError(
+            f"{relative_path}: a python fence does not parse ({e.msg} at fence "
+            f"line {e.lineno}). Doc examples in this file are policed by ast, "
+            f"so they must be complete, valid, top-level Python."
+        ) from None
+
+
+def _call_arg_name(tree, receiver: str, attr: str, relative_path: str) -> str:
+    """The single dict-valued name passed to `<receiver>.<attr>(...)`.
+
+    Accepts the positional and keyword spellings; anything that is not a bare
+    name — an inline literal, a call, a comprehension — is the defect.
+    """
+    import ast
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attr
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == receiver
+    ]
+    assert len(calls) == 1, (
+        f"{relative_path}: expected exactly one {receiver}.{attr} call in the "
+        f"booking fence, found {len(calls)}. Two booking examples in one fence "
+        f"cannot both be checked; split them into separate fences."
+    )
+    args = list(calls[0].args) + [kw.value for kw in calls[0].keywords]
+    names = [a for a in args if isinstance(a, ast.Name)]
+    assert names, (
+        f"{relative_path}: {receiver}.{attr} is passed a literal or an "
+        f"expression, not the shared inputs name — an inline dict IS a second "
+        f"dict, which is how a pinned estimate becomes an unpinned call."
+    )
+    return names[0].id
+
+
+BOOKING_FENCE = "skills/pipelines/reel-batch/asset-director.md"
+
+
+def test_reel_batch_books_one_ledger_entry_per_reel() -> None:
+    """The divergence from the batching rule, policed where it is instructed.
+
+    A batch entry has ONE status, and an aborted batch has two outcomes — so
+    no settlement of it is honest (see
+    tests/tools/test_cost_tracker_governance.py's
+    test_reel_batch_single_entry_cannot_reconcile_a_partial_batch, which proves
+    that property). This asserts the instructions actually follow it: the
+    booked `operation` must vary per reel, which means an f-string carrying the
+    cut or reel id, not a constant naming the whole batch.
+    """
+    import ast
+
+    text = _read(BOOKING_FENCE)
+    blocks = _python_fences(text, "tracker.estimate(")
+    assert blocks, f"{BOOKING_FENCE} has no ledger booking example"
+
+    paid, free = [], []
+    for block in blocks:
+        tree = _parse_fence(block, BOOKING_FENCE)
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "estimate"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "tracker"
+                and len(node.args) >= 3
+            ):
+                continue
+            amount = node.args[2]
+            is_free = isinstance(amount, ast.Constant) and amount.value == 0
+            (free if is_free else paid).append(node.args[1])
+
+    assert paid, f"{BOOKING_FENCE}: no paid tracker.estimate(tool, operation, usd) call"
+
+    # A PAID entry must name one reel. This is the divergence from the batching
+    # rule, and it is only justified where an entry can actually diverge.
+    for operation in paid:
+        assert isinstance(operation, ast.JoinedStr), (
+            f"{BOOKING_FENCE}: a paid booking's operation is a constant "
+            f"({ast.dump(operation)[:80]}), so one entry stands for the whole "
+            f"batch. It must interpolate the reel or cut id — a partial batch "
+            f"cannot be settled honestly through a single entry."
+        )
+        interpolated = "".join(
+            ast.dump(v) for v in operation.values if isinstance(v, ast.FormattedValue)
+        )
+        assert "cut_id" in interpolated or "reel_id" in interpolated, (
+            f"{BOOKING_FENCE}: a paid booking's operation interpolates "
+            f"something, but not the reel or cut id — nothing ties the entry to "
+            f"one reel."
+        )
+
+    # And a $0 tool must NOT: the batching rule still governs everything that
+    # cannot diverge, and five free entries where one belongs is ledger noise.
+    # Asserting both halves is what keeps this from reading as "per-reel
+    # always", which would be the wrong lesson to teach the next pipeline.
+    for operation in free:
+        assert not isinstance(operation, ast.JoinedStr) or not any(
+            marker in "".join(
+                ast.dump(v) for v in operation.values
+                if isinstance(v, ast.FormattedValue)
+            )
+            for marker in ("cut_id", "reel_id")
+        ), (
+            f"{BOOKING_FENCE}: a $0.00 booking is itemised per reel. The "
+            f"batching rule governs anything that cannot diverge — per-reel "
+            f"booking is bought by the partial-batch problem, and a free tool "
+            f"does not have one."
+        )
+
+
 def test_reel_batch_booking_block_prices_and_executes_one_dict() -> None:
     """The estimate and the call must be the same inputs, by identity.
 
-    This is what stops an estimate divergence: price a pinned route, execute
-    an unpinned one, and the ledger records a tenth of what lands on the bill.
-    The skill cannot pin the route itself — `CutawayGen` owns that, see the
-    test below — so the ONE thing the instructions must get right is not
-    building a second dict between the two calls.
+    This is what stops an estimate divergence: price a pinned route, execute an
+    unpinned one, and the ledger records a tenth of what lands on the bill. The
+    skill cannot pin the route itself — `CutawayGen` owns that, see below — so
+    the ONE thing the instructions must get right is not building, rebinding or
+    mutating a second dict between the two calls.
 
     Parsed with `ast`, not a dict-literal regex. The regex the
     documentary-montage precedent uses (`=\\s*\\{(.*?)\\n\\}` with DOTALL)
@@ -754,107 +881,135 @@ def test_reel_batch_booking_block_prices_and_executes_one_dict() -> None:
     """
     import ast
 
-    text = _read("skills/pipelines/reel-batch/asset-director.md")
+    text = _read(BOOKING_FENCE)
     blocks = _python_fences(text, "cutaway_gen.estimate_cost")
-    assert blocks, "reel-batch asset-director has no cutaway_gen booking block"
+    assert blocks, f"{BOOKING_FENCE} has no cutaway_gen booking block"
 
     for block in blocks:
-        tree = ast.parse(block)
+        tree = _parse_fence(block, BOOKING_FENCE)
+        priced = _call_arg_name(tree, "cutaway_gen", "estimate_cost", BOOKING_FENCE)
+        executed = _call_arg_name(tree, "cutaway_gen", "execute", BOOKING_FENCE)
+        assert priced == executed, (
+            f"{BOOKING_FENCE}: prices {priced!r} and executes {executed!r}. "
+            "Two dicts is how a pinned estimate becomes an unpinned call."
+        )
 
-        def _arg_name(attr: str) -> str:
-            calls = [
-                node
+        # The window is bounded by THOSE two calls, found by receiver and
+        # attribute — not by min() over every `.execute`/`.estimate_cost` in
+        # the fence, which an unrelated `tracker.estimate(...)` would move.
+        def _lineno(attr: str) -> int:
+            return next(
+                node.lineno
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == attr
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id == "cutaway_gen"
-            ]
-            assert len(calls) == 1, f"expected exactly one cutaway_gen.{attr} call"
-            (arg,) = calls[0].args
-            assert isinstance(arg, ast.Name), (
-                f"cutaway_gen.{attr} is passed a literal or expression, not the "
-                "shared inputs name — an inline dict is a second dict"
             )
-            return arg.id
 
-        priced, executed = _arg_name("estimate_cost"), _arg_name("execute")
-        assert priced == executed, (
-            f"the booking block prices {priced!r} and executes {executed!r}. "
-            "Two dicts is how a pinned estimate becomes an unpinned call."
+        low, high = _lineno("estimate_cost"), _lineno("execute")
+
+        # Rebound, re-keyed, or mutated in place — all three make the executed
+        # dict differ from the priced one, and only the first is an ast.Assign
+        # to a Name.
+        touched: list[int] = []
+        for node in ast.walk(tree):
+            if not (low < getattr(node, "lineno", 0) < high):
+                continue
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    root = target
+                    while isinstance(root, (ast.Subscript, ast.Attribute)):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id == priced:
+                        touched.append(node.lineno)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"update", "pop", "setdefault", "clear", "popitem"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == priced
+            ):
+                touched.append(node.lineno)
+
+        assert not touched, (
+            f"{BOOKING_FENCE}: {priced!r} is rebound or mutated at fence line(s) "
+            f"{touched}, between pricing and execution — the estimate then "
+            f"describes a dict that never ran."
         )
 
-        # And the shared name is not rebound between the two calls.
-        estimate_line = min(
-            node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "estimate_cost"
-        )
-        execute_line = min(
-            node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "execute"
-        )
-        rebinds = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(t, ast.Name) and t.id == priced for t in node.targets
-            )
-            and estimate_line < node.lineno < execute_line
-        ]
-        assert not rebinds, (
-            f"{priced!r} is reassigned at line(s) {rebinds} between pricing and "
-            "execution — the estimate then describes a dict that never ran"
-        )
 
-
-def test_reel_batch_cutaway_route_is_pinned_where_it_cannot_be_dropped() -> None:
+def test_reel_batch_cutaway_prices_and_runs_the_same_pinned_object() -> None:
     """The pin lives in the tool, not in the instructions — deliberately.
 
     A skill that had to pass `allowed_providers` itself is a skill that can
     forget to, and an absent pin does not raise: `VideoSelector.estimate_cost`
     returns $0.00 and the scorer routes to whatever ranks top. A $0.00 estimate
     is exempt from both approval guards, so the omission would seed an
-    unguarded paid line. `CutawayGen._provider_inputs` builds the pin into
-    every payload instead, which is why the booking block above is allowed to
-    look pin-free.
-    """
-    import ast
+    unguarded paid line.
 
+    Asserted by RUNNING the path with the selector stubbed, and comparing the
+    two payloads by object identity. An earlier version compared the ast Name
+    passed to each call, which a `payload.pop("allowed_providers")` between
+    them satisfies perfectly.
+    """
+    import shutil
+    import subprocess
+
+    from tools.base_tool import ToolResult
+    from tools.video import cutaway_gen as cutaway_module
     from tools.video.cutaway_gen import CUTAWAY_PROVIDER_PIN, CutawayGen
+
+    if shutil.which("ffmpeg") is None:
+        import pytest as _pytest
+        _pytest.skip("ffmpeg required to stand in for a generated cutaway")
 
     assert CUTAWAY_PROVIDER_PIN, "the cutaway provider pin is empty — see docstring"
 
-    payload = CutawayGen()._provider_inputs("chalk dust, macro", Path("/tmp/cache"))
-    assert payload["allowed_providers"] == list(CUTAWAY_PROVIDER_PIN)
-    assert payload["preferred_provider"] == CUTAWAY_PROVIDER_PIN[0]
+    seen: dict[str, object] = {}
 
-    # Deterministic: the priced payload and the executed payload are built by
-    # the same call from the same inputs, so they cannot disagree.
-    assert payload == CutawayGen()._provider_inputs("chalk dust, macro", Path("/tmp/cache"))
+    class _RecordingSelector:
+        def estimate_cost(self, payload):
+            seen["priced"] = payload
+            return 0.10
 
-    # ...and in `execute` it is literally one object, priced then run.
-    source = (REPO_ROOT / "tools" / "video" / "cutaway_gen.py").read_text(
-        encoding="utf-8"
+        def execute(self, payload):
+            seen["executed"] = payload
+            output = Path(payload["output_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            # A real clip, because cutaway_gen trims what it gets back.
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "color=c=black:s=64x114:r=30", "-t", "2",
+                 "-pix_fmt", "yuv420p", str(output)],
+                check=True, timeout=60,
+            )
+            return ToolResult(success=True, data={"output_path": str(output)},
+                              cost_usd=0.10)
+
+    original = cutaway_module.VideoSelector
+    cutaway_module.VideoSelector = _RecordingSelector
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = CutawayGen().execute({
+                "prompts": ["chalk dust drifting through a hard side light, macro"],
+                "flash_seconds": 0.6,
+                "cache_dir": f"{temp_dir}/cache",
+                "output_dir": f"{temp_dir}/out",
+            })
+    finally:
+        cutaway_module.VideoSelector = original
+
+    assert result.success, result.error
+    assert "priced" in seen and "executed" in seen, "the selector was never called"
+    assert seen["priced"] is seen["executed"], (
+        "the payload priced and the payload executed are different objects — "
+        "the selector stamps an estimate divergence when they differ, and here "
+        "they can"
     )
-    tree = ast.parse(source)
-    names = {}
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in ("estimate_cost", "execute")
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "selector"
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-        ):
-            names.setdefault(node.func.attr, set()).add(node.args[0].id)
-
-    assert names.get("estimate_cost") and names.get("estimate_cost") == names.get("execute"), (
-        "cutaway_gen prices and executes different names through VideoSelector — "
-        f"{names}. The selector stamps an estimate divergence when they differ."
-    )
+    assert seen["executed"]["allowed_providers"] == list(CUTAWAY_PROVIDER_PIN)
+    assert seen["executed"]["preferred_provider"] == CUTAWAY_PROVIDER_PIN[0]
