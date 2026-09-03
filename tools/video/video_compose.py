@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
+from lib import polish_filters
 from tools.base_tool import (
     BaseTool,
     Determinism,
@@ -199,6 +200,21 @@ class VideoCompose(BaseTool):
                 "properties": {
                     "subtitle_burn": {"type": "boolean", "default": True},
                     "two_pass_encode": {"type": "boolean", "default": False},
+                },
+            },
+            "batch_look": {
+                "type": "object",
+                "description": (
+                    "Batch-wide picture look applied in the per-cut encode. One "
+                    "setting shared by every reel of a sitting so they grade "
+                    "identically. Names resolve against face_enhance.PRESETS and "
+                    "color_grade.PROFILES; an operator_footage cut accepts "
+                    "face_enhance presets only."
+                ),
+                "properties": {
+                    "grade": {"type": "string"},
+                    "grain": {"type": "integer", "minimum": 0},
+                    "sharpen": {"type": "string"},
                 },
             },
             "codec": {"type": "string", "default": "libx264"},
@@ -464,6 +480,9 @@ class VideoCompose(BaseTool):
         crf = inputs.get("crf", 23)
         preset = inputs.get("preset", "medium")
         profile_name = inputs.get("profile")
+        # One look for the whole sitting: the caller passes the same batch_look
+        # to every reel it composes, so grade/grain/sharpen land identically.
+        batch_look = inputs.get("batch_look")
 
         # Resolve target resolution + fit mode. Priority: explicit `profile`
         # arg > edit_decisions.metadata.compose_target > default (landscape HD).
@@ -585,8 +604,27 @@ class VideoCompose(BaseTool):
                         ]
                     vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
                     af_parts: list[str] = []
-                    if speed != 1.0:
-                        vf_parts.append(f"setpts={1.0/speed}*PTS")
+                    # Picture-plane polish (reel-batch R6) splices in HERE, in the
+                    # per-cut encode — there is no single graph to hang it on.
+                    # polish_filters owns the whole video tail of the chain,
+                    # including the speed filter, because zoompan has to precede
+                    # setpts (it re-times its own output). Audio stays here:
+                    # a continuous ramp is not expressible in atempo, so it gets
+                    # the ramp's effective average and the segment's audio comes
+                    # out exactly as long as its picture for the concat-copy step.
+                    vf_parts.extend(
+                        polish_filters.cut_filters(
+                            cut, duration, target_w, target_h, look=batch_look
+                        )
+                    )
+                    ramp_to = (cut.get("polish") or {}).get("speed_ramp")
+                    if ramp_to is not None and float(ramp_to) != speed:
+                        af_parts.append(
+                            self._build_atempo(
+                                polish_filters.ramp_average_speed(speed, float(ramp_to))
+                            )
+                        )
+                    elif speed != 1.0:
                         af_parts.append(self._build_atempo(speed))
 
                     cmd.extend(["-filter:v", ",".join(vf_parts)])
