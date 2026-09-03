@@ -218,9 +218,17 @@ of the cut schema.
 One mechanism, one word, two machine checks, one gate, one test file.
 
 **(a) Classification.** Every file entering from the operator's pool is written to the corpus with
-`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:44-71`). There is no
+`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:44-118`). There is no
 classification step and no per-clip judgement: **the pool is his footage, so the whole pool is
-locked.** `face_tracker` is disqualified from every link — it is presence detection, not recognition,
+locked.**
+
+The field itself defaults to `False`, and that is not a weakening of default-deny — it is where
+default-deny correctly lives. All 17 corpus adapters are network stock providers, so a `True`
+default would make every pexels, NASA and archive.org row assert it depicts the operator, a
+falsehood the next `Corpus.save()` persists across the twelve pipelines sharing the index. The
+guarantee is carried by the **ingest path**: `footage_library` (#41) sets the lock on every row it
+writes, because it is the only ingest that can honestly know. A contract test asserts that, rather
+than trusting a dataclass default to carry a safety property. `face_tracker` is disqualified from every link — it is presence detection, not recognition,
 and it cannot run at all (§2.2.6). A gate whose verdict is indeterminate on 100% of runs is not a
 gate. The manual flag is not merely more honest here; it is the only mechanism that functions.
 
@@ -428,7 +436,7 @@ Plus two new registered artifacts: `reel_plan` and `clip_ledger`, both added to 
 (`schemas/artifacts/__init__.py:13-34`); `clip_ledger` also to `SUPPLEMENTARY_ARTIFACTS`
 (`lib/checkpoint.py:44-49`).
 
-And on `ClipRecord` (`lib/corpus.py:44-71`): `start_seconds`, `end_seconds`, `sharpness`,
+And on `ClipRecord` (`lib/corpus.py:44-118`): `start_seconds`, `end_seconds`, `sharpness`,
 `identity_locked`.
 
 **Not fixed here:** the `cut.type` divergence (**D5**). The schema rejects a key the shipped code
