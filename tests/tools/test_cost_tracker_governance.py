@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from tools.cost_tracker import (
     ApprovalRequiredError,
     BudgetExceededError,
     CostTracker,
+    EntryAlreadyTerminalError,
 )
 
 
@@ -714,6 +716,316 @@ class CostTrackerGovernanceTests(unittest.TestCase):
                 ["completed"] * len(plan),
             )
             validate_artifact("cost_log", persisted)
+
+    # ---- reel-batch (#49): the three guarantees that only show up under
+    # ---- failure. A batch is N deliverables on one ledger, so "the run
+    # ---- spent $X" is no longer a single number anyone can check.
+
+    # A reel is <= 10 seconds (spec §5), which is where every figure below
+    # comes from. Derived, not copied: change the reel length and these
+    # tests move with it.
+    REEL_SECONDS = 10.0
+
+    @classmethod
+    def _reel_batch_output_minutes(cls, reels: int) -> float:
+        return reels * cls.REEL_SECONDS / 60.0
+
+    def test_reel_batch_output_minutes_sum_across_reels(self) -> None:
+        """The cap is priced on the batch, not on one reel.
+
+        Five ten-second reels are 0.8333 output minutes. At the manifest's
+        live rate that prices below the flat floor, so the floor governs —
+        and the floor must still clear `min_workable_usd` for the spec's
+        worst-case $0.50 sitting, or a bare "approve" drops the operator into
+        the below-minimum conversation on a run that was always affordable.
+        """
+        orchestration = self._manifest_orchestration("reel-batch")
+        flat_usd = orchestration["budget_default_usd"]
+        rate_usd = orchestration["budget_per_output_minute_usd"]
+        reserve_pct = OpenMontageConfig.load().budget.reserve_pct
+
+        five_reel_minutes = self._reel_batch_output_minutes(5)
+        self.assertAlmostEqual(five_reel_minutes, 0.8333, places=4)
+
+        cap = self._documented_cap_usd(flat_usd, rate_usd, five_reel_minutes)
+
+        # The floor wins at five reels — the rate branch is well under it.
+        self.assertAlmostEqual(cap, flat_usd)
+        self.assertGreater(cap, round(rate_usd * five_reel_minutes, 2))
+
+        # And the floor clears the arming minimum for the spec's worst case:
+        # a full five-reel pool shortfall, 5 x $0.10 on the pinned route.
+        worst_case_estimate_usd = 0.50
+        armed = self._documented_arming_total(
+            [worst_case_estimate_usd], cap, reserve_pct
+        )
+        self.assertAlmostEqual(armed, cap)
+        self.assertGreater(
+            cap,
+            math.ceil(worst_case_estimate_usd / (1 - reserve_pct) * 100) / 100 + 0.01,
+            "the flat cap no longer clears min_workable_usd for a $0.50 sitting — "
+            "a bare approve would force the below-minimum conversation",
+        )
+
+    def test_reel_batch_cap_flips_to_the_rate_on_a_large_batch(self) -> None:
+        """The other regime. The manifest's flat figure is a floor, not a ceiling.
+
+        Both branches must be asserted or the test proves only that a
+        constant equals itself: at five reels the floor governs and the rate
+        is decorative, so only a batch large enough to cross over shows the
+        rate is live at all. Twenty ten-second reels is 3.3333 minutes.
+        """
+        orchestration = self._manifest_orchestration("reel-batch")
+        flat_usd = orchestration["budget_default_usd"]
+        rate_usd = orchestration["budget_per_output_minute_usd"]
+
+        twenty_reel_minutes = self._reel_batch_output_minutes(20)
+        self.assertAlmostEqual(twenty_reel_minutes, 3.3333, places=4)
+
+        cap = self._documented_cap_usd(flat_usd, rate_usd, twenty_reel_minutes)
+
+        self.assertAlmostEqual(cap, round(rate_usd * twenty_reel_minutes, 2))
+        self.assertGreater(cap, flat_usd)
+        # The crossover is real and sits between the two batch sizes.
+        self.assertGreater(
+            cap, self._documented_cap_usd(flat_usd, rate_usd,
+                                          self._reel_batch_output_minutes(5))
+        )
+
+    def test_reel_batch_zero_cost_sitting_still_reconciles_to_a_cost_log(self) -> None:
+        """Spec §6 item 23: the full ceremony on a sitting that spends nothing.
+
+        Under R8 cutaways are free-first, so the TYPICAL reel batch estimates
+        $0.00 — the pool covers every cut and no AI fires. That is the common
+        case, not the edge case, and it must still arm, book and reconcile to
+        a schema-valid terminal `cost_log`. A pipeline whose normal run cannot
+        produce an auditable ledger has no audit trail at all.
+        """
+        import tempfile
+
+        orchestration = self._manifest_orchestration("reel-batch")
+        budget_cap_usd = orchestration["budget_default_usd"]
+        reserve_pct = OpenMontageConfig.load().budget.reserve_pct
+
+        # Batched per tool, not per reel: these are the $0 stages, and the
+        # per-reel divergence below is only justified for entries that can
+        # actually diverge.
+        plan = [
+            ("footage_library", "index pool x 1 sitting", 0.0),
+            ("beat_grid", "beat analysis x 5 tracks", 0.0),
+            ("subtitle_gen", "captions x 5 reels", 0.0),
+            ("video_compose", "render x 5 reels", 0.0),
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=None,
+                reserve_pct=reserve_pct,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+            tracker.budget_total_usd = self._documented_arming_total(
+                [estimated_usd for _, _, estimated_usd in plan],
+                budget_cap_usd,
+                reserve_pct,
+            )
+            self.assertAlmostEqual(tracker.budget_total_usd, budget_cap_usd, places=6)
+
+            for tool, operation, estimated_usd in plan:
+                entry_id = tracker.estimate(tool, operation, estimated_usd)
+                tracker.reserve(entry_id, user_approved=True)
+                tracker.reconcile(entry_id, 0.0, success=True)
+
+            self.assertEqual(tracker.non_terminal_entries(), [])
+            self.assertAlmostEqual(tracker.budget_spent_usd, 0.0)
+            self.assertAlmostEqual(tracker.budget_reserved_usd, 0.0)
+
+            persisted = json.loads(log_path.read_text(encoding="utf-8"))
+            validate_artifact("cost_log", persisted)
+            self.assertEqual(
+                [entry["status"] for entry in persisted["entries"]],
+                ["completed"] * len(plan),
+            )
+            self.assertAlmostEqual(persisted["budget_spent_usd"], 0.0)
+
+    def test_partial_reel_batch_reconciles_honestly(self) -> None:
+        """A batch aborted at reel four, settled without lying in either direction.
+
+        Two reels are stranded in different states and the checkpoint protocol
+        resolves them differently: reel 4 was RESERVED, so the call may have
+        fired and been billed — reconcile at its estimate with success=False,
+        because overstating is the safe direction for a budget guard. Reel 5
+        was only ESTIMATED, a placeholder that never executed — refund it, or
+        it holds phantom spend against the retry.
+        """
+        import tempfile
+
+        orchestration = self._manifest_orchestration("reel-batch")
+        reserve_pct = OpenMontageConfig.load().budget.reserve_pct
+        per_reel_usd = 0.10
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=None,
+                reserve_pct=reserve_pct,
+                single_action_approval_usd=0.50,
+                require_approval_for_new_paid_tool=True,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+            tracker.budget_total_usd = self._documented_arming_total(
+                [per_reel_usd] * 5,
+                orchestration["budget_default_usd"],
+                reserve_pct,
+            )
+            tracker.approve_tool("video_selector")
+
+            # One entry PER REEL — the divergence from the batching rule that
+            # test (c) below exists to justify.
+            entries = {
+                reel: tracker.estimate(
+                    "video_selector", f"cutaway_reel_{reel:02d}_kling_video", per_reel_usd
+                )
+                for reel in range(1, 6)
+            }
+            for reel in range(1, 5):  # reel 5 is never reserved
+                tracker.reserve(entries[reel], user_approved=True)
+
+            for reel in range(1, 4):
+                tracker.reconcile(entries[reel], per_reel_usd, success=True)
+
+            # --- the abort lands here ---
+            stranded = tracker.non_terminal_entries()
+            self.assertEqual(
+                {entry["id"] for entry in stranded},
+                {entries[4], entries[5]},
+                "non_terminal_entries must name exactly the two stranded reels",
+            )
+            self.assertEqual(
+                {entry["id"]: entry["status"] for entry in stranded},
+                {entries[4]: "reserved", entries[5]: "estimated"},
+            )
+
+            # --- resolution, per skills/meta/checkpoint-protocol.md ---
+            reel_four = next(e for e in stranded if e["id"] == entries[4])
+            tracker.reconcile(entries[4], reel_four["estimated_usd"], success=False)
+            tracker.refund(entries[5])
+
+            self.assertEqual(tracker.non_terminal_entries(), [])
+            # Three reels that finished, plus the one that may have billed.
+            # The refunded placeholder contributes nothing.
+            self.assertAlmostEqual(tracker.budget_spent_usd, 4 * per_reel_usd)
+            self.assertAlmostEqual(tracker.budget_reserved_usd, 0.0)
+
+            persisted = json.loads(log_path.read_text(encoding="utf-8"))
+            validate_artifact("cost_log", persisted)
+            self.assertAlmostEqual(persisted["budget_spent_usd"], 4 * per_reel_usd)
+            # Visible under `pytest -k reel_batch -v -s`, beside the control's
+            # figure below — the two numbers are the point of the pair.
+            print(
+                f"\n  per-reel booking, aborted at reel 4: "
+                f"spent ${tracker.budget_spent_usd:.2f} "
+                f"(3 done + 1 possibly billed, 1 refunded)"
+            )
+            self.assertEqual(
+                {entry["id"]: entry["status"] for entry in persisted["entries"]},
+                {
+                    entries[1]: "completed",
+                    entries[2]: "completed",
+                    entries[3]: "completed",
+                    entries[4]: "failed",
+                    entries[5]: "refunded",
+                },
+            )
+
+    def test_reel_batch_single_entry_cannot_reconcile_a_partial_batch(self) -> None:
+        """The negative control, and the whole justification for per-reel booking.
+
+        Booking one entry for the batch is what the batching rule would ask
+        for. Abort at reel three and there is no `reconcile` argument that is
+        both terminal and honest: settle at the estimate and the ledger claims
+        spend that never happened, and the correction is refused because the
+        entry has already settled. The overstatement is larger than a whole
+        reel — which is the number that matters in cap mode, where phantom
+        spend shrinks the budget the retry has to work in.
+        """
+        import tempfile
+
+        per_reel_usd = 0.10
+        reels_completed = 3
+        batch_estimate_usd = 0.50
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = CostTracker(
+                budget_total_usd=2.00,
+                reserve_pct=0.0,
+                single_action_approval_usd=99.0,
+                require_approval_for_new_paid_tool=False,
+                mode=BudgetMode.CAP,
+                cost_log_path=log_path,
+            )
+            entry_id = tracker.estimate(
+                "video_selector", "cutaways x 5 reels kling_video", batch_estimate_usd
+            )
+            tracker.reserve(entry_id, user_approved=True)
+
+            # Three of five reels got their cutaway before the abort.
+            honest_usd = reels_completed * per_reel_usd
+
+            # The only terminal move available: settle at the estimate.
+            tracker.reconcile(entry_id, batch_estimate_usd, success=False)
+
+            overstatement_usd = tracker.budget_spent_usd - honest_usd
+            self.assertAlmostEqual(overstatement_usd, 0.20)
+            self.assertGreater(
+                overstatement_usd,
+                per_reel_usd,
+                "a single batched entry must overstate by more than one reel — "
+                "otherwise per-reel booking buys nothing",
+            )
+
+            # And the correction is refused BY TYPE. Asserting on the class
+            # rather than the message ties this to tools/cost_tracker.py's
+            # terminal guard, not to wording anyone may reword.
+            with self.assertRaises(EntryAlreadyTerminalError):
+                tracker.reconcile(entry_id, honest_usd, success=False)
+
+            self.assertAlmostEqual(tracker.budget_spent_usd, batch_estimate_usd)
+            print(
+                f"\n  one batched entry, aborted at reel 3: "
+                f"spent ${tracker.budget_spent_usd:.2f} "
+                f"against ${honest_usd:.2f} actually incurred "
+                f"— ${overstatement_usd:.2f} phantom, and unfixable"
+            )
+
+            # Contrast: five per-reel entries settle to the truth exactly.
+            per_reel_tracker = CostTracker(
+                budget_total_usd=2.00,
+                reserve_pct=0.0,
+                single_action_approval_usd=99.0,
+                require_approval_for_new_paid_tool=False,
+                mode=BudgetMode.CAP,
+                cost_log_path=Path(temp_dir) / "per_reel.json",
+            )
+            per_reel_ids = [
+                per_reel_tracker.estimate(
+                    "video_selector", f"cutaway_reel_{reel:02d}_kling_video", per_reel_usd
+                )
+                for reel in range(1, 6)
+            ]
+            for entry in per_reel_ids[:reels_completed]:
+                per_reel_tracker.reserve(entry, user_approved=True)
+                per_reel_tracker.reconcile(entry, per_reel_usd, success=True)
+            for entry in per_reel_ids[reels_completed:]:
+                per_reel_tracker.refund(entry)
+
+            self.assertAlmostEqual(per_reel_tracker.budget_spent_usd, honest_usd)
+            self.assertEqual(per_reel_tracker.non_terminal_entries(), [])
 
 
 if __name__ == "__main__":

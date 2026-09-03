@@ -720,3 +720,141 @@ def test_architecture_doc_budget_matches_config() -> None:
         "docs/ARCHITECTURE.md states a number without naming config.yaml as its "
         "single source — that is the divergence class B4 closed"
     )
+
+
+# ----------------------------------------------------------------------
+# reel-batch (#49e): the pinned cutaway route, and the one-dict rule that
+# makes the pin stick.
+# ----------------------------------------------------------------------
+
+
+def _python_fences(text: str, containing: str) -> list[str]:
+    """Every ```python fence in `text` whose body carries `containing`."""
+    return [
+        block
+        for block in re.findall(r"```python\n(.*?)```", text, re.DOTALL)
+        if containing in block
+    ]
+
+
+def test_reel_batch_booking_block_prices_and_executes_one_dict() -> None:
+    """The estimate and the call must be the same inputs, by identity.
+
+    This is what stops an estimate divergence: price a pinned route, execute
+    an unpinned one, and the ledger records a tenth of what lands on the bill.
+    The skill cannot pin the route itself — `CutawayGen` owns that, see the
+    test below — so the ONE thing the instructions must get right is not
+    building a second dict between the two calls.
+
+    Parsed with `ast`, not a dict-literal regex. The regex the
+    documentary-montage precedent uses (`=\\s*\\{(.*?)\\n\\}` with DOTALL)
+    swallows this block's two adjacent dicts into one match, because the first
+    closes on the same line as its content — it would pass here for the wrong
+    reason.
+    """
+    import ast
+
+    text = _read("skills/pipelines/reel-batch/asset-director.md")
+    blocks = _python_fences(text, "cutaway_gen.estimate_cost")
+    assert blocks, "reel-batch asset-director has no cutaway_gen booking block"
+
+    for block in blocks:
+        tree = ast.parse(block)
+
+        def _arg_name(attr: str) -> str:
+            calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == attr
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "cutaway_gen"
+            ]
+            assert len(calls) == 1, f"expected exactly one cutaway_gen.{attr} call"
+            (arg,) = calls[0].args
+            assert isinstance(arg, ast.Name), (
+                f"cutaway_gen.{attr} is passed a literal or expression, not the "
+                "shared inputs name — an inline dict is a second dict"
+            )
+            return arg.id
+
+        priced, executed = _arg_name("estimate_cost"), _arg_name("execute")
+        assert priced == executed, (
+            f"the booking block prices {priced!r} and executes {executed!r}. "
+            "Two dicts is how a pinned estimate becomes an unpinned call."
+        )
+
+        # And the shared name is not rebound between the two calls.
+        estimate_line = min(
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "estimate_cost"
+        )
+        execute_line = min(
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute"
+        )
+        rebinds = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == priced for t in node.targets
+            )
+            and estimate_line < node.lineno < execute_line
+        ]
+        assert not rebinds, (
+            f"{priced!r} is reassigned at line(s) {rebinds} between pricing and "
+            "execution — the estimate then describes a dict that never ran"
+        )
+
+
+def test_reel_batch_cutaway_route_is_pinned_where_it_cannot_be_dropped() -> None:
+    """The pin lives in the tool, not in the instructions — deliberately.
+
+    A skill that had to pass `allowed_providers` itself is a skill that can
+    forget to, and an absent pin does not raise: `VideoSelector.estimate_cost`
+    returns $0.00 and the scorer routes to whatever ranks top. A $0.00 estimate
+    is exempt from both approval guards, so the omission would seed an
+    unguarded paid line. `CutawayGen._provider_inputs` builds the pin into
+    every payload instead, which is why the booking block above is allowed to
+    look pin-free.
+    """
+    import ast
+
+    from tools.video.cutaway_gen import CUTAWAY_PROVIDER_PIN, CutawayGen
+
+    assert CUTAWAY_PROVIDER_PIN, "the cutaway provider pin is empty — see docstring"
+
+    payload = CutawayGen()._provider_inputs("chalk dust, macro", Path("/tmp/cache"))
+    assert payload["allowed_providers"] == list(CUTAWAY_PROVIDER_PIN)
+    assert payload["preferred_provider"] == CUTAWAY_PROVIDER_PIN[0]
+
+    # Deterministic: the priced payload and the executed payload are built by
+    # the same call from the same inputs, so they cannot disagree.
+    assert payload == CutawayGen()._provider_inputs("chalk dust, macro", Path("/tmp/cache"))
+
+    # ...and in `execute` it is literally one object, priced then run.
+    source = (REPO_ROOT / "tools" / "video" / "cutaway_gen.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    names = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("estimate_cost", "execute")
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "selector"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            names.setdefault(node.func.attr, set()).add(node.args[0].id)
+
+    assert names.get("estimate_cost") and names.get("estimate_cost") == names.get("execute"), (
+        "cutaway_gen prices and executes different names through VideoSelector — "
+        f"{names}. The selector stamps an estimate divergence when they differ."
+    )

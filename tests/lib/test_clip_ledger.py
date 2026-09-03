@@ -314,3 +314,57 @@ def test_is_available_agrees_with_claim_on_degenerate_intervals(tmp_path):
         assert ledger.is_available(source="a.mp4", in_seconds=bad[0], out_seconds=bad[1]) is False
         with pytest.raises(ValueError):
             ledger.claim(reel_id="r1", source="a.mp4", in_seconds=bad[0], out_seconds=bad[1])
+
+
+def test_abandoning_two_reels_leaves_the_rest_claimed_and_the_batch_clean(tmp_path):
+    """#49(d): the batch-level property, not the per-claim one.
+
+    `test_abandoned_reel_returns_exactly_its_segments` already proves one
+    reel's release is exact against a batch whose other reels were
+    *reconciled*. This is the state a real abort leaves behind: reels 1-3 are
+    still mid-flight at `claimed`, and two reels go back at once. Both matter.
+    `claimed` and `reconciled` are both holding statuses, so a test that only
+    asserts "still live" cannot tell a reel that is still working from one
+    that finished — the status is asserted explicitly here.
+
+    The vacuous pass is the trap this guards. `release_reel` is a silent no-op
+    on an unknown reel id and on an already-released one, returning `[]` with
+    no exception, so "exactly their segments came back" is satisfied by
+    releasing nothing at all unless the count is pinned.
+    """
+    ledger = _ledger(tmp_path)
+    for reel in range(1, 6):
+        for cut in range(2):
+            start = reel * 10.0 + cut * 3.0
+            _claim(ledger, f"reel-{reel}", start, start + 3.0)
+
+    released = []
+    for reel in (4, 5):
+        released += ledger.release_reel(f"reel-{reel}")
+
+    # Not vacuous: two reels x two cuts actually came back.
+    assert len(released) == 4
+    assert {(c["in_seconds"], c["out_seconds"]) for c in released} == {
+        (40.0, 43.0), (43.0, 46.0), (50.0, 53.0), (53.0, 56.0)
+    }
+    assert {c["reel_id"] for c in released} == {"reel-4", "reel-5"}
+
+    # Reels 1-3 are untouched AND still working — not merely still live.
+    survivors = [c for c in ledger.live_claims()]
+    assert sorted({c["reel_id"] for c in survivors}) == ["reel-1", "reel-2", "reel-3"]
+    assert {c["status"] for c in survivors} == {"claimed"}
+    assert len(survivors) == 6
+
+    # Every abandoned segment is genuinely back in the pool, and none of the
+    # survivors' is.
+    for start in (40.0, 43.0, 50.0, 53.0):
+        assert ledger.is_available(source=SET, in_seconds=start, out_seconds=start + 3.0)
+    for start in (10.0, 20.0, 30.0):
+        assert not ledger.is_available(source=SET, in_seconds=start, out_seconds=start + 3.0)
+
+    # The partial batch is still internally consistent.
+    ledger.assert_no_reuse()
+
+    # And a retry can take an abandoned segment without colliding.
+    _claim(ledger, "reel-4b", 40.0, 43.0)
+    ledger.assert_no_reuse()
