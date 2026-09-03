@@ -728,6 +728,15 @@ The `.agents/skills/` directory is large. When you're not coming in through a to
 
 - **Do not bypass the pipeline.** Never write ad-hoc scripts to call tools directly. All production goes through pipeline stages with director skills. See Rule Zero.
 - **Do not call generation tools without reading their Layer 3 skill.** Check the tool's `agent_skills` field, read the referenced skill, then craft your prompts using that guidance.
+- **Do not regenerate a person's face.** When a pipeline works from footage the
+  operator supplied of themselves, that footage is identity-locked at ingest and
+  what may touch it is grade / grain / sharpen / lighting / upscale. `faceswap`,
+  avatars, and video-restyle of operator footage are **out of scope** — the face
+  is never regenerated. The `faceswap` skill still exists for work that is about
+  a face by consent; it is not reachable through a pipeline that ingests someone's
+  own footage. Enforced at compose by `_pre_compose_validation` and
+  `lib/polish_filters.look_filters`; policed by
+  `tests/contracts/test_identity_chain.py`.
 - **Do not skip stage director skills.** Before executing any pipeline stage, read its director skill. The skill contains the quality bar, the workflow, and the review criteria.
 - Do not use deleted legacy names such as `tts_cloud`, `tts_engine`, or `video_gen`.
 - Do not hardcode provider names, API key names, or setup URLs. Read them from the registry's `install_instructions` and `dependencies` fields.

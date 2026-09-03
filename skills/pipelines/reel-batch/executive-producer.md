@@ -38,6 +38,14 @@ are what a finished sitting is checked against.
    look's `talking_head_standard` lands on a locked cut by design; what **raises** on an
    `operator_footage` cut is a `color_grade` **profile** in that slot, or any grain
    (`lib/polish_filters.py:169-180`) — such a cut takes `face_enhance` presets only.
+   **`faceswap`, avatars and video-restyle of operator footage are out of scope for this
+   pipeline** — the face is never regenerated. That is doctrine, not enforcement: the
+   `faceswap` skill is still one Bash call away and nothing here can stop a human
+   reaching for it. What *is* enforced is the compose gate
+   (`tools/video/video_compose.py` — `_pre_compose_validation`), which blocks a cut whose
+   declared `provenance` contradicts the tool that produced its asset, and blocks an
+   unsafe look on a locked cut, on all three render runtimes. See
+   `tests/contracts/test_identity_chain.py` for the whole chain and its honest limits.
 4. **A reel never exceeds 10 seconds.** ~5 cuts each. A five-reel sitting therefore needs
    ~25 usable segments out of the pool.
 5. **Free-first.** AI cutaways are a measured shortfall valve, not a look. A typical

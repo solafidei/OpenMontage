@@ -113,7 +113,13 @@ surfaced at `:410`). Reading capacity as shortfall fires a cutaway for every ree
 could have carried — unapproved spend, and it fails this file's own quality gate.
 **Provenance is declared, never inferred** — a row is identity-locked because
 `footage_library` wrote it that way at ingest (`:371`, `:412`), and nothing downstream
-re-decides it from pixels.
+re-decides it from pixels. **`faceswap`, avatars and video-restyle of
+operator footage are out of scope** — the face is never regenerated, and no shortfall is
+a reason to reach for a tool that would. The compose gate cross-checks what you write
+here: a cut whose `provenance` disagrees with its asset's `source_tool`
+(`footage_library` ⇒ `operator_footage`, `cutaway_gen` ⇒ `ai_generated`) blocks the whole
+render on every runtime. Write the truth per cut; a plausible-looking guess fails at
+compose, after the money is spent.
 
 ## Process
 

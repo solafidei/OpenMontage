@@ -66,6 +66,18 @@ LUFS_DELIVERY_FLOOR = -40.0
 SILENCE_FLOOR_DB = -60.0
 
 
+# The producing tool corroborates a cut's declared `provenance`. `footage_library`
+# is the only ingest that stamps `ClipRecord.identity_locked=True` (the operator's
+# own pool); `cutaway_gen` is the only producer of generated frames, and stamps
+# `provenance: "ai_generated"` on what it returns. Anything else — stock, a
+# hand-placed file — declares its own provenance with nothing to check it against,
+# which is why this map is consulted rather than required.
+PROVENANCE_BY_SOURCE_TOOL = {
+    "footage_library": "operator_footage",
+    "cutaway_gen": "ai_generated",
+}
+
+
 class VideoCompose(BaseTool):
     name = "video_compose"
     version = "0.1.0"
@@ -1487,6 +1499,9 @@ class VideoCompose(BaseTool):
         edit_decisions: dict[str, Any],
         resolved_cuts: list[dict],
         scene_plan: list[dict] | None = None,
+        *,
+        asset_manifest: dict[str, Any] | None = None,
+        batch_look: dict[str, Any] | None = None,
     ) -> ToolResult | None:
         """Pre-compose quality gate — blocks render on critical violations.
 
@@ -1494,6 +1509,16 @@ class VideoCompose(BaseTool):
         1. Delivery promise violation: motion-required brief with >70% still cuts → BLOCK
         2. Slideshow risk score "fail" (average ≥ 4.0) → BLOCK
         3. Missing renderer_family → WARN (log only, don't block)
+        4. Identity: a cut's declared `provenance` disagrees with the tool that
+           produced its asset → BLOCK (spec R5)
+        5. Identity: an `operator_footage` cut carries a look outside the
+           identity-safe set → BLOCK (spec R5)
+
+        Checks 4 and 5 live HERE rather than in the ffmpeg per-segment encode
+        because this is the one place every render runtime passes through. The
+        `look_filters` raise still guards `_compose` called directly; on the
+        atelier and HyperFrames routes it is never reached, so without this the
+        identity guarantee held on one runtime out of three.
 
         Returns a failed ToolResult if render should be blocked, None if OK to proceed.
         """
@@ -1566,6 +1591,48 @@ class VideoCompose(BaseTool):
                 "renderer_family must be set at proposal stage and locked before compose. "
                 "Re-run the proposal stage with a renderer_family selection."
             )
+
+        # --- 4. Identity: declared provenance vs the tool that made the pixels ---
+        # `provenance` is a declaration, never inferred from the pixels (R5). The
+        # one corroborating signal that travels in-band is the producing tool:
+        # `footage_library` is the sole ingest that stamps identity_locked=True on
+        # a corpus row, and `cutaway_gen` is the sole producer of AI frames. A cut
+        # whose declaration contradicts its producer is the failure this gate
+        # exists for — an operator clip relabelled `ai_generated` is an operator
+        # clip with its identity protection switched off.
+        assets_by_id = {
+            a.get("id"): a for a in (asset_manifest or {}).get("assets", []) if a.get("id")
+        }
+        for cut in edit_decisions.get("cuts") or []:
+            asset = assets_by_id.get(cut.get("source"))
+            if not asset:
+                continue
+            expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
+            declared = cut.get("provenance")
+            if expected and declared and declared != expected:
+                blocks.append(
+                    f"Identity violation on cut {cut.get('id')!r}: declared "
+                    f"provenance {declared!r} but its asset {asset.get('id')!r} was "
+                    f"produced by {asset.get('source_tool')!r}, which only makes "
+                    f"{expected!r}. provenance is declared at ingest and carried "
+                    f"forward — a disagreement here means it was rewritten "
+                    f"downstream (spec R5)."
+                )
+
+        # --- 5. Identity: the look applied to an operator_footage cut ---
+        # `look_filters` is the authority on what is identity-safe; calling it
+        # here asks the same question the ffmpeg encode would ask, early enough
+        # that the answer holds for every runtime.
+        if batch_look:
+            from lib.polish_filters import PolishError, look_filters
+
+            for cut in edit_decisions.get("cuts") or []:
+                try:
+                    look_filters(batch_look, cut.get("provenance"))
+                except PolishError as e:
+                    blocks.append(
+                        f"Identity violation on cut {cut.get('id')!r}: {e}"
+                    )
 
         # Log warnings
         for w in warnings:
@@ -1651,7 +1718,11 @@ class VideoCompose(BaseTool):
             resolved_cuts.append(resolved_cut)
 
         validation_block = self._pre_compose_validation(
-            edit_decisions, resolved_cuts, inputs.get("scene_plan")
+            edit_decisions,
+            resolved_cuts,
+            inputs.get("scene_plan"),
+            asset_manifest=asset_manifest,
+            batch_look=inputs.get("batch_look"),
         )
         if validation_block is not None:
             return validation_block

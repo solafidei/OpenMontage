@@ -48,7 +48,7 @@ def test_gate_runs_on_every_runtime(tmp_path, monkeypatch, label, extra):
     monkeypatch.setattr(
         VideoCompose,
         "_pre_compose_validation",
-        lambda self, ed, cuts, sp=None: calls.append((ed, cuts, sp)) or None,
+        lambda self, ed, cuts, sp=None, **kw: calls.append((ed, cuts, sp)) or None,
     )
     sentinel = ToolResult(success=True, data={"reached": label})
     for method in ("_render_via_atelier", "_render_via_hyperframes"):
