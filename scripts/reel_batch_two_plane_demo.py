@@ -15,6 +15,11 @@ capability ruling, not a speed one:
                             <b> on the active word. That gap is the only reason
                             Remotion is in this pipeline.
 
+Measured on the dev machine at 1080x1920, 10s, 5 cuts (2026-09-03):
+picture 9.4s + text 13.6s = 23.0s for a single reel, and 117.0s for a
+five-reel sitting -- 23.4s a reel, the extra 0.4s being the probe between
+planes. Re-measure with --reels 5 rather than quoting these; one machine.
+
 Run:  python scripts/reel_batch_two_plane_demo.py            # one reel
       python scripts/reel_batch_two_plane_demo.py --reels 5  # batch wall clock
 
