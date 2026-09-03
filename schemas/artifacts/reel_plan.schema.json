@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/reel_plan",
+  "title": "Reel Plan",
+  "description": "The per-reel axes of a batch, which the edit_decisions spine structurally cannot hold. edit_decisions carries exactly one audio.music object with a single asset_id and exactly one subtitles object, so N reels means N tracks and N subtitle sources. The spine keeps the shared look and one flat cuts[] whose ids are <reel_id>- prefixed; this artifact keeps everything that varies per reel. compose materialises each reel's edit_decisions in memory by filtering the spine on cut_ids and merging one entry from here.",
+  "type": "object",
+  "required": ["version", "reels"],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "reels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["reel_id", "music_asset_id", "subtitle_source", "hook", "cut_ids"],
+        "properties": {
+          "reel_id": {
+            "type": "string",
+            "description": "reel_NN. Minted once at the idea gate; every cut id in cut_ids is prefixed with it."
+          },
+          "track_id": { "type": "string" },
+          "music_asset_id": {
+            "type": "string",
+            "description": "An asset id, not a path — resolve through asset_manifest.assets[].id."
+          },
+          "subtitle_source": {
+            "type": "string",
+            "description": "Asset id of this reel's word-level caption JSON."
+          },
+          "subtitle_srt_source": { "type": "string" },
+          "hook": {
+            "type": "string",
+            "description": "The hook card's text. The timing that places it is on the cut list."
+          },
+          "cut_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "This reel's cut ids in reel order, which is not necessarily spine order."
+          },
+          "corrections": {
+            "type": "object",
+            "description": "Per-reel caption corrections: wrong word (lowercase) -> replacement."
+          },
+          "caption_confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false
+}

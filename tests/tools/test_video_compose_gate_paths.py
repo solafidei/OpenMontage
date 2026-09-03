@@ -97,3 +97,31 @@ def test_a_clean_plan_still_reaches_its_runtime(tmp_path, monkeypatch, label, ex
     )
 
     assert result.success, result.error
+
+
+def test_a_string_subtitle_style_does_not_crash_the_resolver(tmp_path):
+    """`subtitles.style` is a STRING in the schema (sentence|word-by-word|karaoke).
+
+    The resolver iterated it with `.items()`, so every schema-valid edit_decisions
+    that set the field failed the render with an opaque AttributeError.
+    """
+    tool = VideoCompose()
+    resolved = tool._resolve_subtitle_style(
+        None,
+        {"version": "1.0", "subtitles": {"enabled": True, "style": "word-by-word"}},
+        None,
+    )
+    assert resolved["style"] == "word-by-word"
+    # The ASS builder still gets a usable dict out of it.
+    assert "FontName=" in tool._build_subtitle_style(resolved)
+
+
+def test_a_dict_subtitle_style_still_merges_key_by_key(tmp_path):
+    """The older in-tree convention keeps working."""
+    resolved = VideoCompose()._resolve_subtitle_style(
+        None,
+        {"version": "1.0", "subtitles": {"style": {"font_size": 64, "bold": False}}},
+        None,
+    )
+    assert resolved["font_size"] == 64
+    assert resolved["bold"] is False

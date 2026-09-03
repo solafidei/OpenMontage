@@ -48,17 +48,23 @@ way to write that into one music object. So:
 filtering `cuts[]` on the reel prefix and merging that reel's `reel_plan`
 entry. Nothing on disk ever claims to be a single-reel edit.
 
-### `reel_plan` is not a registered artifact yet
+### `reel_plan` is a registered artifact
 
-`ARTIFACT_NAMES` (`schemas/artifacts/__init__.py:13-35`) does not list
-`reel_plan`, and `_validate_artifacts_for_stage` skips any artifact name it
-does not know — `if artifact_name not in ARTIFACT_NAMES: continue`
-(`lib/checkpoint.py:157-158`). So today `reel_plan` is persisted but validated
-by nobody: a typo, a missing `cut_ids`, a `music_asset_id` naming no asset all
-pass the write silently. Registration in `ARTIFACT_NAMES` is what makes an
-artifact real; declaring it in the manifest only makes it expected. Issue #47
-registers it — until then **this director is the only guard on its shape**, so
-assert it by hand (step 7).
+`reel_plan` is in `ARTIFACT_NAMES` (`schemas/artifacts/__init__.py`) and has a
+schema (`schemas/artifacts/reel_plan.schema.json`), so `write_checkpoint`
+validates it like any other: a missing `cut_ids`, a missing `music_asset_id` or
+an invented key is refused at write time.
+
+That registration is the whole guard. `_validate_artifacts_for_stage` skips any
+artifact name it does not know — `if artifact_name not in ARTIFACT_NAMES:
+continue` (`lib/checkpoint.py:161-162`) — so an *un*registered artifact is
+unvalidated rather than rejected, and a typo in the name silently disables every
+check on it. Declaring an artifact in the manifest only makes it expected;
+registration is what makes it real.
+
+What the schema cannot see is cross-artifact truth: that `cut_ids` partition the
+spine exactly, and that each `music_asset_id` names a real asset. Step 7 asserts
+both by hand, `lib.reel_plan.partition_is_total` does the first.
 
 ## Process
 
@@ -382,14 +388,14 @@ order later, from its own strength ranking.
 
 ```python
 from lib.clip_ledger import ClipLedger
+from lib.reel_plan import partition_is_total
 
 ClipLedger.for_project(project_id).assert_no_reuse()   # raises ClipReuseError
 asset_ids = {a["id"] for a in asset_manifest["assets"]}
 cut_ids = [c["id"] for c in spine["cuts"]]
 assert len(cut_ids) == len(set(cut_ids))
 assert all(c["source"] in asset_ids for c in spine["cuts"])
-planned = [cid for r in reel_plan["reels"] for cid in r["cut_ids"]]
-assert sorted(planned) == sorted(cut_ids)              # exactly one reel each
+partition_is_total(spine, reel_plan)   # every cut in exactly one reel, or ReelPlanError
 for r in reel_plan["reels"]:
     prefix = f"{r['reel_id']}-"
     assert all(cid.startswith(prefix) for cid in r["cut_ids"])

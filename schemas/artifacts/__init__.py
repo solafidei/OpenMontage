@@ -32,6 +32,7 @@ ARTIFACT_NAMES = [
     "character_qa_report",
     "video_analysis_brief",
     "clip_ledger",
+    "reel_plan",
 ]
 
 

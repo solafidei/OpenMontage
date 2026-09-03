@@ -138,26 +138,19 @@ and merging that reel's `reel_plan` entry. **Nothing here is written to disk** �
 spine stays the artifact of record.
 
 ```python
-def reel_edit_decisions(spine: dict, entry: dict) -> dict:
-    """One reel's edit_decisions, built in memory from the batch spine."""
-    by_id = {cut["id"]: cut for cut in spine["cuts"]}
-    reel = {
-        "version": "1.0",
-        "render_runtime": spine["render_runtime"],          # "ffmpeg"
-        "cuts": [by_id[cut_id] for cut_id in entry["cut_ids"]],   # reel order, not spine order
-        "audio": {"music": {"asset_id": entry["music_asset_id"], "volume": 0.9}},
-        "metadata": dict(spine.get("metadata") or {}, reel_id=entry["reel_id"]),
-    }
-    if spine.get("renderer_family"):
-        reel["renderer_family"] = spine["renderer_family"]
-    return reel
+from lib.reel_plan import entry_for, materialise
+
+reel = materialise(spine, entry_for(reel_plan, reel_id))
 ```
 
-`by_id[cut_id]` raising `KeyError` is the feature — a `reel_plan` naming a cut the spine
-does not have must fail loudly, not render a short reel.
+`lib/reel_plan.py` owns the filter rather than this file because a reel that renders
+short because a cut was dropped is a silent defect, and an instruction cannot be tested.
+`materialise` raises `ReelPlanError` when a `reel_plan` names a cut the spine does not
+have — failing loudly is the feature. It takes cuts in `entry["cut_ids"]` order, which
+is reel order, not spine order.
 
-Carrying `spine["metadata"]` forward keeps `proposal_render_runtime` in front of the
-tool's runtime-swap check (`tools/video/video_compose.py:2701-2708`) and preserves the
+`materialise` carries `spine["metadata"]` forward, which keeps
+`proposal_render_runtime` in front of the tool's runtime-swap check (`tools/video/video_compose.py:2701-2708`) and preserves the
 project-level `identity_lock` arming flag for the record. **`identity_lock` is not what
 the identity gate reads.** The gate that actually fires is per cut:
 `lib/polish_filters.py:160` computes `locked = provenance == OPERATOR_FOOTAGE` from
@@ -179,7 +172,7 @@ from tools.video.video_compose import VideoCompose
 
 picture = VideoCompose().execute({
     "operation": "render",
-    "edit_decisions": reel_edit_decisions(spine, entry),
+    "edit_decisions": materialise(spine, entry),
     "asset_manifest": asset_manifest,
     "profile": "instagram_reels",
     "audio_path": asset_by_id[entry["music_asset_id"]]["path"],

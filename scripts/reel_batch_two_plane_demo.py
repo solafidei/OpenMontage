@@ -37,6 +37,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from lib.reel_plan import materialise, partition_is_total  # noqa: E402
 from tools.video.remotion_caption_burn import RemotionCaptionBurn  # noqa: E402
 from tools.video.video_compose import VideoCompose  # noqa: E402
 
@@ -76,7 +77,15 @@ DEFAULT_CLIPS = [
     "projects/ask-jess/assets/video/s4_veo_v2.mp4",
     "projects/ask-jess/assets/video/probe2_veo.mp4",
 ]
-DEFAULT_TRACK = "projects/ask-jess/public/music.mp3"
+# Five reels means five tracks: `edit_decisions` holds exactly one `audio.music`
+# object, which is the whole reason `reel_plan` exists (spec §4.2).
+DEFAULT_TRACKS = [
+    "projects/ask-jess/public/music.mp3",
+    "projects/sacred-mysteries-ep1/assets/audio/narration_s1.mp3",
+    "projects/sacred-mysteries-ep1/assets/audio/narration_s3.mp3",
+    "projects/sacred-mysteries-ep1/assets/audio/narration_s5b.mp3",
+    "projects/sacred-mysteries-ep1/assets/audio/narration_s7.mp3",
+]
 
 
 def word_segments(line: str = LINE, span: float = REEL_SECONDS) -> list[dict]:
@@ -93,39 +102,69 @@ def word_segments(line: str = LINE, span: float = REEL_SECONDS) -> list[dict]:
     }]
 
 
-def build_edit_decisions(reel_id: str, clips: list[Path], offset: float) -> dict:
-    """One reel's cut list. `offset` walks the in-points so reels don't repeat."""
+def build_spine(clips: list[Path], reels: int) -> dict:
+    """The batch spine: shared look, one flat cuts[] with `<reel_id>-` prefixed ids.
+
+    Every reel of the sitting lives here. The per-reel axes it structurally cannot
+    hold — a track, a subtitle source, a hook — go in the reel_plan below.
+    """
     cuts = []
-    for i in range(CUTS_PER_REEL):
-        clip = clips[(i + int(offset)) % len(clips)]
-        start = round(offset * 0.4 + i * 0.2, 2)
-        cuts.append({
-            "id": f"{reel_id}-c{i + 1}",
-            "source": str(clip),
-            "in_seconds": start,
-            "out_seconds": round(start + CUT_SECONDS, 2),
-            "polish": dict(POLISH[i % len(POLISH)]),
-        })
+    for r in range(reels):
+        for i in range(CUTS_PER_REEL):
+            clip = clips[(i + r) % len(clips)]
+            start = round(r * 0.4 + i * 0.2, 2)
+            cuts.append({
+                "id": f"reel_{r + 1:02d}-{i + 1:02d}",
+                "source": str(clip),
+                "in_seconds": start,
+                "out_seconds": round(start + CUT_SECONDS, 2),
+                "polish": dict(POLISH[i % len(POLISH)]),
+            })
     return {
         "version": "1.0",
         "render_runtime": "ffmpeg",
-        "renderer_family": "cinematic",
+        "renderer_family": "documentary-montage",
         "cuts": cuts,
+        "metadata": {"pipeline": "reel-batch", "identity_lock": True},
     }
 
 
-def render_reel(reel_id: str, clips: list[Path], track: Path, out_dir: Path, index: int) -> dict:
-    """Picture plane, then text plane. Returns paths and per-plane wall clock."""
+def build_reel_plan(reels: int, tracks: list[Path]) -> dict:
+    """The per-reel axes: one track, one hook and one cut list per reel."""
+    return {
+        "version": "1.0",
+        "reels": [
+            {
+                "reel_id": f"reel_{r + 1:02d}",
+                "track_id": f"track_{r + 1:02d}",
+                "music_asset_id": str(tracks[r % len(tracks)]),
+                "subtitle_source": f"asset_reel_{r + 1:02d}_captions_json",
+                "hook": HOOKS[r % len(HOOKS)],
+                "cut_ids": [f"reel_{r + 1:02d}-{i + 1:02d}" for i in range(CUTS_PER_REEL)],
+            }
+            for r in range(reels)
+        ],
+    }
+
+
+def render_reel(spine: dict, entry: dict, out_dir: Path) -> dict:
+    """Picture plane, then text plane, for one reel of the batch.
+
+    The reel's `edit_decisions` is materialised IN MEMORY from the spine — nothing
+    per-reel is written to disk. The spine stays the artifact of record.
+    """
+    reel_id = entry["reel_id"]
+    decisions = materialise(spine, entry)
     picture = out_dir / f"{reel_id}-picture.mp4"
     final = out_dir / f"{reel_id}.mp4"
 
     t0 = time.time()
     result = VideoCompose().execute({
         "operation": "render",
-        "edit_decisions": build_edit_decisions(reel_id, clips, float(index)),
+        "edit_decisions": decisions,
         "asset_manifest": {"version": "1.0", "assets": []},
         "profile": "instagram_reels",
-        "audio_path": str(track),
+        "audio_path": decisions["audio"]["music"]["asset_id"],
         "batch_look": BATCH_LOOK,
         "output_path": str(picture),
     })
@@ -133,7 +172,7 @@ def render_reel(reel_id: str, clips: list[Path], track: Path, out_dir: Path, ind
         raise SystemExit(f"{reel_id}: picture plane failed — {result.error}")
     picture_s = time.time() - t0
 
-    hook = HOOKS[index % len(HOOKS)]
+    hook = entry["hook"]
     t1 = time.time()
     burn = RemotionCaptionBurn().execute({
         "input_path": str(picture),
@@ -158,6 +197,8 @@ def render_reel(reel_id: str, clips: list[Path], track: Path, out_dir: Path, ind
     return {
         "reel_id": reel_id,
         "hook": hook,
+        "track": Path(entry["music_asset_id"]).name,
+        "cut_count": len(decisions["cuts"]),
         "picture": picture,
         "final": final,
         "picture_s": picture_s,
@@ -191,30 +232,41 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--reels", type=int, default=1)
     ap.add_argument("--clips", nargs="*", default=DEFAULT_CLIPS)
-    ap.add_argument("--track", default=DEFAULT_TRACK)
+    ap.add_argument("--tracks", nargs="*", default=DEFAULT_TRACKS)
     ap.add_argument("--out", default="renders/reel-batch-demo")
     args = ap.parse_args()
 
-    clips = [Path(c) if Path(c).is_absolute() else REPO / c for c in args.clips]
-    missing = [c for c in clips if not c.exists()]
-    if missing:
-        raise SystemExit(f"clips not found: {missing}")
-    track = Path(args.track) if Path(args.track).is_absolute() else REPO / args.track
-    if not track.exists():
-        raise SystemExit(f"track not found: {track}")
+    def _resolve(paths: list[str], what: str) -> list[Path]:
+        resolved = [Path(p) if Path(p).is_absolute() else REPO / p for p in paths]
+        missing = [p for p in resolved if not p.exists()]
+        if missing:
+            raise SystemExit(f"{what} not found: {missing}")
+        return resolved
+
+    clips = _resolve(args.clips, "clips")
+    tracks = _resolve(args.tracks, "tracks")
+    if len(tracks) < args.reels:
+        print(f"note: {len(tracks)} track(s) for {args.reels} reels — cycling. "
+              f"A real sitting gives every reel its own.")
     out_dir = Path(args.out) if Path(args.out).is_absolute() else REPO / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    spine = build_spine(clips, args.reels)
+    plan = build_reel_plan(args.reels, tracks)
+    partition_is_total(spine, plan)   # every cut in exactly one reel, or ReelPlanError
+
     print(f"\nreel-batch two-plane render — {args.reels} reel(s), {REEL_SECONDS:.0f}s each")
-    print(f"pool: {len(clips)} clips   track: {track.name}   look: {BATCH_LOOK}")
+    print(f"pool: {len(clips)} clips   tracks: {len(tracks)}   look: {BATCH_LOOK}")
+    print(f"spine: {len(spine['cuts'])} cuts across {len(plan['reels'])} reel_plan entries")
     print("=" * 72)
 
     t0 = time.time()
-    rows = [render_reel(f"reel{i + 1}", clips, track, out_dir, i) for i in range(args.reels)]
+    rows = [render_reel(spine, entry, out_dir) for entry in plan["reels"]]
     total = time.time() - t0
 
     for r in rows:
-        print(f"\n{r['reel_id']}  \"{r['hook']}\"")
+        print(f"\n{r['reel_id']}  \"{r['hook']}\"   track {r['track']}   "
+              f"{r['cut_count']} cuts")
         print(f"  picture (ffmpeg)   {r['picture_s']:6.1f}s   {probe(r['picture'])}")
         print(f"  text ({r['engine'] or 'remotion'})  {r['text_s']:6.1f}s   {probe(r['final'])}")
         print(f"  -> {r['final']}")

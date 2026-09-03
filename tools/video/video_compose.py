@@ -3091,10 +3091,18 @@ class VideoCompose(BaseTool):
 
         # Layer 2: edit_decisions subtitle style
         if edit_decisions:
-            ed_style = edit_decisions.get("subtitles", {}).get("style", {})
-            for k, v in ed_style.items():
-                if v is not None:
-                    resolved[k] = v
+            ed_style = (edit_decisions.get("subtitles") or {}).get("style")
+            # The schema types `style` as a STRING — the display mode, one of
+            # sentence / word-by-word / karaoke. A dict is the older in-tree
+            # convention: a bag of ASS overrides merged key by key. Both are in
+            # the wild, so accept both; calling .items() on the schema-valid
+            # form raised AttributeError and failed the whole render.
+            if isinstance(ed_style, str):
+                resolved["style"] = ed_style
+            elif isinstance(ed_style, dict):
+                for k, v in ed_style.items():
+                    if v is not None:
+                        resolved[k] = v
 
         # Layer 3: Explicit override (highest priority)
         if explicit_style:
