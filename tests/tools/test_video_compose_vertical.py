@@ -89,3 +89,64 @@ def test_compose_target_override_cover(tmp_path):
     )
     assert r.success, r.error
     assert _dims(out) == (720, 1280)
+
+
+def _top_strip_max_luma(path: Path, rows: int = 120) -> int:
+    """Max luma in the top `rows` of frame 1. ~0 under a letterbox bar."""
+    raw = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(path),
+         "-vf", f"crop=iw:{rows}:0:0", "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    )
+    return max(raw)
+
+
+def test_portrait_profile_fills_the_frame(tmp_path):
+    """D6: a 9:16 profile must scale-to-fill, not letterbox landscape source.
+
+    `profile` overrode resolution but left `fit_mode` at its `pad` default, so
+    landscape gym footage arrived in Reels as a black-bar sandwich.
+    """
+    src = tmp_path / "in.mp4"
+    _make_clip(src, w=1280, h=720)
+    out = tmp_path / "out.mp4"
+    r = VideoCompose().execute(
+        {"operation": "compose", "edit_decisions": _edit_decisions(src),
+         "profile": "instagram_reels", "output_path": str(out)}
+    )
+    assert r.success, r.error
+    assert _dims(out) == (1080, 1920)
+    assert _top_strip_max_luma(out) > 20, "top of frame is black — still letterboxing"
+
+
+def test_explicit_pad_still_wins_over_a_portrait_profile(tmp_path):
+    """A caller who asks for `pad` keeps it — the profile only supplies a default."""
+    src = tmp_path / "in.mp4"
+    _make_clip(src, w=1280, h=720)
+    out = tmp_path / "out.mp4"
+    ed = _edit_decisions(src, metadata={"compose_target": {"width": 1080, "height": 1920, "fit": "pad"}})
+    r = VideoCompose().execute(
+        {"operation": "compose", "edit_decisions": ed,
+         "profile": "instagram_reels", "output_path": str(out)}
+    )
+    assert r.success, r.error
+    assert _top_strip_max_luma(out) <= 20
+
+
+def test_landscape_profile_keeps_padding(tmp_path):
+    """The fill default is scoped to portrait: 16:9 targets stay backward compatible."""
+    src = tmp_path / "in.mp4"
+    _make_clip(src, w=720, h=720)
+    out = tmp_path / "out.mp4"
+    r = VideoCompose().execute(
+        {"operation": "compose", "edit_decisions": _edit_decisions(src),
+         "profile": "youtube_landscape", "output_path": str(out)}
+    )
+    assert r.success, r.error
+    assert _dims(out) == (1920, 1080)
+    # Square source into 16:9 with pad → black pillars at the left edge.
+    raw = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(out), "-vf", "crop=200:ih:0:0",
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    )
+    assert max(raw) <= 20

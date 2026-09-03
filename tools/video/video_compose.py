@@ -492,6 +492,7 @@ class VideoCompose(BaseTool):
         # fit="cover" scales-to-fill and centre-crops (better for vertical social).
         resolution = "1920x1080"
         fit_mode = "pad"
+        fit_was_explicit = False
         compose_target = (edit_decisions.get("metadata") or {}).get("compose_target")
         if isinstance(compose_target, dict):
             try:
@@ -500,11 +501,18 @@ class VideoCompose(BaseTool):
                 pass
             if compose_target.get("fit") in ("pad", "cover"):
                 fit_mode = compose_target["fit"]
+                fit_was_explicit = True
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
                 p = get_profile(profile_name)
                 resolution = f"{p.width}x{p.height}"
+                # A portrait profile (reels/shorts/tiktok) means social vertical:
+                # fill the frame. Keeping the `pad` default here letterboxed
+                # landscape source into a black-bar sandwich — never what a
+                # 9:16 target wants. An explicit compose_target.fit still wins.
+                if not fit_was_explicit and p.height > p.width:
+                    fit_mode = "cover"
             except (ImportError, ValueError):
                 pass
         try:
@@ -1614,6 +1622,26 @@ class VideoCompose(BaseTool):
                 ),
             )
 
+        # --- Pre-compose validation gate -------------------------------
+        # Hoisted ABOVE the atelier and HyperFrames early returns. Placed
+        # further down (after the templated flow's asset resolution) it
+        # silently never ran for either of those runtimes — the gate looked
+        # present but only policed one of three paths.
+        asset_lookup = {a["id"]: a for a in (asset_manifest or {}).get("assets", [])}
+        resolved_cuts = []
+        for cut in edit_decisions.get("cuts") or []:
+            resolved_cut = dict(cut)
+            source_id = cut.get("source", "")
+            if source_id in asset_lookup:
+                resolved_cut["source"] = asset_lookup[source_id]["path"]
+            resolved_cuts.append(resolved_cut)
+
+        validation_block = self._pre_compose_validation(
+            edit_decisions, resolved_cuts, inputs.get("scene_plan")
+        )
+        if validation_block is not None:
+            return validation_block
+
         # --- Atelier (bespoke) mode -------------------------------------
         # Hand-authored, project-local Remotion composition. Deliberately
         # bypasses the cut-schema, the stock scene-type registry, and the
@@ -1660,27 +1688,8 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", "renders/output.mp4"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build asset lookup: id -> asset info
-        asset_lookup = {a["id"]: a for a in asset_manifest.get("assets", [])}
-
-        cuts = edit_decisions.get("cuts", [])
-        if not cuts:
+        if not resolved_cuts:
             return ToolResult(success=False, error="No cuts in edit_decisions")
-
-        # Resolve asset IDs in cuts to file paths
-        resolved_cuts = []
-        for cut in cuts:
-            source_id = cut.get("source", "")
-            resolved_cut = dict(cut)
-            if source_id in asset_lookup:
-                resolved_cut["source"] = asset_lookup[source_id]["path"]
-            resolved_cuts.append(resolved_cut)
-
-        # --- Pre-compose validation gate ---
-        scene_plan = inputs.get("scene_plan")
-        validation_block = self._pre_compose_validation(edit_decisions, resolved_cuts, scene_plan)
-        if validation_block is not None:
-            return validation_block
 
         # Also accept profile as "output_profile" (skill convention) or "profile"
         profile = inputs.get("profile") or inputs.get("output_profile")

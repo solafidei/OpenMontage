@@ -28,6 +28,9 @@ tests/qa/output/
 # Project workspaces (generated assets, renders — all regenerable)
 projects/
 
+# Repo-root render scratch (demo scripts write here; regenerable)
+renders/
+
 # Generated style playbooks (output of lib/playbook_generator.save_playbook())
 styles/custom/
 
