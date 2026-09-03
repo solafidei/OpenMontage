@@ -15,7 +15,7 @@ than quietly dropped.
 
 The operator dumps a pool of his own gym footage plus a few motivational audio tracks — music with
 a spoken motivational voice baked into the track — and receives **several finished 9:16 Instagram
-Reels from one sitting**. **A reel does not exceed 10 seconds.**
+Reels from one sitting**. **A reel does not exceed 10 seconds.** Cutaways are sub-second flash accents, not B-roll; the lift holds the frame.
 
 Each reel is cut to the beat, carries word-synced captions transcribed from the track's speech, opens
 with a hook, weaves in AI-generated cutaway b-roll, and is colour-graded.
@@ -322,6 +322,50 @@ matters for "five reels that don't look like each other".
 
 ---
 
+### R8 — Cutaways are free-first; AI is a pool relief valve, not a look
+
+A cutaway is a **sub-second flash accent on a beat hit**, not a B-roll departure. In a 10s reel a 2s
+cutaway is 20% of the runtime spent not showing the thing the viewer came for, and the retention
+logic that forces near-continuous captions applies to the picture too.
+
+At that length the choice is not about quality — nothing reads in half a second — it is about
+**pool pressure**, and it runs opposite to intuition:
+
+- A flash to **another of the operator's own clips** costs $0.00, keeps him on screen, and is what
+  hand-cut gym edits actually do — but it **consumes pool**, and no-reuse means every flash frame is
+  a segment reels 4 and 5 cannot have.
+- An **AI cutaway** costs $0.10 but is **pool-neutral**.
+
+**The ruling is free-first with a measured valve.** Flash cuts come from the operator's own pool by
+default. AI cutaways fire **only** when the `idea` gate measures that the pool cannot support the
+planned batch. This is deliberately not a preference toggle: #41 must report usable-segment count
+anyway to stop the gate over-planning, so the same measurement arms the valve at zero extra cost.
+Most sittings therefore spend **$0.00**; thin-pool sittings degrade into spending fifty cents rather
+than into worse reels.
+
+**The valve mechanism, concretely.** At gate 1 the director compares measured usable segments against
+`N reels × cuts per reel` (~5 cuts for a 10s reel). If the pool covers it, `assets` makes no paid
+call at all. If it does not, the shortfall — not the whole batch — is filled with AI cutaways, one
+per reel that cannot be sourced locally.
+
+**Route when the valve fires: `kling_video`.** Verified runtimes on this machine (RTX 5070, CUDA
+available) settle it:
+
+| Route | Cost | Runtime | Verdict |
+|---|---|---|---|
+| `kling_video` | $0.10 | ~1 min/clip | **chosen** |
+| `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | $0.00 | ~4 min/clip | 20 min for five clips |
+| `wan_video` | $0.00 | **~43 min/clip** | disqualified |
+| `gemini_omni_video` | $0.30 | — | dropped; 3× the price for a flash nobody can resolve |
+
+Twenty minutes of dead time is itself a sitting, which is the thing this pipeline exists to abolish.
+Fifty cents buys it back on the rare sittings where the valve fires.
+
+**Consequence — reel-batch remains a paid pipeline.** Choosing a local route would have removed the
+paid surface entirely (no provider pinning, no per-reel booking, and `budget_per_output_minute_usd`
+droppable on clip-factory's precedent). It does not remove the ledger ceremony, which the contract
+tests require even on an all-$0 pipeline (§6 item 23).
+
 ## 4. Architecture
 
 ### 4.1 Data flow
@@ -395,80 +439,61 @@ smuggled into this epic — reel-batch does not use `cut.type`.
 
 ## 5. Cost model
 
-### 5.1 Assumptions (stated so they can be argued with)
+**A typical sitting costs $0.00.** Under R8 the pipeline sources flash cuts from the operator's own
+pool and makes no paid call at all. The paid path is the exception, and this section prices it.
+
+### 5.1 Assumptions
 
 1. One sitting = 5 reels **× 10s = 50s = 0.8333 output minutes**, summed across deliverables
    following `skills/pipelines/podcast-repurpose/idea-director.md:93-103`.
-2. **One AI cutaway per reel**, trimmed in the edit to roughly 1-2s of screen time. At 10 seconds
-   there is room for exactly one; the hero-plus-fillers blend that suited a 30s reel has no room to
-   exist.
-3. Everything else is $0.00, verified live: `transcriber`, `subtitle_gen`, `audio_energy`,
+2. A 10s reel is roughly **five cuts** at ~2s each. All five come from the operator's pool by
+   default, so a five-reel batch consumes about **25 usable segments**.
+3. The AI valve fires only on a measured pool shortfall (R8), at most **one cutaway per reel**.
+4. Everything else is $0.00, verified live: `transcriber`, `subtitle_gen`, `audio_energy`,
    `audio_probe`, `scene_detect`, `auto_reframe`, `color_grade`, `face_enhance`, `video_trimmer`,
    `audio_mixer`, `video_compose`, `clip_search`. No `music_gen` line — he supplies the tracks.
 
-### 5.2 The clip floor is the governing constraint
+### 5.2 The clip floor, and why the cheaper clip is the longer one
 
-Generators bill per clip against a **minimum duration**, and a 10s reel is short enough that the
-floor, not the reel, sets the price. Verified live:
+Generators bill per clip against a **minimum duration**. A sub-second flash is far below every
+floor, so the floor alone sets the price. Verified live:
 
-| Tool | Shortest clip | Price at that length | Note |
-|---|---|---|---|
-| `kling_video` (standard, via fal) | **5s** — enum `["5","10"]`, hard floor | **$0.10** | `tools/video/kling_video.py:75-77, :107-114` |
-| `gemini_omni_video` | **3s** — a *hint*; "the model chooses the actual length" | **$0.30** | `_COST_PER_SECOND = 0.10`, `:43, :123-126, :200-201` |
-| `minimax_fal_video` | 5s | $0.95 | `minimum: 5`, `:66, :97-98` |
-| `seedance_video` (unpinned default) | 5s | $1.52 | `:225-229` |
-| `veo_video` | 5s | $2.00 | `:205-207` |
-| `wan_video`, `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | local | $0.00 | slow |
+| Tool | Shortest clip | Price | Runtime | Note |
+|---|---|---|---|---|
+| `kling_video` (standard, via fal) | **5s** — enum `["5","10"]`, hard floor | **$0.10** | ~1 min | `tools/video/kling_video.py:75-77, :107-114` |
+| `gemini_omni_video` | 3s — a *hint*; the model chooses actual length | $0.30 | — | `:43, :123-126, :200-201` |
+| `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | — | $0.00 | ~4 min | local, RTX 5070 |
+| `wan_video` | — | $0.00 | **~43 min** | disqualified |
+| `seedance_video` (unpinned default) | 5s | $1.52 | — | `:225-229` |
 
-Two consequences that did not exist at 30s:
+**Generate 5s, use half a second, discard the rest.** Paying for unused footage is correct here: the
+only route that generates shorter costs 3× more. Because `gemini_omni_video`'s duration is a hint
+rather than a guarantee, trimming is mandatory on every route — no design may depend on receiving an
+exact clip length.
 
-- **The cheapest cutaway is the longer one.** `kling_video` at 5s costs $0.10; `gemini_omni_video` at
-  3s costs $0.30. Generate 5s, trim to the 1-2s the reel uses, discard the rest. Paying for unused
-  footage is correct here — the alternative costs 3×.
-- **`gemini_omni_video` is the only credentialed route that can go below 5s at all**, and its duration
-  is a hint rather than a guarantee, so a 10s reel cannot depend on getting exactly 3s back. Trimming
-  is mandatory on every route, which makes the floor a pricing question rather than a fit question.
-
-### 5.3 The route choice and the derived caps
-
-Two defensible routes; the operator picks. The manifest ships the **quality** default, consistent with
-his stated preference for paying overhead rather than risking worse output, and the gate presents both.
+### 5.3 Derived caps
 
 ```
-quality default — gemini_omni_video @ 3s hint
-  per reel   = $0.30
-  per batch  = 5 × $0.30                     = $1.50
-  per minute = $1.50 / 0.8333                = $1.80
-  + 20% regeneration headroom                = $2.16 → round to $2.20
-
-thrift route — kling_video @ 5s, trimmed
-  per reel   = $0.10
-  per batch  = 5 × $0.10                     = $0.50
-  per minute = $0.50 / 0.8333                = $0.60   (exactly in family with the generative rate)
+typical sitting  (pool sufficient)   = $0.00
+thin-pool sitting (valve fires × 5)  = 5 × $0.10          = $0.50
+per output minute                    = $0.50 / 0.8333     = $0.60
++ 20% regeneration headroom          = $0.72              → round to $0.75
 ```
 
-Unpinned, the same five-reel batch routes to seedance at $1.52/clip = **$7.60**. That is no longer
-above the configured `total_usd: 15.00`, but it is 5× the quality route and 15× the thrift route for
-footage that gets trimmed to two seconds. Pinning still matters; it is simply no longer catastrophic.
+**Derived manifest values:** `budget_default_usd: 2.00`, `budget_per_output_minute_usd: 0.75`.
 
-**Derived manifest values:** `budget_default_usd: 2.00`, `budget_per_output_minute_usd: 2.20`.
-
-**Gate arithmetic for the canonical sitting:**
+At $0.75 the rate is **in family** with every existing pipeline (0.05 / 0.25 / 0.30 / 0.40 / 0.60),
+where the pre-R8 figures were outliers twice over. The flat floor governs at realistic batch sizes
+and the rate guards large ones:
 
 ```
-target_minutes         = 5 × 0.1667                                 = 0.8333
-default_budget_cap_usd = max($2.00, $2.20 × 0.8333) = max($2.00, $1.83) = $2.00
-total_estimated_usd    = 5 × $0.30                                  = $1.50
-min_workable_usd       = ceil(1.50 / (1 − 0.10) × 100)/100 + 0.01   = $1.68
-tracker.budget_total_usd = max($2.00, $1.68)                        = $2.00
+5 reels : target 0.8333 min → cap max($2.00, $0.63) = $2.00 ; estimate $0.50 ; min_workable $0.57 ✓
+10 reels: target 1.667  min → cap max($2.00, $1.25) = $2.00 ; estimate $1.00 ; min_workable $1.12 ✓
+20 reels: target 3.333  min → cap max($2.00, $2.50) = $2.50 ; estimate $2.00 ; min_workable $2.23 ✓
 ```
 
-$2.00 > $1.68, so a bare "approve" never triggers the below-minimum conversation.
-
-**The flat floor now does the work, and the rate is the guard for larger batches.** At five reels the
-$2.00 default wins the `max()`; the rate only binds past ~9 reels (10 reels → cap $3.67 against a
-$3.00 estimate and a $3.34 minimum). This is the reverse of the 30s case, where the rate did the work
-and the floor was dead weight — and it is why the rate is derived per sitting rather than copied.
+Unpinned, a five-cutaway shortfall routes to seedance at $1.52/clip = **$7.60** — 15× the pinned
+figure, for footage trimmed to half a second. Pinning is what keeps the valve cheap.
 
 ### 5.4 Per-reel booking (a deliberate divergence)
 
@@ -478,18 +503,17 @@ entry per tool. Reel-batch books **one ledger entry per reel** for cutaway gener
 The rule is permissive ("is acceptable"), not mandatory, and a single batch entry has **no honest
 terminal state after a mid-batch abort**: `reconcile()` is one-shot and terminal-guarded
 (`tools/cost_tracker.py:314`), `budget_spent_usd` counts failed entries as spend (`:186-192`), and
-`refund()` on a partly-executed entry erases real billing (`:323-337`). Reconciling at the full
-estimate books money that was never spent; reconciling at $0.00 hides money that was. Per-reel is
-also the only granularity matching the approval shape — he approves **per reel**.
+`refund()` on a partly-executed entry erases real billing (`:323-337`). Per-reel is also the only
+granularity matching the approval shape — he approves **per reel**.
 
-**One consequence of the shorter reel:** at $0.30 (or $0.10) a per-reel entry now sits **below**
-`single_action_approval_usd: 0.50` (`config.yaml:13`), where at 30s it sat above. The
-`user_approved=True` flag is therefore no longer forced by the threshold — but
-`tests/contracts/test_agent_instruction_integrity.py:105-125` requires **every** `tracker.reserve(...)`
-in an asset or compose director to carry it regardless. Carry it. The honest reading is that the
-operator does approve each reel at gate 2, so the flag states something true.
+A per-reel entry at $0.10 sits well below `single_action_approval_usd: 0.50` (`config.yaml:13`), so
+the threshold does not force `user_approved=True`. Carry it regardless:
+`tests/contracts/test_agent_instruction_integrity.py:105-125` requires it on **every**
+`tracker.reserve(...)` in an asset or compose director, and the operator does approve each reel at
+gate 2, so the flag states something true.
 
-Everything free books as two batched `0.0` round-trips.
+**The $0.00 sitting still books.** A batch where the valve never fires writes a proven-$0 ledger with
+batched zero entries — full ceremony, no lite variant (§6 item 23).
 
 ## 6. CI compliance checklist
 
@@ -603,27 +627,27 @@ Fifteen issues in four waves. Dependencies are by title.
 
 ## 8. Risks and open questions
 
-### Open questions for the operator
+### Resolved by the operator
 
-1. **Quality route or thrift route?** `gemini_omni_video` at 3s is **$1.50** a batch;
-   `kling_video` at 5s trimmed is **$0.50**. The manifest ships gemini as the default on the stated
-   quality-over-cost preference, but that is an inference. The whole spread is one pound fifty, so
-   this is a taste decision rather than a budget one.
-2. **Is one cutaway per reel right — or none?** Ten seconds is short enough that a 1-2s cutaway is
-   ~15-20% of the reel. If the lift should simply carry all ten seconds, the paid surface drops to
-   **$0.00** and the pipeline becomes entirely local. Worth deciding before #46 fixes the rate.
-3. **Offer local `wan_video` as a free-but-slow lane at the gate?** Free and available; at five clips
-   rather than fifteen the runtime objection is much weaker than it was.
+All three questions this spec opened are now answered and are recorded as R8:
+
+1. **Cutaway length** — sub-second flash accents, not B-roll.
+2. **Sourcing** — free-first from his own pool; AI fires only on a measured shortfall.
+3. **Route when it fires** — `kling_video` at $0.10/~1 min, over a free local route at ~4 min/clip.
+   Twenty minutes of dead time is itself a sitting.
+
+No open questions remain against the operator. What remains is measurement, below.
 
 ### Risks
 
-- **Pool sufficiency — much reduced by the 10s length, still real.** At ~2s per cut a 10s reel is
-  roughly **five cuts**, one of which is the AI cutaway, so a five-reel batch needs about **twenty
-  distinct usable operator segments** rather than the sixty a 30s reel would have demanded. That is a
-  far more achievable pool, and it is the single biggest benefit of the shorter format. Nobody has
-  still measured a real pool, so the guarantee can still degrade reels 4 and 5 silently. **#41 must
-  report segment count at ingest and the `idea` gate must refuse to plan N reels the pool cannot
-  support.**
+- **Pool sufficiency — now the pipeline's central measurement, not merely a risk.** Under R8 flash
+  cuts come from the operator's own pool, so a five-reel batch of ~5 cuts each needs about **25
+  distinct usable operator segments** — slightly more than the 20 required when one cut per reel was
+  AI. R8 trades pool for money deliberately, and pool is the quantity nobody has measured.
+  This is no longer a risk to monitor but a number the pipeline acts on: **#41 reports usable-segment
+  count at ingest, and the `idea` gate compares it against `N reels × cuts per reel` to decide both
+  how many reels it may plan and whether to arm the AI valve.** A pool that cannot support the batch
+  produces a smaller batch or a paid shortfall — never five reels that quietly get worse.
 - **Provenance proves declaration, not detection.** A director that mislabels an operator clip as
   `ai_generated` passes every gate. Mitigated by default-deny at ingest (the whole pool is locked, so
   mislabelling requires actively overriding), not eliminated.
@@ -631,10 +655,10 @@ Fifteen issues in four waves. Dependencies are by title.
 - **Second-generation encode loss** from the caption overlay pass (crf 18 over crf 23).
 - **Context cost dwarfs tool cost.** `docs/intent/context-cost.md:41` models the real bill as
   `0.5 × peak × n_calls`, 84-86% from accumulation. A five-reel sitting with five per-reel approvals
-  is the maximal-accumulation shape. `cost_snapshot()` will honestly report ~$1.50 of tool spend while
+  is the maximal-accumulation shape. `cost_snapshot()` will honestly report $0.00-$0.50 of tool spend while
   the session's actual cost is elsewhere. Anyone reading `budget_remaining_usd` as "what this batch
   cost me" is materially wrong.
 - **Per-reel cost attribution has no schema carrier.** `operation` is a free string and
-  `cost_log.schema.json` is closed at entry level, so `"reel_3 hero cutaway via gemini_omni_video"` is
+  `cost_log.schema.json` is closed at entry level, so `"reel_3 flash cutaway via kling_video"` is
   the only place reel identity can live, and nothing parses it. A real per-reel readout in Backlot is
   a schema change and belongs to its own issue.
