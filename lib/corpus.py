@@ -48,6 +48,13 @@ class ClipRecord:
     Fields mirror everything we want to query or attribute. Missing
     fields default to None/empty so adapters can populate only what
     they know.
+
+    A row is a *segment*, not necessarily a whole file: `start_seconds`
+    /`end_seconds` name an interval inside `local_path`, so one 45s
+    source can be indexed as three independently rankable rows with
+    three distinct clip_ids. Rows written before segments existed carry
+    neither offset and read as the whole file, `[0, duration]` — see
+    `interval`. No migration is needed.
     """
     clip_id: str                       # unique within corpus: "<source>_<source_id>"
     source: str                        # "pexels", "archive_org", "nasa", ...
@@ -68,6 +75,54 @@ class ClipRecord:
     shot_type: str = ""                # wide/medium/close (optional, may be empty)
     time_of_day: str = ""              # day/golden/night (optional)
     added_at: float = 0.0              # unix timestamp
+
+    # --- segment fields (additive; legacy rows omit them entirely) ----
+    start_seconds: Optional[float] = None   # in-point within local_path; None = 0.0
+    end_seconds: Optional[float] = None     # out-point; None = end of file (duration)
+    sharpness: float = 0.0                  # variance-of-Laplacian; 0.0 = unmeasured
+    # Declared at ingest, never inferred from pixels (spec R5).
+    #
+    # The default is False because a corpus row is stock footage unless
+    # something says otherwise: all 17 corpus adapters are network stock
+    # providers (pexels, archive.org, NASA, Wikimedia), and defaulting True
+    # would make every one of their rows assert it depicts the operator —
+    # a falsehood that the next Corpus.save() persists across the twelve
+    # shipped pipelines that share this index.
+    #
+    # Default-deny lives at the POOL, not at the dataclass: footage_library
+    # sets identity_locked=True on every row it writes from the operator's
+    # own directory, which is the only ingest path that can honestly know.
+    # That is what "declared at ingest" means, and a contract test asserts
+    # it rather than trusting a default to carry the guarantee.
+    identity_locked: bool = False
+
+    def __post_init__(self) -> None:
+        # Trust boundary: a segment whose out-point precedes its in-point
+        # renders as a zero-length cut that ffmpeg drops silently, so it
+        # dies here rather than downstream. Legacy rows (both None) and
+        # half-specified rows are untouched.
+        if self.start_seconds is not None and self.start_seconds < 0:
+            raise ValueError(f"start_seconds must be >= 0, got {self.start_seconds}")
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds <= self.start_seconds
+        ):
+            raise ValueError(
+                f"end_seconds ({self.end_seconds}) must exceed "
+                f"start_seconds ({self.start_seconds}) for clip {self.clip_id}"
+            )
+
+    @property
+    def interval(self) -> tuple[float, float]:
+        """The (start, end) seconds this row covers inside `local_path`.
+
+        Absent offsets mean the whole file, `[0, duration]` — which is
+        exactly what every pre-segment row reads as.
+        """
+        start = self.start_seconds if self.start_seconds is not None else 0.0
+        end = self.end_seconds if self.end_seconds is not None else self.duration
+        return (start, end)
 
 
 class Corpus:
