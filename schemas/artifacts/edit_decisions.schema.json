@@ -74,18 +74,22 @@
               "punch_in": {
                 "type": "number",
                 "minimum": 1.0,
+                "maximum": 4.0,
                 "description": "End zoom factor of an eased punch-in across the cut (1.0 = no punch-in)"
               },
               "speed_ramp": {
                 "type": "number",
                 "minimum": 0.1,
+                "maximum": 10.0,
                 "description": "Speed multiplier this cut ramps to across its duration, starting from `speed` (equal to `speed` = no ramp)"
               },
               "transition_out": {
                 "type": "string",
-                "description": "Accent transition leaving this cut (e.g. flash, whip) — the beat-hit accent, distinct from the cut-level `transition_out`"
+                "enum": ["flash", "whip"],
+                "description": "Accent transition leaving this cut — the beat-hit accent, distinct from the cut-level `transition_out`"
               }
-            }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false

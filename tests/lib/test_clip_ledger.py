@@ -301,3 +301,16 @@ def test_parallel_processes_lose_no_claims(tmp_path):
     validate_artifact("clip_ledger", persisted)
     assert len(persisted["claims"]) == processes * rounds
     ClipLedger(ledger_path=path).assert_no_reuse()
+
+
+def test_is_available_agrees_with_claim_on_degenerate_intervals(tmp_path):
+    """A probe must answer the question claim() will actually answer.
+
+    Reporting True for an interval claim() rejects would walk a caller
+    straight into a ValueError it was told to expect.
+    """
+    ledger = ClipLedger(tmp_path / "clip_ledger.json")
+    for bad in ((3.0, 3.0), (5.0, 2.0), (-1.0, 4.0)):
+        assert ledger.is_available(source="a.mp4", in_seconds=bad[0], out_seconds=bad[1]) is False
+        with pytest.raises(ValueError):
+            ledger.claim(reel_id="r1", source="a.mp4", in_seconds=bad[0], out_seconds=bad[1])

@@ -171,3 +171,33 @@ def test_polished_cuts_round_trip_through_write_checkpoint(tmp_path):
     assert cuts[0]["polish"]["punch_in"] == 1.15
     assert cuts[1]["polish"]["transition_out"] == "flash"
     assert stored["artifacts"]["edit_decisions"]["metadata"]["identity_lock"] is True
+
+def _with_polish(polish: dict) -> dict:
+    artifact = _pre_change_artifact()
+    artifact["cuts"][0]["polish"] = polish
+    return artifact
+
+
+def test_polish_block_is_closed_and_bounded():
+    """A typo in a polish key must fail loudly, not validate into silence.
+
+    The dividing rule that put `polish` on the cut rather than in metadata
+    was "a gate or contract test must be able to assert on it". An open
+    object with unbounded numerics cannot carry that.
+    """
+    for bad in (
+        {"punchin": 1.2},                 # typo
+        {"speed_rmp": 2.0},               # typo
+        {"punch_in": 40.0},               # order-of-magnitude slip
+        {"speed_ramp": 0.0},              # stops the clip dead
+        {"transition_out": "explode"},    # not in the vocabulary
+    ):
+        with pytest.raises(ValidationError):
+            validate_artifact("edit_decisions", _with_polish(bad))
+
+    for good in (
+        {"punch_in": 1.08},
+        {"speed_ramp": 1.6, "transition_out": "whip"},
+        {"transition_out": "flash"},
+    ):
+        validate_artifact("edit_decisions", _with_polish(good))

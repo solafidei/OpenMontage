@@ -170,12 +170,22 @@ class ClipLedger:
     def is_available(
         self, *, source: str, in_seconds: float, out_seconds: float
     ) -> bool:
-        """Would this segment claim cleanly right now? (Re-reads the file.)"""
-        probe = {
-            "source": source,
-            "in_seconds": float(in_seconds),
-            "out_seconds": float(out_seconds),
-        }
+        """Would this segment claim cleanly right now? (Re-reads the file.)
+
+        Answers the same question ``claim`` will: a degenerate or inverted
+        interval is not "available", it is unclaimable, and reporting True
+        here would send a caller into a ValueError it was told to expect.
+        """
+        try:
+            probe = self._new_claim(
+                source=source,
+                in_seconds=in_seconds,
+                out_seconds=out_seconds,
+                reel_id="__probe__",
+                clip_id=None,
+            )
+        except ValueError:
+            return False
         with self._locked():
             return self._holder_of(probe) is None
 
