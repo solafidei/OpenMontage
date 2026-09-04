@@ -49,7 +49,7 @@ from lib.clip_ledger import ClipLedger
 from lib.corpus import Corpus
 
 script_ckpt = read_checkpoint(PROJECTS_DIR, project_id, "script")   # Optional[dict]
-idea_ckpt = read_checkpoint(PROJECTS_DIR, project_id, "idea")       # lib/checkpoint.py:765-781
+idea_ckpt = read_checkpoint(PROJECTS_DIR, project_id, "idea")       # lib/checkpoint.py:766-782
 if script_ckpt is None or idea_ckpt is None:
     raise RuntimeError("scene_plan needs both the script and the brief on disk")
 
@@ -63,7 +63,7 @@ armed = brief["metadata"]["paid_cutaways_armed"]       # is the paid valve open 
 armed_cutaways = brief["metadata"]["cutaway_count"]    # how many cuts it was opened for
 
 corpus = Corpus(PROJECTS_DIR / project_id / "corpus")
-corpus.load()                        # __init__ does not read disk (lib/corpus.py:145-150, :185)
+corpus.load()                        # __init__ does not read disk (lib/corpus.py:169-174, :209)
 pool = [r for r in corpus.records if r.identity_locked]
 ledger = ClipLedger.for_project(project_id)    # lib/clip_ledger.py:114-134
 ```
@@ -158,7 +158,7 @@ query = embed_texts([slot_description])[0]
 locked_ids = {r.clip_id for r in pool}         # R5: only the operator's own rows are cuttable
 ranked = [(rec, s) for rec, s in
           corpus.rank_by_text(query, k=max(20, len(locked_ids)), kind="video",
-                              exclude_ids=planned_clip_ids)   # lib/corpus.py:302-341
+                              exclude_ids=planned_clip_ids)   # lib/corpus.py:326-365
           if rec.clip_id in locked_ids][:20]
 ```
 
@@ -185,7 +185,10 @@ from tools.video.cutaway_gen import refuse_media_references
 
 length = slot["end_seconds"] - slot["start_seconds"]
 for record, score in ranked:
-    seg_in, seg_out = record.interval          # lib/corpus.py:116-125
+    seg_in, seg_out = record.interval          # lib/corpus.py:126-149
+                                               # safe only because the rank above
+                                               # passed kind="video": interval RAISES
+                                               # on an image row rather than answering (0,0)
     if seg_out - seg_in < length:
         continue                               # too short to fill the slot
     take_out = seg_in + length                 # head of the segment, trimmed to the slot

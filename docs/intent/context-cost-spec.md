@@ -55,7 +55,7 @@ Measured gate positions (deduped call index):
 Fire at a stage boundary **only when both** hold:
 
 - `write_checkpoint()` has just written `status` of `completed` or `awaiting_human`
-  ([`lib/checkpoint.py:620`](../../lib/checkpoint.py#L620)), and
+  ([`lib/checkpoint.py:621`](../../lib/checkpoint.py#L621)), and
 - effective context exceeds a **150K floor**.
 
 Never fire mid-stage. Never fire while a render, a take comparison, or a visual-QA
@@ -71,7 +71,7 @@ loss of.
 Judgment state goes through the **supported decision-log path**: schema-valid entries in
 the `decision_log` artifact of the gate checkpoint, which `write_checkpoint()` merges
 into the canonical `projects/<id>/decision_log.json` via `_merge_decision_log()`
-([`lib/checkpoint.py:510`](../../lib/checkpoint.py#L510)). **Never hand-write
+([`lib/checkpoint.py:511`](../../lib/checkpoint.py#L511)). **Never hand-write
 `projects/<id>/artifacts/decision_log.json`** — nothing in the codebase writes that
 file, Backlot prefers it over the canonical log when both exist
 ([`backlot/state.py`](../../backlot/state.py), artifact-first fallback), and
@@ -173,7 +173,7 @@ This spec is disqualified if it violates any of these:
 2. **DONE (mechanism already existed)** — no new code was needed. `write_checkpoint()`
    already merges `artifacts["decision_log"]` into a cumulative project-level
    `decision_log.json` via `_merge_decision_log()`
-   ([`lib/checkpoint.py:510`](../../lib/checkpoint.py#L510)), and the
+   ([`lib/checkpoint.py:511`](../../lib/checkpoint.py#L511)), and the
    `decision_log` artifact is fully schema'd
    ([`schemas/artifacts/decision_log.schema.json`](../../schemas/artifacts/decision_log.schema.json))
    with a `visual_accuracy_check` category that fits QA verdicts.

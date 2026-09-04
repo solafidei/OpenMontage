@@ -92,7 +92,7 @@ All three render engines report live: `video_compose.get_info()["render_engines"
    adapters are network providers. There is no local-footage ingest.
 4. **No batch data model.** Every artifact schema is single-deliverable and `additionalProperties:
    false`; a checkpoint is one file per (project, stage) with no reel dimension
-   (`lib/checkpoint.py:272`). `reel_id` does not exist.
+   (`lib/checkpoint.py:273`). `reel_id` does not exist.
 5. **The motion half of the effects vocabulary is absent.** Zero `zoompan` in the entire tree
    (verified). No punch-in is ever applied to a video clip; every speed control is a constant
    per-cut factor, never a ramp; the only transitions are hard cut / crossfade / fade-through-black.
@@ -198,7 +198,7 @@ exactly what happened to character-animation's `character_design` / `rig_plan`.
 `additionalProperties: false` is real at the root (`schemas/artifacts/edit_decisions.schema.json:236`)
 and on the cut item (`:66`) — but that constrains **instances**, not the schema file. Adding an
 optional property is a monotone widening: every artifact valid before is valid after. Verified by
-execution. Only `lib/checkpoint.py:164` validates this artifact; no runtime consumer rejects unknown
+execution. Only `lib/checkpoint.py:165` validates this artifact; no runtime consumer rejects unknown
 keys; no test asserts the cut property set; there are no `edit_decisions` fixtures to re-baseline.
 Additive extension is this repo's own practice — `render_runtime`, `composition_mode` and `bespoke`
 were all added post-release.
@@ -218,7 +218,7 @@ of the cut schema.
 One mechanism, one word, two machine checks, one gate, one test file.
 
 **(a) Classification.** Every file entering from the operator's pool is written to the corpus with
-`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:44-118`). There is no
+`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:44-149`). There is no
 classification step and no per-clip judgement: **the pool is his footage, so the whole pool is
 locked.**
 
@@ -313,13 +313,13 @@ an analysis tool a hidden-state writer. `lib/reel_batch.py` is not created; its 
 "whole file" is the interval `[0, duration]`. Two claims collide when they name the same source and
 their intervals **overlap** — so one 40s set legitimately yields two non-overlapping 3s cuts.
 Selection-time filtering is id-based, because `Corpus.rank_by_text` tests `rec.clip_id in exclude`
-(`lib/corpus.py:271-274`) and nothing else — which works only if the corpus **row** is already a
+(`lib/corpus.py:353-356`) and nothing else — which works only if the corpus **row** is already a
 segment. Hence segment rows are a prerequisite, not an optimisation.
 
 Registered in `ARTIFACT_NAMES` (`schemas/artifacts/__init__.py:13-34`) and added to
-`SUPPLEMENTARY_ARTIFACTS` (`lib/checkpoint.py:44-49`) — but **the ledger validates itself on every
+`SUPPLEMENTARY_ARTIFACTS` (`lib/checkpoint.py:44-50`) — but **the ledger validates itself on every
 read**, because `_validate_artifacts_for_stage` only touches dicts passed inside a
-`write_checkpoint(artifacts=...)` call (`lib/checkpoint.py:156-169`) and never sees the live side file.
+`write_checkpoint(artifacts=...)` call (`lib/checkpoint.py:157-170`) and never sees the live side file.
 
 **Partial batch:** reels 1-3 approved and 4-5 abandoned releases reel 4's and 5's claims back to the
 pool. **Across sittings:** the ledger is per-project and does **not** persist across projects. A new
@@ -409,10 +409,16 @@ factually wrong and is rejected.
 
 The `edit` stage therefore emits **two** artifacts:
 
-- **`edit_decisions` — the batch spine.** Shared `renderer_family`, `render_runtime`, grade, effect
-  vocabulary, and one flat `cuts[]` whose ids are `<reel_id>-` prefixed, each cut carrying
-  `provenance` and its `polish` block. This satisfies `CANONICAL_STAGE_ARTIFACTS["edit"]` and keeps
-  the validated cut schema.
+- **`edit_decisions` — the batch spine.** Shared `renderer_family`, `render_runtime`, the grade and
+  effect vocabulary as one `batch_look` object (`grade`, `grain`, `sharpen`), and one flat `cuts[]`
+  whose ids are `<reel_id>-` prefixed, each cut carrying `provenance` and its `polish` block. This
+  satisfies `CANONICAL_STAGE_ARTIFACTS["edit"]` and keeps the validated cut schema.
+
+  `video_compose` reads the look off the spine and keeps its `batch_look` tool input as an explicit
+  override, in that order. The tool input alone was not enough: a look passed only as an argument is
+  not in the artifact, so the board and the audit trail cannot say what grade a batch was rendered
+  with. Until the `batch_look` root property lands (§4.3) the spine spelling that validates is
+  `metadata.batch_look`, alongside the `metadata.compose_target` knob already there.
 - **`reel_plan` — a new registered artifact.** Carries exactly the axes the spine structurally cannot
   hold: per-reel `reel_id`, `music_asset_id`, `subtitle_source`, `hook`, and `cut_ids[]`.
 
@@ -423,7 +429,7 @@ with `platform_target`.
 
 ### 4.3 Schema changes
 
-Three additive, optional, backward-compatible changes to
+Four additive, optional, backward-compatible changes to
 `schemas/artifacts/edit_decisions.schema.json`:
 
 | Field | Location | Type | Why typed rather than `metadata` |
@@ -431,12 +437,18 @@ Three additive, optional, backward-compatible changes to
 | `provenance` | cut item | enum `["operator_footage","ai_generated"]` | A gate asserts on it per cut; the correspondence invariant is the guarantee |
 | `polish` | cut item | object — `punch_in`, `speed_ramp`, `transition_out` | One value per cut; the renderer reads it per cut |
 | `identity_lock` | root `metadata` | boolean | Per-project arming switch, not a per-clip label — correctly opaque |
+| `batch_look` | root | object — `grade`, `grain`, `sharpen` | The identity gate asserts on it against every cut's `provenance`; a look the schema cannot see is a look the audit trail cannot see |
+
+`batch_look` is the one of the four still outstanding: the schema root is `additionalProperties:
+false`, so a spine carrying it fails `validate_artifact` at checkpoint write. `video_compose` reads
+it today from `metadata.batch_look`, which validates as-is; the root spelling is read too and starts
+working the moment the property is added.
 
 Plus two new registered artifacts: `reel_plan` and `clip_ledger`, both added to `ARTIFACT_NAMES`
 (`schemas/artifacts/__init__.py:13-34`); `clip_ledger` also to `SUPPLEMENTARY_ARTIFACTS`
-(`lib/checkpoint.py:44-49`).
+(`lib/checkpoint.py:44-50`).
 
-And on `ClipRecord` (`lib/corpus.py:44-118`): `start_seconds`, `end_seconds`, `sharpness`,
+And on `ClipRecord` (`lib/corpus.py:44-149`): `start_seconds`, `end_seconds`, `sharpness`,
 `identity_locked`.
 
 **Not fixed here:** the `cut.type` divergence (**D5**). The schema rejects a key the shipped code

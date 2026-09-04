@@ -1013,3 +1013,105 @@ def test_reel_batch_cutaway_prices_and_runs_the_same_pinned_object() -> None:
     )
     assert seen["executed"]["allowed_providers"] == list(CUTAWAY_PROVIDER_PIN)
     assert seen["executed"]["preferred_provider"] == CUTAWAY_PROVIDER_PIN[0]
+
+
+# ----------------------------------------------------------------------
+# Anchor drift, across every doc — not just the one that had a test
+# ----------------------------------------------------------------------
+#
+# The test above polices context-cost-spec.md alone. Everything else that
+# cites `lib/checkpoint.py:NNN` or `lib/corpus.py:NNN` drifted unwatched, and
+# a cleanup pass that mechanically added +1 to each stale number produced
+# three anchors that were still wrong — the arithmetic was applied to a
+# number that had already rotted. A guard that covers one file out of six is
+# the same shape as a default-deny check on an optional field.
+
+ANCHOR_MODULES = ("lib/checkpoint.py", "lib/corpus.py")
+
+# The repo's citation convention: the symbol, then the anchor in parens right
+# after it — `write_checkpoint` (`lib/checkpoint.py:621`). Only that form
+# states, checkably, "you will find this symbol at this line". An anchor that
+# merely shares a line with a symbol name is a region reference, and an anchor
+# that PRECEDES its symbol is usually a historical quote of a number already
+# corrected — epic1-review-fixes-spec.md is full of both. Matching the
+# convention rather than the line keeps this guard quiet enough to survive.
+_ANCHOR_CITATION = re.compile(
+    r"`(?P<symbol>[A-Za-z_]\w*)[^`]*`"          # `symbol` or `symbol(args)`
+    r"[^`\n]{0,3}"                               # at most a space or two
+    r"\(`(?P<module>[\w/]+\.py):(?P<start>\d+)(?:-:?(?P<end>\d+))?`"
+)
+
+
+def _anchor_docs() -> list[str]:
+    """Every tracked doc that cites a line in one of ANCHOR_MODULES."""
+    roots = [REPO_ROOT / "docs" / "intent", REPO_ROOT / "skills" / "pipelines"]
+    docs = []
+    for root in roots:
+        for path in sorted(root.rglob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            if any(f"{module}:" in text for module in ANCHOR_MODULES):
+                docs.append(str(path.relative_to(REPO_ROOT)))
+    return docs
+
+
+def _top_level_symbols(source_lines: list[str]) -> dict[str, tuple[int, int]]:
+    """Every top-level `def`/`class` in a module, mapped to its 1-indexed span.
+
+    The span starts at the first decorator line, not at the `def` — a doc that
+    anchors `@dataclass class ClipRecord` at the decorator is citing the
+    definition, and failing that would be pedantry rather than drift."""
+    starts: list[tuple[int, str]] = []
+    for index, line in enumerate(source_lines, start=1):
+        match = re.match(r"^(?:async def|def|class)\s+(\w+)", line)
+        if not match:
+            continue
+        first = index
+        while first > 1 and source_lines[first - 2].lstrip().startswith("@"):
+            first -= 1
+        starts.append((first, match.group(1)))
+
+    spans: dict[str, tuple[int, int]] = {}
+    for position, (first, name) in enumerate(starts):
+        end = starts[position + 1][0] - 1 if position + 1 < len(starts) else len(source_lines)
+        while end > first and not source_lines[end - 1].strip():
+            end -= 1
+        spans.setdefault(name, (first, end))
+    return spans
+
+
+def test_every_doc_anchor_into_checkpoint_and_corpus_is_fresh() -> None:
+    """Drift guard for `lib/checkpoint.py:NNN` anchors in EVERY doc.
+
+    Scoped to the citation convention above, so what it checks is exactly what
+    a doc actually promises the reader. Anchors outside that form are counted
+    and reported in the failure message but never failed."""
+    sources = {module: _read(module).splitlines() for module in ANCHOR_MODULES}
+    symbols = {module: _top_level_symbols(lines) for module, lines in sources.items()}
+
+    rotted: list[str] = []
+    checked = 0
+
+    for doc in _anchor_docs():
+        for line_number, line in enumerate(_read(doc).splitlines(), start=1):
+            for match in _ANCHOR_CITATION.finditer(line):
+                module = match.group("module")
+                symbol = match.group("symbol")
+                if module not in symbols or symbol not in symbols[module]:
+                    continue
+                first, last = symbols[module][symbol]
+                checked += 1
+                for group in ("start", "end"):
+                    cited = match.group(group)
+                    if cited is None:
+                        continue
+                    if not first <= int(cited) <= last:
+                        rotted.append(
+                            f"{doc}:{line_number} anchors `{symbol}` at "
+                            f"{module}:{cited}, outside its span "
+                            f"[:{first}, :{last}] — fresh number :{first}"
+                        )
+
+    assert not rotted, (
+        f"{len(rotted)} rotted anchor(s) of {checked} checked across "
+        f"{len(_anchor_docs())} docs:\n  " + "\n  ".join(rotted)
+    )

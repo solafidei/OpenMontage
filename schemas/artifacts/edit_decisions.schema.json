@@ -260,6 +260,16 @@
         "verdict": { "type": "string", "enum": ["strong", "acceptable", "revise", "fail"] }
       }
     },
+    "batch_look": {
+      "type": "object",
+      "description": "One grade, one grain, one sharpen, applied identically to every reel of a batch (spec R6/4.2). Lives on the spine so the look a batch was rendered with is visible in the artifact and the audit trail, not only in the call that made it. Refused on an operator_footage cut unless the grade resolves to a face_enhance preset.",
+      "properties": {
+        "grade": { "type": "string", "description": "A face_enhance preset or a color_grade profile name" },
+        "grain": { "type": "integer", "minimum": 0, "maximum": 100, "description": "ffmpeg noise alls= strength; 0 is off" },
+        "sharpen": { "type": "string", "description": "A face_enhance preset name" }
+      },
+      "additionalProperties": false
+    },
     "metadata": {
       "type": "object",
       "properties": {

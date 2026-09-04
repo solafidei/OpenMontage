@@ -63,7 +63,7 @@ class Transcriber(BaseTool):
             },
             "language": {"type": "string", "description": "ISO 639-1 language code, or null for auto-detect"},
             "diarize": {"type": "boolean", "default": False},
-            "output_dir": {"type": "string", "description": "Directory for output files"},
+            "output_dir": {"type": "string", "description": "Directory for output files (default: projects/_analysis/transcriber_<stem>, never beside the source media)"},
         },
     }
 
@@ -118,7 +118,19 @@ class Transcriber(BaseTool):
         model_size = inputs.get("model_size", "base")
         language = inputs.get("language")
         diarize = inputs.get("diarize", False)
-        output_dir = Path(inputs.get("output_dir", input_path.parent))
+        # Never default beside the operator's source media: transcribing a clip
+        # in a footage pool would drop <stem>_transcript.json into the folder the
+        # operator curates. Same defect and same remedy as beat_grid (#51); the
+        # unowned-analysis workspace is video_analyzer.py's convention, and the
+        # tool is not told a project id. Keyed by stem, not a timestamp, so a
+        # re-run of the same file lands on the same transcript rather than
+        # accumulating a directory per run. Every pipeline caller passes an
+        # explicit output_dir, so this only catches ad-hoc runs.
+        output_dir = (
+            Path(inputs["output_dir"])
+            if inputs.get("output_dir")
+            else Path("projects") / "_analysis" / f"transcriber_{input_path.stem}"
+        )
 
         if not input_path.exists():
             return ToolResult(success=False, error=f"Input file not found: {input_path}")

@@ -79,6 +79,13 @@ ROUTES = [
 ]
 ROUTE_IDS = [r[0] for r in ROUTES]
 
+# ffmpeg is the runtime reel-batch locks at proposal and the only one that can
+# apply a batch_look, so the negative control has to cover it too — the three
+# rejection routes above deliberately do not, they exist to prove the gate
+# fires before a renderer is even chosen.
+HONEST_ROUTES = [*ROUTES, ("ffmpeg", {"render_runtime": "ffmpeg"})]
+HONEST_ROUTE_IDS = [r[0] for r in HONEST_ROUTES]
+
 
 # ----------------------------------------------------------------------
 # Link 1 — declared at ingest
@@ -329,14 +336,23 @@ def test_unsafe_look_on_an_operator_cut_is_rejected(
     assert "identity-safe" in (result.error or "")
 
 
-@pytest.mark.parametrize("label,extra", ROUTES, ids=ROUTE_IDS)
-def test_an_honest_identity_locked_plan_reaches_the_renderer(
+@pytest.mark.parametrize("label,extra", HONEST_ROUTES, ids=HONEST_ROUTE_IDS)
+def test_an_honest_identity_locked_plan_is_not_blocked_for_identity(
     tmp_path, monkeypatch, label: str, extra: dict
 ) -> None:
     """The negative control.
 
     A gate that blocks everything proves nothing. An operator cut declared
-    `operator_footage`, under a `face_enhance` look, must render.
+    `operator_footage`, under a `face_enhance` look, must never be refused on
+    IDENTITY grounds — on any runtime.
+
+    Only ffmpeg is asserted to actually render, and that asymmetry IS the
+    point rather than a weakening. The picture plane lives entirely in the
+    per-cut ffmpeg encode (spec R6), so a `batch_look` handed to Remotion or
+    HyperFrames would reach the renderer as nothing at all. A second gate
+    refuses it for exactly that reason, so the look can never be silently
+    dropped. Asserting success on those two routes would have meant deleting
+    that refusal — this test used to do so, and was wrong to.
     """
     sentinel = ToolResult(success=True, data={"reached": label})
     for method in ("_render_via_atelier", "_render_via_hyperframes",
@@ -363,7 +379,12 @@ def test_an_honest_identity_locked_plan_reaches_the_renderer(
         )
     )
 
-    assert result.success, f"{label}: an honest plan was blocked — {result.error}"
+    assert "Identity violation" not in (result.error or ""), (
+        f"{label}: an honest operator_footage plan under a face_enhance look was "
+        f"refused on identity grounds — {result.error}"
+    )
+    if extra.get("render_runtime") == "ffmpeg":
+        assert result.success, f"{label}: an honest plan was blocked — {result.error}"
 
 
 def test_the_allowed_filter_set_is_face_enhance_only() -> None:

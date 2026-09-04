@@ -14,7 +14,7 @@ Two properties are load-bearing and tested explicitly here:
   existed must load with no migration, and its rows must read as the
   whole file, `[0, duration]`.
 * **Sibling independence.** `Corpus.rank_by_text` tests
-  `rec.clip_id in exclude` and nothing else (`lib/corpus.py:271-274`),
+  `rec.clip_id in exclude` and nothing else (`lib/corpus.py:353-356`),
   so the whole no-reuse guarantee rests on two segments of one source
   being distinct rows with distinct clip_ids: excluding one must leave
   its siblings rankable.
@@ -223,3 +223,56 @@ def test_inverted_segment_is_rejected_at_construction():
 def test_negative_in_point_is_rejected_at_construction():
     with pytest.raises(ValueError, match="start_seconds"):
         _segment("pool_gym_set_01_bad", -1.0, 4.0)
+
+
+def test_half_specified_zero_length_out_point_is_rejected_at_construction():
+    # `end_seconds` alone implies an in-point of 0.0, so out <= 0 is the
+    # same zero-length cut as an inverted pair — it used to pass because
+    # the pairwise check needs both offsets.
+    with pytest.raises(ValueError, match="end_seconds must be > 0"):
+        ClipRecord(
+            clip_id="pool_gym_set_01_bad",
+            source="pool",
+            source_id="gym_set_01",
+            source_url="",
+            local_path="clips/gym_set_01.mp4",
+            duration=10.0,
+            end_seconds=0.0,
+        )
+
+
+def test_open_ended_row_with_only_an_in_point_is_still_legal():
+    # "From here to the end of the file" is a real shape, not a degenerate
+    # one — tightening the out-point guard must not take it out.
+    rec = ClipRecord(
+        clip_id="pool_gym_set_01_tail",
+        source="pool",
+        source_id="gym_set_01",
+        source_url="",
+        local_path="clips/gym_set_01.mp4",
+        duration=45.0,
+        start_seconds=30.0,
+    )
+    assert rec.interval == (30.0, 45.0)
+
+
+# ----------------------------------------------------------------------
+# Stills have no timeline
+# ----------------------------------------------------------------------
+
+
+def test_interval_on_an_image_row_refuses_rather_than_reading_zero_length():
+    # A still's duration is 0, so [0, duration] answered (0.0, 0.0) and
+    # every caller that compares `end - start` against a slot length
+    # dropped the row as "too short" with no diagnostic.
+    rec = ClipRecord(
+        clip_id="wikimedia_9001",
+        source="wikimedia",
+        source_id="9001",
+        source_url="",
+        local_path="clips/wikimedia_9001.jpg",
+        kind="image",
+        duration=0.0,
+    )
+    with pytest.raises(ValueError, match="undefined for image row"):
+        rec.interval

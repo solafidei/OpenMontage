@@ -90,7 +90,7 @@ current = read_checkpoint(PROJECTS_DIR, project_id, next_stage) if next_stage el
 ```
 
 Omitting the third argument falls back to the canonical nine-stage list
-(`lib/checkpoint.py:832` → `:28-29`) and sends you to `research`, a stage this pipeline
+(`lib/checkpoint.py:833` → `:28-29`) and sends you to `research`, a stage this pipeline
 does not have. The stage names here are all canonical, which is what buys the artifact
 validation in `CANONICAL_STAGE_ARTIFACTS` (`lib/checkpoint.py:31-41`) — never rename one.
 

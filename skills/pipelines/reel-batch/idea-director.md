@@ -165,7 +165,7 @@ and `decisions`, and each entry requires `decision_id`, `stage`, `category`, `su
 (`:73-75`) — free text there validates but resolves to no option, so the two-plane
 phrasing belongs in `reason`. An entry with no string `decision_id` is dropped by the
 checkpoint merge with a log warning and nothing else
-(`lib/checkpoint.py:494-506`), so the stage's `decision_log` success criterion would fail
+(`lib/checkpoint.py:495-507`), so the stage's `decision_log` success criterion would fail
 without an error to read.
 
 Wait for explicit approval before advancing, and re-log with the **same `category` and

@@ -7,9 +7,12 @@ the tool file in tools/video/; no changes to this selector are needed.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderPinUnresolvedError(ValueError):
@@ -460,6 +463,34 @@ class VideoSelector(BaseTool):
             result.data["executed_estimate_usd"] = self._safe_estimate(tool, inputs)
             divergence = self._estimate_divergence(inputs, tool)
             if divergence:
+                # Deliberately NOT written to cost_log.json, and that is a limit, not
+                # an oversight. Ledger entries are minted by the stage director
+                # (estimate -> reserve -> reconcile, skills/meta/checkpoint-protocol.md
+                # -> Cost Ledger Governance); no entry id, project id or tracker handle
+                # reaches a tool's execute(), and CostTracker exposes no mutator that
+                # attaches a free-form field to an existing entry, so a tool cannot
+                # write ONTO the entry that priced this call without a cost_tracker
+                # schema change. Minting its own entry instead would be worse than
+                # silence: nothing reconciles it, so it strands in
+                # non_terminal_entries() and fails the compose gate's "every entry
+                # terminal" criterion.
+                # So it surfaces where a tool legitimately can: on the result, for the
+                # director that holds BOTH the entry id and this payload and is the
+                # only layer able to book it, and as a run-log warning — the channel
+                # cost_tracker itself uses for a forced overwrite of a settled record,
+                # so an operator reading the log sees the under-price even when nobody
+                # inspects result.data. Operator: cost_log.json still carries the
+                # QUOTED figure for this line; reconcile it against executed_provider /
+                # executed_estimate_usd below, not the quote.
+                logger.warning(
+                    "video_selector estimate/execute divergence: priced %s at $%.4f, "
+                    "executed %s at $%s. The cost ledger holds the QUOTED figure — "
+                    "reconcile this line against the executed route.",
+                    divergence["estimated_provider"],
+                    divergence["estimated_usd"],
+                    divergence["executed_provider"],
+                    divergence["executed_estimate_usd"],
+                )
                 result.data["estimate_divergence"] = divergence
             result.data.setdefault("selected_tool", tool.name)
             result.data["selected_provider"] = tool.provider

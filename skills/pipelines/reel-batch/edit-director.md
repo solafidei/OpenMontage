@@ -57,7 +57,7 @@ an invented key is refused at write time.
 
 That registration is the whole guard. `_validate_artifacts_for_stage` skips any
 artifact name it does not know — `if artifact_name not in ARTIFACT_NAMES:
-continue` (`lib/checkpoint.py:161-162`) — so an *un*registered artifact is
+continue` (`lib/checkpoint.py:158-159`) — so an *un*registered artifact is
 unvalidated rather than rejected, and a typo in the name silently disables every
 check on it. Declaring an artifact in the manifest only makes it expected;
 registration is what makes it real.

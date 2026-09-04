@@ -70,6 +70,19 @@ class ClipLedgerCorruptedError(Exception):
     pass
 
 
+class ClipLedgerUnreadableError(Exception):
+    """clip_ledger.json could not be opened at all — IO, not content.
+
+    Deliberately NOT a subclass of ClipLedgerCorruptedError, because the two
+    demand opposite operator action. "Corrupt" tells the operator to rebuild
+    the claims from the reels already cut; a chmod, a stale mount or a full
+    disk leaves the file itself intact, and rebuilding on top of it is how a
+    recoverable IO error turns into a lost claim ledger. Fix the access
+    problem and retry instead.
+    """
+    pass
+
+
 class SegmentAlreadyClaimedError(Exception):
     """A claim overlaps a segment another reel in this batch already holds."""
     pass
@@ -348,12 +361,24 @@ class ClipLedger:
                 )
             validate_artifact("clip_ledger", data)
             self._validate_intervals(data)
+        except OSError as exc:
+            # Ordered before the content errors (the two hierarchies are
+            # disjoint, so this only claims genuine IO). Folding it in with
+            # them told the operator a chmod meant CORRUPT and sent them off
+            # to rebuild claims from cut lists — destructive advice for a
+            # file that is still perfectly intact on disk.
+            raise ClipLedgerUnreadableError(
+                f"Clip ledger {self.ledger_path} could not be read ({exc}). "
+                "The ledger's contents were never examined, so this is NOT a "
+                "corruption report: do not delete, reset or rebuild it. Fix "
+                "the access problem (permissions, mount, disk space) and run "
+                "the stage again."
+            ) from exc
         except (
             json.JSONDecodeError,
             jsonschema.ValidationError,
             TypeError,
             ValueError,
-            OSError,
         ) as exc:
             raise ClipLedgerCorruptedError(
                 f"Clip ledger {self.ledger_path} is corrupt ({exc}). Do NOT "

@@ -15,6 +15,7 @@ fork-based concurrency test mirrors tests/tools/test_cost_tracker_persistence.py
 
 import json
 import multiprocessing
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from lib.checkpoint import SUPPLEMENTARY_ARTIFACTS  # noqa: E402
 from lib.clip_ledger import (  # noqa: E402
     ClipLedger,
     ClipLedgerCorruptedError,
+    ClipLedgerUnreadableError,
     ClipReuseError,
     SegmentAlreadyClaimedError,
 )
@@ -368,3 +370,136 @@ def test_abandoning_two_reels_leaves_the_rest_claimed_and_the_batch_clean(tmp_pa
     # And a retry can take an abandoned segment without colliding.
     _claim(ledger, "reel-4b", 40.0, 43.0)
     ledger.assert_no_reuse()
+
+
+def test_unreadable_ledger_is_not_reported_as_corruption(tmp_path):
+    """#51(a): a chmod must not tell the operator to rebuild the batch.
+
+    The two failures need opposite action. A corrupt ledger has to be
+    reconstructed from the reels already cut; an IO or permission failure
+    leaves the file intact, and following the corruption advice on top of it
+    destroys the only record of what this batch has claimed. So the IO path
+    raises its own error whose text never says "corrupt" and never tells
+    anyone to reset.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the permission bits this test relies on")
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0)
+    path = ledger.ledger_path
+    intact = path.read_bytes()
+    os.chmod(path, 0o000)
+    try:
+        with pytest.raises(ClipLedgerUnreadableError) as unreadable:
+            ClipLedger(ledger_path=path)
+        # A caller that only knows about corruption must NOT swallow this one
+        # and act on its advice.
+        assert not isinstance(unreadable.value, ClipLedgerCorruptedError)
+        message = str(unreadable.value).lower()
+        # The destructive half of the corruption advice must be absent: no
+        # reconstructing claims from cut lists, no abandoning the batch.
+        assert "reels already cut" not in message
+        assert "abandon the batch" not in message
+        assert "do not delete" in message
+
+        # The live instance refuses to write over an unreadable file too,
+        # rather than merging against a ledger it could not read.
+        with pytest.raises(ClipLedgerUnreadableError):
+            _claim(ledger, "reel-2", 10.0, 13.0)
+    finally:
+        os.chmod(path, 0o600)
+
+    # Nothing was reset or rewritten while the file was unreachable.
+    assert path.read_bytes() == intact
+    # ...and once the access problem is fixed, the ledger opens unchanged.
+    assert [c["reel_id"] for c in ClipLedger(ledger_path=path).live_claims()] == ["reel-1"]
+
+
+def test_genuine_corruption_still_says_corrupt(tmp_path):
+    """The split must not have made every read failure "unreadable"."""
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0)
+    ledger.ledger_path.write_bytes(b'{"version": "1.0", "claims": [{"claim_id": "ab')
+
+    with pytest.raises(ClipLedgerCorruptedError) as corrupt:
+        ClipLedger(ledger_path=ledger.ledger_path)
+    assert not isinstance(corrupt.value, ClipLedgerUnreadableError)
+
+
+def _contended_claim_worker(
+    path_str: str, reel_id: str, starts, barrier, result_path_str: str
+) -> None:
+    """One child process reaching for the SAME segment as every sibling.
+
+    The barrier is the point: without it the processes stagger and the first
+    one is simply done before the rest look, so an unlocked ledger would pass
+    by luck. Results go through a file rather than a Queue so a worker that
+    dies cannot deadlock the parent on a drain.
+    """
+    ledger = ClipLedger(ledger_path=Path(path_str))
+    won, refused = 0, 0
+    for start in starts:
+        barrier.wait(timeout=30)
+        try:
+            ledger.claim(
+                reel_id=reel_id,
+                source=SET,
+                in_seconds=start,
+                out_seconds=start + 3.0,
+                clip_id=f"{reel_id}-{start}",
+            )
+            won += 1
+        except SegmentAlreadyClaimedError:
+            refused += 1
+    Path(result_path_str).write_text(json.dumps({"won": won, "refused": refused}))
+
+
+def test_processes_racing_for_one_segment_leave_exactly_one_winner(tmp_path):
+    """#51(b): the half `test_parallel_processes_lose_no_claims` cannot see.
+
+    That test gives every worker its own 100s offset, so it only proves no
+    claim is *lost* on disjoint segments — the merge-from-disk alone nearly
+    manages that. The whole no-reuse promise rests on the other half: when N
+    reel stages reach for the SAME footage at the same instant, exactly one
+    walks away with it and the rest are told to pick something else.
+
+    Revert check for `_locked`'s flock: unlocked, several workers read the
+    ledger before any of them writes, all see the segment free, and each
+    "wins" it — `won` climbs above one per round and the batch would ship the
+    same frames in two reels.
+    """
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method unavailable")
+    ctx = multiprocessing.get_context("fork")
+    processes, rounds = 8, 6
+    starts = [index * 3.0 for index in range(rounds)]
+    path = tmp_path / "artifacts" / "clip_ledger.json"
+    path.parent.mkdir(parents=True)
+    barrier = ctx.Barrier(processes)
+
+    results = [tmp_path / f"result-{n}.json" for n in range(processes)]
+    workers = [
+        ctx.Process(
+            target=_contended_claim_worker,
+            args=(str(path), f"reel-{n}", starts, barrier, str(results[n])),
+        )
+        for n in range(processes)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=120)
+    for worker in workers:
+        assert worker.exitcode == 0, "a contending worker raised"
+
+    tallies = [json.loads(r.read_text()) for r in results]
+    # Exactly one winner per contested segment, everyone else refused.
+    assert sum(t["won"] for t in tallies) == rounds
+    assert sum(t["refused"] for t in tallies) == rounds * (processes - 1)
+
+    persisted = json.loads(path.read_text())
+    validate_artifact("clip_ledger", persisted)
+    # And the file agrees: one claim per segment, no duplicates survived.
+    assert len(persisted["claims"]) == rounds
+    assert sorted(c["in_seconds"] for c in persisted["claims"]) == starts
+    ClipLedger(ledger_path=path).assert_no_reuse()

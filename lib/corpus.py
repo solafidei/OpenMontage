@@ -99,10 +99,20 @@ class ClipRecord:
     def __post_init__(self) -> None:
         # Trust boundary: a segment whose out-point precedes its in-point
         # renders as a zero-length cut that ffmpeg drops silently, so it
-        # dies here rather than downstream. Legacy rows (both None) and
-        # half-specified rows are untouched.
+        # dies here rather than downstream. Legacy rows (both None) are
+        # untouched, and so is a row carrying only `start_seconds` — that
+        # is the legitimate "from here to the end of the file" shape.
+        # A row carrying only `end_seconds` is NOT: its in-point is 0.0
+        # (see `interval`), so `end_seconds <= 0` is the same zero-length
+        # cut written a different way, and it used to slip past because
+        # the pairwise check below needs both offsets present.
         if self.start_seconds is not None and self.start_seconds < 0:
             raise ValueError(f"start_seconds must be >= 0, got {self.start_seconds}")
+        if self.end_seconds is not None and self.end_seconds <= 0:
+            raise ValueError(
+                f"end_seconds must be > 0, got {self.end_seconds} "
+                f"for clip {self.clip_id}"
+            )
         if (
             self.start_seconds is not None
             and self.end_seconds is not None
@@ -119,7 +129,21 @@ class ClipRecord:
 
         Absent offsets mean the whole file, `[0, duration]` — which is
         exactly what every pre-segment row reads as.
+
+        An image row has no interval at all, so this raises instead of
+        answering `[0.0, 0.0]` off its zero duration. Every caller reads
+        the result as a renderable range and compares `end - start`
+        against a slot length (reel-batch/scene-director.md), so the old
+        answer made a still look like a too-short video and dropped it
+        with no diagnostic at all. A still's on-screen duration is the
+        slot's, decided when the cut is planned — never a property of
+        the row.
         """
+        if self.kind == "image":
+            raise ValueError(
+                f"interval is undefined for image row {self.clip_id}: a still has "
+                f"no timeline to cut — take its on-screen duration from the slot"
+            )
         start = self.start_seconds if self.start_seconds is not None else 0.0
         end = self.end_seconds if self.end_seconds is not None else self.duration
         return (start, end)

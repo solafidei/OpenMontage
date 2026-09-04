@@ -48,11 +48,7 @@ Goal: Produce the one canonical timing analysis the whole video is built on.
 
 `analyze-beatgrid.py` is the **only** beat analyzer — never re-measure beats with another tool or by ear. It reads the track once and writes `audiomap.json`: energy phases (level / density / feel), onsets + `onset_rate`, rolls, silences, `hard_stops`, `key_moments`, phrases, tempo / grid, and `audio.duration_sec`. It's deterministic — the same file always gives the same map. Most fields are reliable on any music; `bpm` and `beats_sec` are reliable only when the music is genuinely rhythmic, and judging that is the call you make at Step 2.
 
-Prerequisites: Python 3 with `librosa`, `numpy`, and `soundfile` available. If import fails, install them into the active Python environment before running the analyzer:
-
-```bash
-python3 -m pip install librosa numpy soundfile
-```
+Prerequisites: `librosa`, `numpy`, and `soundfile` are pinned in `requirements.txt` (`librosa>=0.10.1`, `numpy>=1.24`, `soundfile>=0.12.1`) — they come with the project environment. Never `pip install` them here: installing over a pin can pull a different librosa into the environment, and the beatgrid is only deterministic while every run measures with the same version. If the import fails you are in the wrong environment — activate the project's, or run `pip install -r requirements.txt`, and do not pick versions by hand.
 
 ```bash
 python3 <SKILL_DIR>/scripts/analyze-beatgrid.py "$PROJECT_DIR/assets/bgm.mp3" \

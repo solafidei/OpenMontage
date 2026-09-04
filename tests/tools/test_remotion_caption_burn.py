@@ -192,8 +192,9 @@ def _argv(calls: list[list[str]]) -> list[str]:
     return next(c for c in calls if "render" in c)
 
 
-def _burn(tool, tmp_path, **kwargs):
-    src = tmp_path / "master.mp4"
+def _burn(tool, tmp_path, src: Path | None = None, **kwargs):
+    src = src if src is not None else tmp_path / "master.mp4"
+    src.parent.mkdir(parents=True, exist_ok=True)
     src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
     return tool._render_remotion(
         str(src),
@@ -209,7 +210,8 @@ def test_video_src_has_no_public_prefix(render, tmp_path):
     tool, root, _ = render
     _burn(tool, tmp_path)
 
-    assert _props(root)["videoSrc"] == "talking-head/master.mp4"
+    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
+    assert _props(root)["videoSrc"] == f"talking-head/{key}/master.mp4"
 
 
 def test_default_preset_stages_and_renders_exactly_as_before(render, tmp_path):
@@ -219,7 +221,8 @@ def test_default_preset_stages_and_renders_exactly_as_before(render, tmp_path):
     props = _props(root)
     assert "captionPreset" not in props
     assert "captionSafeZone" not in props
-    assert (root / "public" / "talking-head" / "master.mp4").is_file()
+    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
+    assert (root / "public" / "talking-head" / key / "master.mp4").is_file()
     assert "--fps=30" in _argv(calls)
     assert result.data["preset"] == "default"
 
@@ -252,10 +255,11 @@ def test_run_id_scopes_staging_and_cleans_it_up(render, tmp_path):
     tool, root, _ = render
     _burn(tool, tmp_path, run_id="reel-03")
 
-    assert _props(root)["videoSrc"] == "talking-head/reel-03/master.mp4"
+    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
+    assert _props(root)["videoSrc"] == f"talking-head/reel-03/{key}/master.mp4"
     # Scoped media is transient; the props file is kept for diagnosis.
-    assert not (root / "public" / "talking-head" / "reel-03").exists()
-    assert (root / "public" / "demo-props" / "caption-burn-reel-03-master.json").is_file()
+    assert not (root / "public" / "talking-head" / "reel-03" / key).exists()
+    assert (root / "public" / "demo-props" / f"caption-burn-reel-03-{key}.json").is_file()
 
 
 def test_two_runs_do_not_share_a_staging_dir(render, tmp_path, monkeypatch):
@@ -276,9 +280,10 @@ def test_two_runs_do_not_share_a_staging_dir(render, tmp_path, monkeypatch):
     _burn(tool, tmp_path, run_id="reel-01")
     _burn(tool, tmp_path, run_id="reel-02")
 
+    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
     assert staged == [
-        {"talking-head/reel-01/master.mp4"},
-        {"talking-head/reel-02/master.mp4"},
+        {f"talking-head/reel-01/{key}/master.mp4"},
+        {f"talking-head/reel-02/{key}/master.mp4"},
     ]
 
 
@@ -502,3 +507,96 @@ def test_the_ffmpeg_fallback_admits_what_it_dropped(tmp_path, monkeypatch):
     assert result.data["preset"] == "default"
     assert set(result.data["unhonoured_inputs"]) == {"preset", "safe_zone", "fps"}
     assert "Ignored" in result.data["note"]
+
+
+# --- issue #52 edge cases --------------------------------------------------
+
+def test_run_id_with_a_trailing_newline_is_rejected():
+    """``$`` also matches before a trailing newline.
+
+    "reel\n" therefore passed the whitelist and went on to become a real
+    directory under remotion-composer/public/ with a newline in its name.
+    """
+    error = RemotionCaptionBurn._validate_look({"run_id": "reel\n"})
+
+    assert error is not None, "run_id 'reel\\n' was accepted"
+    assert "run_id must match" in error
+
+
+def test_same_stem_in_different_folders_gets_a_different_staging_dir(render, tmp_path):
+    """a/clip.mp4 and b/clip.mp4 in one run must not stage over each other.
+
+    Keyed on the stem alone both copy to public/<run>/clip.mp4 and write the
+    same props file, so the second burn wins and one reel renders the other's
+    master.
+    """
+    tool, root, _ = render
+    _burn(tool, tmp_path, src=tmp_path / "a" / "clip.mp4", run_id="reel-07")
+    first = json.loads(
+        sorted((root / "public" / "demo-props").glob("*.json"))[0].read_text("utf-8")
+    )["videoSrc"]
+    _burn(tool, tmp_path, src=tmp_path / "b" / "clip.mp4", run_id="reel-07")
+
+    props = sorted(
+        (root / "public" / "demo-props").glob("caption-burn-reel-07-clip*.json")
+    )
+    assert len(props) == 2, [p.name for p in props]
+    sources = {json.loads(p.read_text("utf-8"))["videoSrc"] for p in props}
+    assert len(sources) == 2, sources
+    assert first in sources, "the first burn's props were overwritten"
+
+
+def test_the_staging_key_is_reproducible_for_the_same_input(tmp_path):
+    """No clock, no randomness — a re-run must land in the same directory."""
+    src = str(tmp_path / "a" / "clip.mp4")
+
+    assert RemotionCaptionBurn._source_key(src) == RemotionCaptionBurn._source_key(src)
+    assert RemotionCaptionBurn._source_key(src).startswith("clip-")
+
+
+def _resolve_caption_background(*cases: tuple[str, str]) -> list:
+    """Run the REAL background resolution from TalkingHead.tsx, in node.
+
+    Each case is (background as a JS literal, preset). Source-string
+    assertions cannot police this one: `??` and an `=== undefined` check look
+    equally plausible in a diff, and only running them tells null from
+    undefined.
+    """
+    source = _read("TalkingHead.tsx")
+    start = source.index("  const presetCaptionBackground")
+    end = source.index("  return (", start)
+    script = (
+        "const resolve = (captionBackgroundColor, captionPreset) => {\n"
+        + source[start:end]
+        + "\n  return resolvedCaptionBackground;\n};\n"
+        "console.log(JSON.stringify(["
+        + ",".join(f'resolve({bg}, "{preset}")' for bg, preset in cases)
+        + "]));"
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_an_explicit_null_caption_background_means_no_pill():
+    """null is legal in the props JSON and means "no pill".
+
+    `??` could not tell it from an absent key and rendered the default pill,
+    so a caller that had explicitly turned the pill off got one anyway.
+    """
+    absent, absent_pop, explicit_null, explicit_color = _resolve_caption_background(
+        ("undefined", "default"),
+        ("undefined", "reel_pop"),
+        ("null", "default"),
+        ('"#FF0000"', "default"),
+    )
+
+    # Unchanged for every existing caller: omitting the prop keeps the pill.
+    assert absent == "rgba(0, 0, 0, 0.65)"
+    assert absent_pop == "transparent"
+    # The fix: an explicit null is not the same request as an absent key.
+    assert explicit_null == "transparent", "null must mean no pill"
+    assert explicit_color == "#FF0000"

@@ -30,6 +30,7 @@ React scene stack in ``remotion-composer/``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -349,8 +350,14 @@ class RemotionCaptionBurn(BaseTool):
 
         # Copy video to Remotion public folder. Without a run_id every render
         # shares one directory, so a batch of reels whose masters are all named
-        # e.g. master.mp4 overwrite each other mid-flight.
-        rel_dir = f"talking-head/{run_id}" if run_id else "talking-head"
+        # e.g. master.mp4 overwrite each other mid-flight. Two masters can also
+        # collide *inside* one run when they share a stem, hence the per-source
+        # segment.
+        source_key = self._source_key(input_path)
+        rel_dir = (
+            f"talking-head/{run_id}/{source_key}" if run_id
+            else f"talking-head/{source_key}"
+        )
         pub_dir = root / "public" / rel_dir
         pub_dir.mkdir(parents=True, exist_ok=True)
         video_filename = Path(input_path).name
@@ -373,10 +380,9 @@ class RemotionCaptionBurn(BaseTool):
             props["captionSafeZone"] = safe_zone
         props_dir = root / "public" / "demo-props"
         props_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(input_path).stem
         props_file = props_dir / (
-            f"caption-burn-{run_id}-{stem}.json" if run_id
-            else f"caption-burn-{stem}.json"
+            f"caption-burn-{run_id}-{source_key}.json" if run_id
+            else f"caption-burn-{source_key}.json"
         )
         props_file.write_text(json.dumps(props, indent=2), encoding="utf-8")
 
@@ -399,6 +405,13 @@ class RemotionCaptionBurn(BaseTool):
             # media staged by another render.
             if run_id:
                 shutil.rmtree(pub_dir, ignore_errors=True)
+                # The run dir above it is shared by every source in the batch,
+                # so it goes only once it is empty — rmdir refuses while a
+                # sibling burn of the same run is still staged there.
+                try:
+                    pub_dir.parent.rmdir()
+                except OSError:
+                    pass
 
         if not Path(output_path).exists():
             return ToolResult(success=False, error="Remotion render produced no output")
@@ -493,6 +506,23 @@ class RemotionCaptionBurn(BaseTool):
         )
 
     @staticmethod
+    def _source_key(input_path: str) -> str:
+        """Stem plus a short digest of the resolved source path.
+
+        Two masters in one batch can share a stem in different folders
+        (``a/clip.mp4`` and ``b/clip.mp4``). Keyed on the stem alone they stage
+        to the same file under public/ and write the same props file, so the
+        second overwrites the first and one reel renders the other's master.
+        The digest is of the resolved path — not the clock, not a random value
+        — so the same input always stages to the same directory and a dir left
+        behind by a failed render can still be traced back to its source.
+        """
+        digest = hashlib.sha256(
+            str(Path(input_path).resolve()).encode("utf-8")
+        ).hexdigest()[:8]
+        return f"{Path(input_path).stem}-{digest}"
+
+    @staticmethod
     def _ms_to_srt(ms: int) -> str:
         h = ms // 3600000
         m = (ms % 3600000) // 60000
@@ -507,7 +537,9 @@ class RemotionCaptionBurn(BaseTool):
     PRESETS = ("default", "reel_pop")
     # run_id lands in a filesystem path under remotion-composer/public/, so it
     # is whitelisted rather than sanitised — a traversal here writes anywhere.
-    _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    # \Z, not $: $ also matches before a trailing newline, so "reel\n" passed
+    # the whitelist and became a directory name with a newline in it.
+    _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
     _SAFE_ZONE_KEYS = ("bottom", "sides")
 
     @classmethod

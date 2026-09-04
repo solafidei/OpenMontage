@@ -26,13 +26,15 @@ from typing import Any
 
 import pytest
 
-from tools.base_tool import ToolResult
+from tools.base_tool import ToolResult, ToolStatus
 from tools.video.cutaway_gen import (
     CUTAWAY_PROVIDER_PIN,
     CutawayGen,
     MediaReferenceRefusedError,
+    ProbeFailedError,
     _SAFE_KEYS,
     _is_media_key,
+    _probe as probe_measured_facts,
     refuse_media_references,
 )
 
@@ -221,7 +223,10 @@ def test_prose_prompts_are_not_falsely_refused(tmp_path, provider):
 def test_single_cutaway_estimates_ten_cents_on_the_pinned_route(tmp_path, provider):
     assert CutawayGen().estimate_cost(_inputs(tmp_path)) == 0.10
     payload = provider.estimated[0]
-    assert payload["allowed_providers"] == CUTAWAY_PROVIDER_PIN
+    assert payload.get("allowed_providers") == CUTAWAY_PROVIDER_PIN, (
+        "the route is no longer pinned — the sitting now prices at whatever the "
+        "selector ranks top for this prompt"
+    )
     assert payload["duration"] == "5"          # kling's hard floor
     assert payload["aspect_ratio"] == "9:16"
     assert payload["operation"] == "text_to_video"
@@ -401,3 +406,127 @@ def test_ordinary_generation_inputs_are_not_refused(payload):
     preferred_provider ("refer") with an identity-guard message, which is a
     wrong answer delivered alarmingly."""
     refuse_media_references(payload)
+
+
+# ---------------------------------------------------------------------------
+# 5. The probe fails closed — an unmeasurable file is a refusal, not a default
+# ---------------------------------------------------------------------------
+
+
+def _break_ffprobe_for(monkeypatch, marker: str) -> None:
+    """Make ffprobe return nothing for paths containing ``marker``.
+
+    Everything else — ffmpeg, and ffprobe on other files — still runs for real,
+    so the test isolates ONE unmeasurable file the way a truncated download or a
+    codec ffprobe cannot open does.
+    """
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "ffprobe" and marker in str(cmd[-1]):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("tools.video.cutaway_gen.subprocess.run", fake_run)
+
+
+def test_unmeasurable_trimmed_flash_is_refused_not_silently_passed(tmp_path, provider, monkeypatch):
+    """The silence check must not pass on a clip nobody measured.
+
+    A swallowed probe returns {}, `.get("has_audio")` is then None, and the
+    cutaway is declared silent without anyone having looked — in a tool whose
+    contract is that the output is measured, not assumed.
+    """
+    _break_ffprobe_for(monkeypatch, "_flash")
+    result = CutawayGen().execute(_inputs(tmp_path))
+
+    assert not result.success, "an unmeasurable flash must be refused, not accepted"
+    assert "could not be measured" in result.error
+    assert "_flash" in result.error, "the refusal must name what could not be measured"
+
+
+def test_unmeasurable_generated_clip_is_refused_before_the_crop_is_skipped(
+    tmp_path, provider, monkeypatch
+):
+    """Unmeasured, the trim skips the 9:16 crop and clamps against a zero duration.
+
+    ffmpeg still succeeds on the source here, so a swallowed probe produces a
+    cheerful `success=True` carrying a 16:9 flash.
+    """
+    _break_ffprobe_for(monkeypatch, "cutaway_")
+    result = CutawayGen().execute(_inputs(tmp_path))
+
+    assert not result.success, "an unmeasurable source clip must be refused"
+    assert "could not be measured" in result.error
+
+
+def test_probe_raises_rather_than_reporting_a_file_as_silent_and_sizeless(tmp_path):
+    """Directly: a file ffprobe cannot read yields a refusal, not {}."""
+    junk = tmp_path / "not_a_video.mp4"
+    junk.write_bytes(b"\x00" * 4096)
+
+    with pytest.raises(ProbeFailedError):
+        probe_measured_facts(junk)
+    with pytest.raises(ProbeFailedError):
+        probe_measured_facts(tmp_path / "does_not_exist.mp4")
+
+
+# ---------------------------------------------------------------------------
+# 6. The pin's EFFECT, with no credentials — the guard that used to self-disarm
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def live_routing(monkeypatch):
+    """The real VideoSelector routing over the real kling and seedance tools.
+
+    Only ``get_status`` is faked. The pin check used to be a single test that
+    skipped on ProviderPinUnresolvedError, so on every runner without FAL_KEY —
+    which is all of CI — the 15x guard was completely unpoliced. Availability is
+    the ONLY thing credentials decide here, so forcing it is enough to exercise
+    the real filter, the real ranking and the real per-provider pricing.
+    """
+    from tools.video.kling_video import KlingVideo
+    from tools.video.seedance_video import SeedanceVideo
+    from tools.video.video_selector import VideoSelector
+
+    live = []
+    for cls in (KlingVideo, SeedanceVideo):
+        tool = cls()
+        monkeypatch.setattr(tool, "get_status", lambda: ToolStatus.AVAILABLE)
+        live.append(tool)
+    monkeypatch.setattr(VideoSelector, "_providers", lambda self: live)
+    return VideoSelector
+
+
+def test_pin_prices_the_five_reel_sitting_at_fifty_cents_without_credentials(
+    tmp_path, live_routing
+):
+    """The whole point of the pin, priced through the real selector."""
+    inputs = _inputs(tmp_path, prompts=[f"gym detail {i}" for i in range(5)])
+    assert CutawayGen().estimate_cost(inputs) == 0.50
+
+
+def test_removing_the_pin_would_route_the_same_sitting_to_the_15x_provider(
+    tmp_path, live_routing
+):
+    """Prove the pin is what makes $0.50 $0.50, not the selector's own preference.
+
+    Price the dict cutaway_gen actually builds, then price the same dict with its
+    routing pin dropped. If the second is not multiples of the first, the pin is
+    not the thing holding the price down and this test is not policing anything.
+    """
+    tool = CutawayGen()
+    payload = tool._provider_inputs("gym detail 0", tmp_path / "cache")
+    assert payload["allowed_providers"] == CUTAWAY_PROVIDER_PIN
+
+    pinned = live_routing().estimate_cost(dict(payload))
+    unpinned_payload = {k: v for k, v in payload.items() if k != "allowed_providers"}
+    unpinned = live_routing().estimate_cost(unpinned_payload)
+
+    assert pinned == 0.10
+    assert unpinned >= 10 * pinned, (
+        f"unpinned routing priced {unpinned} against pinned {pinned}: the fixture no "
+        "longer contains a materially more expensive alternative, so this test and "
+        "the five-cent-sitting test above police nothing"
+    )

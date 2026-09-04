@@ -46,7 +46,8 @@ SUPPLEMENTARY_ARTIFACTS = {
     "source_media_review",  # Required before first planning stage when user media exists
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages
-    "cost_log", "clip_ledger",  # budget ledger + segment claims; one line keeps spec anchors fresh
+    "cost_log",             # Budget ledger, written by tools/cost_tracker.py
+    "clip_ledger",          # Segment claims, written by lib/clip_ledger.py
 }
 
 

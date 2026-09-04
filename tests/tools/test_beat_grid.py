@@ -36,6 +36,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import tools.analysis.beat_grid as beat_grid_module  # noqa: E402
 from tools.analysis.beat_grid import BeatGrid  # noqa: E402
 from tools.base_tool import ToolStatus  # noqa: E402
 
@@ -141,6 +142,7 @@ def speech_result(speech_over_music) -> dict:
     result = BeatGrid().execute(
         {
             "input_path": str(speech_over_music),
+            "output_dir": str(speech_over_music.parent / "analysis"),
             "devoice": True,
             "word_timestamps": _words(),
         }
@@ -166,13 +168,64 @@ def test_declares_every_dependency_it_actually_uses() -> None:
 
 
 def test_status_degrades_when_a_python_dep_is_missing(monkeypatch) -> None:
-    real = importlib.util.find_spec
+    real = importlib.import_module
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
     monkeypatch.setattr(
-        importlib.util,
-        "find_spec",
-        lambda name, *a, **k: None if name == "librosa" else real(name, *a, **k),
+        beat_grid_module.importlib,
+        "import_module",
+        lambda name, *a, **k: _raise_missing(name) if name == "librosa" else real(name, *a, **k),
     )
     assert BeatGrid().get_status() is ToolStatus.UNAVAILABLE
+
+
+def _raise_missing(name: str):
+    raise ModuleNotFoundError(f"No module named {name!r}")
+
+
+def test_status_degrades_when_librosa_is_installed_but_unimportable(monkeypatch) -> None:
+    """The ABI-mismatch case: find_spec says yes, `import librosa` still raises.
+
+    A numba/llvmlite/numpy mismatch leaves the spec findable, so a find_spec
+    probe reported the dependency satisfied at preflight and the failure only
+    surfaced later as an opaque "analyze-beatgrid.py failed: ..." out of the
+    subprocess — blaming the analyser for a broken install.
+    """
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    monkeypatch.setattr(beat_grid_module.shutil, "which", lambda name: "/usr/bin/" + name)
+    # find_spec locates librosa fine — that is the whole shape of this failure.
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: object())
+    assert importlib.util.find_spec("librosa") is not None
+
+    real = importlib.import_module
+
+    def abi_mismatch(name, *args, **kwargs):
+        if name == "librosa":
+            raise ImportError("Numba needs NumPy 2.2 or less. Got NumPy 2.3.")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(beat_grid_module.importlib, "import_module", abi_mismatch)
+
+    assert BeatGrid().get_status() is ToolStatus.UNAVAILABLE
+
+
+def test_import_probe_is_paid_at_most_once_per_process(monkeypatch) -> None:
+    """The find_spec choice was made for a real reason — preflight runs
+    get_status() for every tool and librosa costs seconds to import. The cache
+    is what makes an honest probe affordable, so it is policed."""
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    calls: list[str] = []
+    real = importlib.import_module
+
+    def counting(name, *args, **kwargs):
+        calls.append(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(beat_grid_module.importlib, "import_module", counting)
+
+    for _ in range(5):
+        beat_grid_module._importable("json")
+
+    assert calls == ["json"]
 
 
 def test_status_degrades_when_ffmpeg_is_missing(monkeypatch) -> None:
@@ -295,7 +348,7 @@ def test_contamination_counts_track_the_word_list(music_only) -> None:
 
 
 @needs_deps
-def test_canonical_grid_comes_from_the_raw_mix(music_only) -> None:
+def test_canonical_grid_comes_from_the_raw_mix(music_only, tmp_path) -> None:
     """The proxy may never answer the tempo question.
 
     De-voicing scoops 300-2500 Hz, which is also the analyser's own snare band
@@ -305,8 +358,12 @@ def test_canonical_grid_comes_from_the_raw_mix(music_only) -> None:
     analyser run on the untouched input, with de-voicing on or off.
     """
     tool = BeatGrid()
-    with_devoice = tool.execute({"input_path": str(music_only), "devoice": True})
-    without = tool.execute({"input_path": str(music_only), "devoice": False})
+    with_devoice = tool.execute(
+        {"input_path": str(music_only), "devoice": True, "output_dir": str(tmp_path / "on")}
+    )
+    without = tool.execute(
+        {"input_path": str(music_only), "devoice": False, "output_dir": str(tmp_path / "off")}
+    )
     assert with_devoice.success and without.success
 
     for field in ("bpm", "n_beats", "n_bars", "n_phrases", "summary"):
@@ -318,3 +375,97 @@ def test_canonical_grid_comes_from_the_raw_mix(music_only) -> None:
     # The proxy is still produced, just demoted to a diagnostic.
     assert with_devoice.data["proxy_comparison"] is not None
     assert without.data["proxy_comparison"] is None
+
+
+# ----------------------------------------------------------------------
+# an unusable transcript must be visible in the RESULT
+# ----------------------------------------------------------------------
+def test_unusable_word_timestamps_are_flagged_not_swallowed() -> None:
+    """Inline words with no start/end are a supplied-but-unusable transcript."""
+    _, error, warning = BeatGrid()._load_words(
+        {"word_timestamps": [{"word": "one"}, {"word": "two"}]}
+    )
+    assert error is None, "an unusable transcript must not become a hard failure"
+    assert warning and "word_timestamps" in warning
+
+    _, _, nothing_supplied = BeatGrid()._load_words({})
+    assert nothing_supplied is None
+
+
+@needs_deps
+def test_unusable_transcript_is_distinguishable_from_no_transcript(
+    music_only, tmp_path
+) -> None:
+    """`speech: None` on its own cannot say WHY there is no verdict.
+
+    A transcript whose words carry no timestamps produced exactly the same
+    result as passing no transcript at all — success, `speech: None` — so the
+    operator was never told the cross-check they asked for did not run.
+    """
+    transcript = tmp_path / "bed_transcript.json"
+    transcript.write_text(
+        json.dumps({"word_timestamps": [{"word": "one"}, {"word": "two"}]}),
+        encoding="utf-8",
+    )
+    tool = BeatGrid()
+
+    unusable = tool.execute(
+        {
+            "input_path": str(music_only),
+            "devoice": False,
+            "output_dir": str(tmp_path / "unusable"),
+            "transcript_path": str(transcript),
+        }
+    )
+    none_given = tool.execute(
+        {
+            "input_path": str(music_only),
+            "devoice": False,
+            "output_dir": str(tmp_path / "none"),
+        }
+    )
+
+    # A bad transcript is no reason to throw away a good grid.
+    assert unusable.success, unusable.error
+    assert none_given.success, none_given.error
+    assert unusable.data["speech"] is None
+    assert none_given.data["speech"] is None
+    assert unusable.data["bpm"] == none_given.data["bpm"]
+
+    assert none_given.data["speech_warning"] is None
+    warning = unusable.data["speech_warning"]
+    assert warning, (
+        "a transcript was supplied and none of it was usable — the result says "
+        "the same thing as if no transcript had been supplied at all"
+    )
+    assert str(transcript) in warning
+    assert "2 entries" in warning
+
+
+# ----------------------------------------------------------------------
+# output ergonomics
+# ----------------------------------------------------------------------
+@needs_deps
+def test_never_writes_beside_the_source_media(music_only, tmp_path, monkeypatch) -> None:
+    """Defaulting output_dir to input_path.parent littered the operator's own
+    media folder with <stem>_devoiced.wav and <stem>_audiomap*.json."""
+    media = tmp_path / "media"
+    media.mkdir()
+    track = media / "bed.wav"
+    shutil.copy(music_only, track)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    result = BeatGrid().execute({"input_path": str(track), "devoice": True})
+
+    assert result.success, result.error
+    assert [p.name for p in media.iterdir()] == ["bed.wav"], (
+        f"beat_grid wrote into the source media folder: "
+        f"{sorted(p.name for p in media.iterdir())}"
+    )
+    assert result.artifacts
+    for artifact in result.artifacts:
+        assert Path(artifact).resolve().is_relative_to(workspace.resolve()), (
+            f"{artifact} escaped the workspace"
+        )

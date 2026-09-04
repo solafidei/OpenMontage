@@ -85,11 +85,20 @@ def test_punch_in_is_eased_and_lands_on_the_target_zoom():
     last = int(round(2.0 * 30)) - 1
     assert _eval_zoom(f, 0) == pytest.approx(1.0)
     assert _eval_zoom(f, last) == pytest.approx(2.0, abs=1e-3)
-    # Smoothstep, not a straight line: a quarter of the way in, the zoom has
-    # travelled less than a quarter of the distance.
-    quarter = _eval_zoom(f, last // 4)
-    assert quarter < 1.0 + (2.0 - 1.0) * 0.25
-    assert f"s=1080x1920" in f
+    # Curvature, not one sampled point. The old assertion — zoom(last//4) <
+    # 1 + delta*0.25 — was satisfied by a purely LINEAR zoom, because
+    # 14/59 = 0.2373 is already under 0.25, so it policed nothing. A smoothstep
+    # lags the straight line through the whole first half and leads it through
+    # the whole second half; a straight line sits on it everywhere and fails.
+    line = [1.0 + (2.0 - 1.0) * n / last for n in range(last + 1)]
+    curve = [_eval_zoom(f, n) for n in range(last + 1)]
+    lag = [c - l for c, l in zip(curve, line)]
+    assert all(d < 0 for d in lag[1:last // 2])
+    assert all(d > 0 for d in lag[last // 2 + 1:last])
+    # And by a margin no rounding could produce: the smoothstep is a tenth of
+    # the whole push away from the line at its extremes.
+    assert max(abs(d) for d in lag) > (2.0 - 1.0) * 0.09
+    assert "s=1080x1920" in f
 
 
 def test_punch_in_precedes_the_speed_filter():
@@ -178,17 +187,12 @@ def test_look_is_reused_from_color_grade_and_face_enhance():
     assert parts[2] == FACE_PRESETS["sharpen_light"]["vf"]
 
 
-def test_one_setting_stamps_the_same_look_on_every_reel_of_a_batch():
-    reels = [
-        {"id": f"reel-{n}", "polish": {"punch_in": 1.0 + n / 10}} for n in range(1, 6)
-    ]
-    looks = [
-        [p for p in pf.cut_filters(c, 2.0, 1080, 1920, look=LOOK)
-         if "zoompan" not in p]
-        for c in reels
-    ]
-    assert len({tuple(look) for look in looks}) == 1
-    assert looks[0] == pf.look_filters(LOOK)
+# The old test here called one pure function five times with the same look and
+# compared the outputs — a tautology that holds for any pure function and
+# involved no reels at all. The real claim is about a BATCH, so it is now made
+# by composing several reels through the real path; see
+# `test_one_setting_stamps_the_same_look_on_every_reel_of_a_batch` below with
+# the other render-level tests.
 
 
 def test_unknown_look_names_are_refused():
@@ -231,8 +235,12 @@ def _clip(path: Path, w: int = 640, h: int = 360, d: int = 2, src: str = "testsr
     )
 
 
-def _compose(tmp_path, cuts, **extra):
-    """Run compose, returning (result, every ffmpeg command it issued)."""
+def _compose(tmp_path, cuts, spine=None, **extra):
+    """Run compose, returning (result, every ffmpeg command it issued).
+
+    `spine` merges into the edit_decisions batch spine, which is where the
+    shared look lives (spec §4.2); `**extra` goes to the tool inputs.
+    """
     seen: list[list[str]] = []
     original = VideoCompose.run_command
 
@@ -244,7 +252,9 @@ def _compose(tmp_path, cuts, **extra):
     tool.run_command = recording.__get__(tool, VideoCompose)
     result = tool.execute({
         "operation": "compose",
-        "edit_decisions": {"version": "1.0", "render_runtime": "ffmpeg", "cuts": cuts},
+        "edit_decisions": {
+            "version": "1.0", "render_runtime": "ffmpeg", "cuts": cuts, **(spine or {})
+        },
         "output_path": str(tmp_path / "out.mp4"),
         **extra,
     })
@@ -366,3 +376,336 @@ def test_punch_in_magnifies_the_frame(tmp_path):
          "polish": {"punch_in": 2.0}}])
     assert plain.success and punched.success, punched.error
     assert _mean_luma(tmp_path / "b" / "out.mp4") > _mean_luma(tmp_path / "a" / "out.mp4") * 2
+
+
+# ---- the punch-in's scale headroom ----
+
+def test_scale_headroom_is_one_without_a_punch_in():
+    """No punch-in → the geometry stage is untouched and the cut is byte-identical."""
+    assert pf.scale_headroom({"id": "c1"}) == 1.0
+    assert pf.scale_headroom({"polish": {"transition_out": "flash"}}) == 1.0
+    assert pf.scale_headroom({"polish": {"punch_in": 1.0}}) == 1.0
+
+
+def test_scale_headroom_is_the_punch_in_and_is_capped():
+    assert pf.scale_headroom({"polish": {"punch_in": 1.6}}) == pytest.approx(1.6)
+    # PUNCH_IN_RANGE allows 4.0 — a 4320x7680 intermediate, 16x the output's
+    # pixels — so the headroom stops where the cost stops paying.
+    assert pf.scale_headroom({"polish": {"punch_in": 4.0}}) == pf.SCALE_HEADROOM_CAP
+    assert pf.SCALE_HEADROOM_CAP < pf.PUNCH_IN_RANGE[1]
+
+
+def test_scale_headroom_refuses_what_punch_in_refuses():
+    with pytest.raises(pf.PolishError):
+        pf.scale_headroom({"polish": {"punch_in": 0.5}})
+    with pytest.raises(pf.PolishError):
+        pf.scale_headroom({"polish": {"punch_in": "big"}})
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("fit", ["pad", "cover"])
+def test_geom_scales_to_the_headroom_so_the_punch_in_crops_real_pixels(tmp_path, fit):
+    """The crop must come from a 1728-line frame, not from the 1080-line output.
+
+    zoompan blows a region of its INPUT back up to the output size. Geom scaled
+    to 1080x1920 first, the detail the crop wanted was already gone.
+    """
+    src = tmp_path / "in.mp4"
+    _clip(src, 1280, 720)
+    result, seen = _compose(
+        tmp_path,
+        [{"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 1,
+          "polish": {"punch_in": 1.6}},
+         {"id": "c2", "source": str(src), "in_seconds": 0, "out_seconds": 1}],
+        spine={"metadata": {"compose_target": {"width": 1080, "height": 1920, "fit": fit}}},
+    )
+    assert result.success, result.error
+    punched, plain = _segment_vf(seen)
+
+    # 1080x1920 * 1.6 = 1728x3072, on both the scale and the crop/pad stage.
+    assert "scale=1728:3072" in punched
+    assert ("crop=1728:3072" if fit == "cover" else "pad=1728:3072") in punched
+    # ...and zoompan still lands on the output size, so nothing downstream moves.
+    assert "s=1080x1920" in punched
+    # The cut that asked for no punch-in is untouched.
+    assert "scale=1080:1920" in plain and "1728" not in plain
+
+
+@requires_ffmpeg
+def test_headroom_dimensions_are_rounded_to_even(tmp_path):
+    """libx264 + yuv420p refuses an odd width or height outright."""
+    src = tmp_path / "in.mp4"
+    _clip(src, 1280, 720)
+    # 1920 * 1.115 = 2140.8 and 1080 * 1.115 = 1204.2 — the width rounds to an
+    # odd 2141 before it is evened off.
+    result, seen = _compose(tmp_path, [
+        {"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 1,
+         "polish": {"punch_in": 1.115}}])
+    assert result.success, result.error
+    w, h = (int(v) for v in re.search(r"scale=(\d+):(\d+):", _segment_vf(seen)[0]).groups())
+    assert w % 2 == 0 and h % 2 == 0
+    assert (w, h) == (2140, 1204)
+
+
+@requires_ffmpeg
+def test_headroom_actually_recovers_high_frequency_detail(tmp_path):
+    """The point of all of it: a punched frame is sharper than it used to be.
+
+    Laplacian variance of the last (most zoomed) frame, rendered twice through
+    the real compose path with only the headroom changed.
+    """
+    np = pytest.importorskip("numpy")
+    src = tmp_path / "in.mp4"
+    # Fine detail is the whole subject: a smooth gradient would score the same
+    # either way. testsrc2's noise band gives real high-frequency content.
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x3413:d=2:r=30",
+         "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", str(src)],
+        capture_output=True, check=True,
+    )
+
+    def render(where, headroom):
+        original = pf.scale_headroom
+        pf.scale_headroom = headroom
+        try:
+            result, _ = _compose(where, [
+                {"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 2,
+                 "polish": {"punch_in": 1.6}}],
+                spine={"metadata": {"compose_target":
+                                    {"width": 1080, "height": 1920, "fit": "cover"}}})
+            assert result.success, result.error
+        finally:
+            pf.scale_headroom = original
+        raw = subprocess.check_output(
+            ["ffmpeg", "-v", "error", "-sseof", "-0.04", "-i", str(where / "out.mp4"),
+             "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        a = np.frombuffer(raw, dtype="uint8").reshape(1920, 1080).astype("float64")
+        return (-4 * a[1:-1, 1:-1] + a[:-2, 1:-1] + a[2:, 1:-1]
+                + a[1:-1, :-2] + a[1:-1, 2:]).var()
+
+    before = render(tmp_path / "flat", lambda cut: 1.0)
+    after = render(tmp_path / "headroom", pf.scale_headroom)
+    assert after > before * 1.2, f"{before=} {after=}"
+
+
+# ---- the ramp against the CFR grid ----
+
+@requires_ffmpeg
+@pytest.mark.parametrize("ramp", [2.0, 3.0, 0.5])
+def test_a_ramped_segments_picture_and_audio_end_within_the_quantisation_floor(
+    tmp_path, ramp
+):
+    """The log-mean's real guarantee, measured rather than asserted.
+
+    `ramp_average_speed` used to claim it kept "the audio exactly as long as
+    the picture". It does not: `-r 30` requantises the ramped PTS onto the CFR
+    grid and AAC ends on a whole 1024-sample packet, so a 2s cut lands 21-57ms
+    apart whatever atempo is fed. What the log-mean does buy is that the drift
+    stays inside that floor instead of growing with the ramp — the arithmetic
+    mean puts 1.0->3.0 at ~100ms.
+    """
+    src = tmp_path / "in.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=s=640x360:d=4:r=30",
+         "-f", "lavfi", "-i", "sine=f=440:d=4", "-c:v", "libx264", "-crf", "28",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)],
+        capture_output=True, check=True,
+    )
+    result, _ = _compose(tmp_path, [
+        {"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 2,
+         "polish": {"speed_ramp": ramp}}])
+    assert result.success, result.error
+
+    def duration(stream):
+        return float(subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", stream,
+             "-show_entries", "stream=duration", "-of", "csv=p=0",
+             str(tmp_path / "out.mp4")]).decode().strip().rstrip(","))
+
+    drift = duration("v:0") - duration("a:0")
+    # The floor is one video frame (33ms) plus one AAC packet (21ms), and the
+    # last 5ms is encoder priming. Measured max across these three ramps: 57ms.
+    floor = 1.0 / 30 + 1024 / 48000 + 0.005
+    assert abs(drift) <= floor, f"{ramp=} {drift=} {floor=}"
+
+
+# ---- where the batch look comes from ----
+
+def test_the_batch_look_is_read_off_the_spine():
+    """Spec §4.2 puts the shared vocabulary on edit_decisions, not on an argument."""
+    ed = {"batch_look": LOOK}
+    assert VideoCompose._resolve_batch_look({}, ed) == LOOK
+    ed_meta = {"metadata": {"batch_look": LOOK}}
+    assert VideoCompose._resolve_batch_look({}, ed_meta) == LOOK
+    assert VideoCompose._resolve_batch_look({}, {}) is None
+
+
+def test_the_tool_input_overrides_the_spine():
+    other = {"grade": "cinematic_cool"}
+    assert VideoCompose._resolve_batch_look(
+        {"batch_look": other}, {"batch_look": LOOK}
+    ) == other
+
+
+@requires_ffmpeg
+def test_a_look_on_the_spine_reaches_the_encode(tmp_path):
+    src = tmp_path / "in.mp4"
+    _clip(src)
+    result, seen = _compose(
+        tmp_path,
+        [{"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 1}],
+        spine={"metadata": {"batch_look": LOOK}},
+    )
+    assert result.success, result.error
+    assert _segment_vf(seen)[0] == BASELINE_VF + "," + ",".join(pf.look_filters(LOOK))
+
+
+@requires_ffmpeg
+def test_one_setting_stamps_the_same_look_on_every_reel_of_a_batch(tmp_path):
+    """Five REELS, one look — composed through the real path, not one function.
+
+    Each reel is its own compose call with its own cuts and its own punch-in,
+    exactly as compose-director materialises them off the spine.
+    """
+    src = tmp_path / "in.mp4"
+    _clip(src, d=3)
+    tails = []
+    for n in range(5):
+        result, seen = _compose(
+            tmp_path / f"reel-{n}",
+            [{"id": f"reel-{n}-c1", "source": str(src),
+              "in_seconds": 0, "out_seconds": 1, "polish": {"punch_in": 1.1 + n / 10}},
+             {"id": f"reel-{n}-c2", "source": str(src), "in_seconds": 1, "out_seconds": 2}],
+            spine={"metadata": {"batch_look": LOOK}},
+        )
+        assert result.success, result.error
+        for vf in _segment_vf(seen):
+            tails.append(vf.split("fps=30,", 1)[1])
+    assert len(tails) == 10
+    # Every segment of every reel carries the identical look tail, whatever
+    # else that particular cut asked for.
+    assert {t for t in tails if "zoompan" not in t} == {",".join(pf.look_filters(LOOK))}
+    assert all(t.endswith(",".join(pf.look_filters(LOOK))) for t in tails)
+
+
+# ---- polish cannot survive a runtime that never reads it ----
+
+def _gate(runtime, cuts, look=None):
+    ed = {"version": "1.0", "render_runtime": runtime, "cuts": cuts}
+    return VideoCompose()._pre_compose_validation(ed, cuts, batch_look=look)
+
+
+def test_polish_routed_to_remotion_is_refused_not_silently_dropped():
+    """Remotion never reads `polish`; a successful render would be the wrong reel."""
+    cuts = [{"id": "c1", "source": "a.mp4", "polish": {"punch_in": 1.6}}]
+    blocked = _gate("remotion", cuts)
+    assert blocked is not None and not blocked.success
+    assert "punch_in" in _polish_block(blocked) and "'c1'" in _polish_block(blocked)
+
+
+def test_a_batch_look_routed_to_hyperframes_is_refused():
+    cuts = [{"id": "c1", "source": "a.mp4"}]
+    blocked = _gate("hyperframes", cuts, look=LOOK)
+    assert "batch_look" in _polish_block(blocked)
+
+
+def _polish_block(result) -> str:
+    """The polish-routing message, or "" — other pre-compose checks also fire."""
+    error = "" if result is None else (result.error or "")
+    return error if "picture plane" in error else ""
+
+
+def test_ffmpeg_is_the_runtime_that_may_carry_polish():
+    cuts = [{"id": "c1", "source": "a.mp4", "polish": {"punch_in": 1.6}}]
+    assert _polish_block(_gate("ffmpeg", cuts, look=LOOK)) == ""
+    # ...and a cut with nothing to lose is not blocked on any runtime.
+    assert _polish_block(_gate("remotion", [{"id": "c1", "source": "a.mp4"}])) == ""
+
+
+# ---- bounds and ergonomics ----
+
+def test_grain_is_bounded_like_everything_else_in_this_module():
+    """`noise=alls=` is 0-100; 500 was an ffmpeg parse error, -5 a silent zero."""
+    with pytest.raises(pf.PolishError, match="grain"):
+        pf.look_filters({"grain": 500})
+    with pytest.raises(pf.PolishError, match="grain"):
+        pf.look_filters({"grain": -5})
+    assert pf.look_filters({"grain": 100}) == ["noise=alls=100:allf=t+u"]
+
+
+def test_non_numeric_polish_values_are_refused_as_polish_errors():
+    """Not a bare ValueError — everything this module rejects is a PolishError."""
+    for cut in (
+        {"polish": {"punch_in": "1.6x"}},
+        {"polish": {"speed_ramp": "fast"}},
+        {"speed": "slow"},
+    ):
+        with pytest.raises(pf.PolishError):
+            pf.cut_filters(cut, 2.0, 1080, 1920)
+
+
+def test_a_ramp_that_rounds_away_at_the_emitted_precision_is_not_a_ramp():
+    """`k` is written at six decimals; 1e-7 becomes a division by 0.000000."""
+    assert not pf.is_ramp(1.0, 1.0000001)
+    parts = pf.cut_filters({"speed": 1.0, "polish": {"speed_ramp": 1.0000001}},
+                           2.0, 1080, 1920)
+    assert parts == []
+    with pytest.raises(pf.PolishError, match="not a ramp"):
+        pf.speed_ramp_setpts(1.0, 1.0000001, 2.0)
+    # A ramp that survives the rounding still ramps.
+    assert pf.is_ramp(1.0, 1.001)
+    assert "0.000000*T" not in pf.speed_ramp_setpts(1.0, 1.001, 2.0)
+
+
+def test_a_grade_named_in_both_sets_is_still_gated_on_operator_footage(monkeypatch):
+    """The trap: FACE_PRESETS was consulted first, skipping the identity gate.
+
+    The two name sets are disjoint today, so nothing leaks — this pins the
+    behaviour for whoever adds a name to both.
+    """
+    shared = sorted(FACE_PRESETS)[0]
+    monkeypatch.setitem(pf.GRADE_PROFILES, shared, {"vf": "eq=contrast=1.4"})
+    # Unlocked, the face preset still wins — the resolution order is unchanged.
+    assert pf.look_filters({"grade": shared}) == [FACE_PRESETS[shared]["vf"]]
+    with pytest.raises(pf.PolishError, match="identity-safe"):
+        pf.look_filters({"grade": shared}, "operator_footage")
+
+
+# ---- the whip, at render level ----
+
+def _axis_detail(path: Path, axis: int, from_end: float = 0.04) -> float:
+    """Mean absolute neighbour difference along one axis of the last frame."""
+    np = pytest.importorskip("numpy")
+    raw = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-sseof", f"-{from_end}", "-i", str(path),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    )
+    a = np.frombuffer(raw, dtype="uint8").reshape(1080, 1920).astype("float64")
+    return float(np.abs(np.diff(a, axis=axis)).mean())
+
+
+@requires_ffmpeg
+def test_whip_smears_the_last_frame_horizontally_and_only_horizontally(tmp_path):
+    """sigmaV=0 is the whole point: a whip-pan blurs across, not down."""
+    src = tmp_path / "in.mp4"
+    # Vertical bars: all of the detail is horizontal, so a horizontal-only
+    # blur has something to destroy and a vertical one would not.
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:d=2:r=30",
+         "-vf", "drawgrid=w=16:h=1080:t=8:color=white",
+         "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
+         "-g", "30", "-keyint_min", "30", str(src)],
+        capture_output=True, check=True,
+    )
+    plain, _ = _compose(tmp_path / "a", [
+        {"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 2}])
+    whipped, _ = _compose(tmp_path / "b", [
+        {"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 2,
+         "polish": {"transition_out": "whip"}}])
+    assert plain.success and whipped.success, whipped.error
+
+    a, b = tmp_path / "a" / "out.mp4", tmp_path / "b" / "out.mp4"
+    # Across the bars: the whip has flattened them.
+    assert _axis_detail(b, 1) < _axis_detail(a, 1) * 0.5
+    # Down the bars: there was nothing to smear and nothing was smeared.
+    assert _axis_detail(b, 0) == pytest.approx(_axis_detail(a, 0), abs=1.0)

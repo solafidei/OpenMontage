@@ -533,3 +533,91 @@ def test_rank_operation_still_prices_free_under_an_unresolvable_pin():
     assert sel.estimate_cost(
         {"prompt": "x", "operation": "rank", "allowed_providers": ["typo_provider"]}
     ) == 0.0
+
+
+# --- #51: where an estimate/execute divergence is allowed to land -----------
+#
+# #40's acceptance criterion offered "refused, or recorded on the ledger
+# entry". The ledger arm is not reachable from a tool: CostTracker entries are
+# minted by the stage director, execute() is handed no entry id and no tracker,
+# and there is no mutator that attaches a free-form field to an entry. So the
+# chosen behaviour is result + run-log warning, deliberately NOT the ledger —
+# these two tests pin both halves so a later change has to choose it again on
+# purpose.
+
+def test_divergence_is_warned_into_the_run_log(probe_selector, caplog):
+    """The result payload is only seen by a caller who inspects it; the log is not.
+
+    An operator reading the run log must see the 15x under-price even when
+    nobody opens result.data — that is the whole reason the warning exists.
+    """
+    assert probe_selector.estimate_cost(
+        {"prompt": "x", "allowed_providers": ["kling"]}
+    ) == pytest.approx(0.10)
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        result = probe_selector.execute({"prompt": "x"})  # pin dropped
+
+    assert result.success is True
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "divergence" in r.getMessage()
+    ]
+    assert warnings, "a divergence must reach the run log, not only result.data"
+    message = warnings[0]
+    assert "kling" in message and "seedance" in message
+    assert "0.1000" in message and "1.52" in message
+
+
+def test_matching_routing_logs_no_divergence_warning(probe_selector, caplog):
+    """The warning must stay rare enough to mean something — no cry on the happy path."""
+    inputs = {"prompt": "x", "allowed_providers": ["kling"], "duration": "5"}
+    probe_selector.estimate_cost(inputs)
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        probe_selector.execute(inputs)
+
+    assert not [r for r in caplog.records if "divergence" in r.getMessage()]
+
+
+def test_divergence_does_not_touch_the_cost_ledger(probe_selector, tmp_path):
+    """Pinned on purpose: a tool never writes to cost_log.json.
+
+    A selector-minted entry is one no director reconciles, so it strands in
+    ``non_terminal_entries()`` and fails the compose gate's "every entry
+    terminal" criterion — worse for the audit trail than the silence. Routing
+    the divergence ONTO the director's existing entry needs an entry id the
+    tool is never handed plus an annotate API CostTracker does not expose; see
+    the comment at the divergence site in video_selector.execute.
+    """
+    from tools.cost_tracker import BudgetMode, CostTracker
+
+    log_path = tmp_path / "cost_log.json"
+    tracker = CostTracker(
+        budget_total_usd=10.0,
+        reserve_pct=0.0,
+        single_action_approval_usd=99.0,
+        require_approval_for_new_paid_tool=False,
+        mode=BudgetMode.WARN,
+        cost_log_path=log_path,
+    )
+    entry_id = tracker.estimate("video_selector", "reel_1 cutaway via kling_video", 0.10)
+    before = log_path.read_text()
+
+    probe_selector.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]})
+    result = probe_selector.execute({"prompt": "x"})  # diverges to seedance at $1.52
+
+    assert result.data["estimate_divergence"]["executed_provider"] == "seedance"
+    assert log_path.read_text() == before, "the selector must not write to the money log"
+    reloaded = CostTracker(
+        budget_total_usd=10.0,
+        reserve_pct=0.0,
+        single_action_approval_usd=99.0,
+        require_approval_for_new_paid_tool=False,
+        mode=BudgetMode.WARN,
+        cost_log_path=log_path,
+    )
+    (entry,) = reloaded.entries
+    assert entry["id"] == entry_id
+    assert "estimate_divergence" not in entry
+    assert entry["estimated_usd"] == pytest.approx(0.10)  # still the QUOTED figure

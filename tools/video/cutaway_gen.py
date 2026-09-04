@@ -27,7 +27,9 @@ Wave 1 rather than estimating an unguardable $0.00.
 Trimming is MANDATORY on every route: generator durations are hints on some routes and
 the model chooses the actual length, so no code here depends on getting 5 seconds back.
 The trim also strips audio (the music bed comes from the operator's track) and crops to
-9:16, and the result is probed rather than assumed.
+9:16, and the result is probed rather than assumed. When the probe cannot measure, the
+sitting is refused (:class:`ProbeFailedError`): an unmeasurable clip passed the silence
+check vacuously and skipped the crop, which is failing open in a fail-closed tool.
 """
 
 from __future__ import annotations
@@ -76,6 +78,15 @@ class MediaReferenceRefusedError(ValueError):
 
     Raised by both :meth:`CutawayGen.estimate_cost` and :meth:`CutawayGen.execute`
     so the refusal lands before pricing, not only before sending.
+    """
+
+
+class ProbeFailedError(RuntimeError):
+    """ffprobe could not measure a file, so nothing about it may be assumed.
+
+    Raised by :func:`_probe` instead of returning an empty dict. Swallowing the
+    failure made the 9:16 crop silently optional and the silence check vacuous —
+    the two things this tool promises to have measured.
     """
 
 
@@ -394,7 +405,16 @@ class CutawayGen(BaseTool):
                 cost = float(result.data.get("executed_estimate_usd") or result.cost_usd or priced)
                 provider = str(result.data.get("selected_provider") or CUTAWAY_PROVIDER_PIN[0])
 
-            probed = _probe(source)
+            try:
+                probed = _probe(source)
+            except ProbeFailedError as exc:
+                # Fail closed: unmeasured, the trim below would skip the 9:16 crop
+                # and clamp against a duration of zero. Refuse the sitting instead.
+                return ToolResult(
+                    success=False,
+                    error=f"Cutaway {index + 1}/{len(prompts)} could not be measured: {exc}",
+                    data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                )
             output_dir.mkdir(parents=True, exist_ok=True)
             trimmed = output_dir / f"{source.stem}_flash.mp4"
             try:
@@ -402,7 +422,17 @@ class CutawayGen(BaseTool):
             except Exception as exc:  # ffmpeg failure is not silently a cutaway
                 return ToolResult(success=False, error=f"Cutaway trim failed: {exc}")
 
-            trimmed_probe = _probe(trimmed)
+            try:
+                trimmed_probe = _probe(trimmed)
+            except ProbeFailedError as exc:
+                # An unmeasurable trim cannot be declared silent. Passing the audio
+                # check on a missing measurement is how a cutaway with the model's
+                # own soundtrack would reach the operator's music bed.
+                return ToolResult(
+                    success=False,
+                    error=f"Trimmed cutaway {trimmed} could not be measured: {exc}",
+                    data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                )
             if trimmed_probe.get("has_audio"):
                 return ToolResult(
                     success=False,
@@ -481,24 +511,54 @@ def _crop_to_vertical(width: int, height: int) -> str | None:
 
 
 def _probe(path: Path) -> dict[str, Any]:
-    """Measured facts about a file: duration, dimensions, whether it has audio."""
+    """Measured facts about a file: duration, dimensions, whether it has audio.
+
+    Raises rather than returning ``{}`` when the measurement fails. Every caller
+    reads this dict with ``.get()`` and treats a missing fact as a benign default:
+    no width means no 9:16 crop, no duration means no clamp against a short clip,
+    and a missing ``has_audio`` reads as False — so an empty probe made the silence
+    check pass VACUOUSLY on a clip nobody had measured. In a tool whose contract is
+    that the output is measured and not assumed, an unmeasurable file is a refusal.
+    """
     try:
         proc = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
+            ["ffprobe", "-v", "error", "-print_format", "json",
              "-show_format", "-show_streams", str(path)],
             capture_output=True, text=True, timeout=30, check=False,
         )
-        if proc.returncode != 0:
-            return {}
-        data = json.loads(proc.stdout or "{}")
-    except Exception:
-        return {}
+    except Exception as exc:  # ffprobe missing, killed, or timed out
+        raise ProbeFailedError(f"ffprobe could not run on {path}: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        raise ProbeFailedError(
+            f"ffprobe exited {proc.returncode} on {path}: "
+            f"{detail[-1] if detail else 'no diagnostic'}"
+        )
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError as exc:
+        raise ProbeFailedError(
+            f"ffprobe returned no readable measurement for {path}"
+        ) from exc
 
-    streams = data.get("streams", [])
+    streams = data.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    duration = data.get("format", {}).get("duration")
+    # Name the fact that is missing: "could not be measured" is actionable only if
+    # the operator learns whether ffprobe saw no video, or saw one of unknown size.
+    try:
+        seconds = float(duration)
+    except (TypeError, ValueError):
+        # Some containers report "N/A" rather than omitting the field.
+        seconds = 0.0
+    if seconds <= 0:
+        raise ProbeFailedError(f"ffprobe measured no duration for {path} ({duration!r})")
+    if not video.get("width") or not video.get("height"):
+        raise ProbeFailedError(f"ffprobe measured no video stream dimensions for {path}")
+
     return {
-        "duration_seconds": round(float(data.get("format", {}).get("duration") or 0.0), 3),
-        "width": int(video.get("width") or 0),
-        "height": int(video.get("height") or 0),
+        "duration_seconds": round(seconds, 3),
+        "width": int(video["width"]),
+        "height": int(video["height"]),
         "has_audio": any(s.get("codec_type") == "audio" for s in streams),
     }

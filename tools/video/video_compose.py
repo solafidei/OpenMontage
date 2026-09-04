@@ -229,7 +229,11 @@ class VideoCompose(BaseTool):
                     "setting shared by every reel of a sitting so they grade "
                     "identically. Names resolve against face_enhance.PRESETS and "
                     "color_grade.PROFILES; an operator_footage cut accepts "
-                    "face_enhance presets only."
+                    "face_enhance presets only. OVERRIDE ONLY: the batch spine "
+                    "carries the look (edit_decisions.batch_look, or "
+                    "edit_decisions.metadata.batch_look) per spec §4.2, and that "
+                    "is the copy the board and the audit trail can see. Pass it "
+                    "here only for a one-off re-render at a different grade."
                 ),
                 "properties": {
                     "grade": {"type": "string"},
@@ -500,9 +504,13 @@ class VideoCompose(BaseTool):
         crf = inputs.get("crf", 23)
         preset = inputs.get("preset", "medium")
         profile_name = inputs.get("profile")
-        # One look for the whole sitting: the caller passes the same batch_look
-        # to every reel it composes, so grade/grain/sharpen land identically.
-        batch_look = inputs.get("batch_look")
+        # One look for the whole sitting, read off the batch spine (spec §4.2)
+        # with the tool input as an explicit override. The look arrived as a
+        # tool input only, which means it was never in the artifact: the board
+        # and the audit trail could not see what grade a batch was rendered
+        # with. The spine is where compose-director already materialises the
+        # shared vocabulary from, so that is where it is read.
+        batch_look = self._resolve_batch_look(inputs, edit_decisions)
 
         # Resolve target resolution + fit mode. Priority: explicit `profile`
         # arg > edit_decisions.metadata.compose_target > default (landscape HD).
@@ -620,15 +628,35 @@ class VideoCompose(BaseTool):
                     # edit_decisions.metadata.compose_target — see above).
                     # fit="pad" letterboxes to preserve all content; fit="cover"
                     # scales-to-fill then centre-crops (no bars, for vertical social).
+                    #
+                    # The geometry stage builds to the cut's punch-in HEADROOM,
+                    # not to the output size. `punch_in`'s zoompan crops a
+                    # region of its input and blows it back up to the output
+                    # size; downscaled to 1080x1920 first, that crop magnifies
+                    # detail thrown away one filter earlier and every punch-in —
+                    # which lands on a beat hit, where the eye is — comes out
+                    # soft. Measured here on 3840x2160 source at z=1.6:
+                    # Laplacian variance of the final frame 37.1 -> 54.8
+                    # (1.48x), wall clock 1.82s -> 1.81s, zero extra ffprobe
+                    # calls (the per-cut ffprobe this replaces). Both fit branches
+                    # scale to the same canvas, and zoompan (which keeps
+                    # s=<output size>) lands it back on target. A cut with no
+                    # punch-in gets headroom 1.0 and renders byte-identically.
+                    #
+                    # Even dimensions are not cosmetic: libx264 + yuv420p
+                    # refuses an odd width or height outright.
+                    headroom = polish_filters.scale_headroom(cut)
+                    geom_w = int(round(target_w * headroom)) // 2 * 2
+                    geom_h = int(round(target_h * headroom)) // 2 * 2
                     if fit_mode == "cover":
                         geom = [
-                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase",
-                            f"crop={target_w}:{target_h}",
+                            f"scale={geom_w}:{geom_h}:force_original_aspect_ratio=increase",
+                            f"crop={geom_w}:{geom_h}",
                         ]
                     else:
                         geom = [
-                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
-                            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black",
+                            f"scale={geom_w}:{geom_h}:force_original_aspect_ratio=decrease",
+                            f"pad={geom_w}:{geom_h}:(ow-iw)/2:(oh-ih)/2:color=black",
                         ]
                     vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
                     af_parts: list[str] = []
@@ -646,7 +674,11 @@ class VideoCompose(BaseTool):
                         )
                     )
                     ramp_to = (cut.get("polish") or {}).get("speed_ramp")
-                    if ramp_to is not None and float(ramp_to) != speed:
+                    # Same question `cut_filters` asked of the picture — a delta
+                    # that rounds away at the emitted precision is not a ramp.
+                    # Asking it differently here would put audio on the ramp
+                    # path while the picture took the constant one.
+                    if ramp_to is not None and polish_filters.is_ramp(speed, float(ramp_to)):
                         af_parts.append(
                             self._build_atempo(
                                 polish_filters.ramp_average_speed(speed, float(ramp_to))
@@ -1454,6 +1486,35 @@ class VideoCompose(BaseTool):
 
         return theme if theme else None
 
+    @staticmethod
+    def _resolve_batch_look(
+        inputs: dict[str, Any], edit_decisions: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The batch look, tool input over batch spine (spec §4.2).
+
+        Precedence is `inputs["batch_look"]` > `edit_decisions.batch_look` >
+        `edit_decisions.metadata.batch_look`. The spine is the spec's home for
+        the shared grade and effect vocabulary and the only one of the three
+        that ends up in the artifact, so it is the default; the tool input
+        stays as the explicit per-call override — a one-off re-render at a
+        different grade without rewriting the batch's edit_decisions.
+
+        Two spellings on the spine, deliberately. The root `batch_look` is the
+        spec's, and the schema declares it (its root is
+        `additionalProperties: false`, so nothing else would validate).
+        `metadata.batch_look` is the older spelling, kept because it is where
+        the other compose knob already lives (`metadata.compose_target`) and
+        `tests/lib/test_reel_plan.py` materialises it per reel.
+        """
+        for candidate in (
+            inputs.get("batch_look"),
+            edit_decisions.get("batch_look"),
+            (edit_decisions.get("metadata") or {}).get("batch_look"),
+        ):
+            if isinstance(candidate, dict):
+                return candidate
+        return None
+
     def _needs_remotion(self, cuts: list[dict]) -> bool:
         """Determine whether Remotion should handle this composition.
 
@@ -1673,6 +1734,46 @@ class VideoCompose(BaseTool):
                             f"{provenance!r} cut(s) — {shown}{more}: {e}"
                         )
 
+        # --- 6. Polish is FFmpeg's, and no other runtime reads it ---
+        # `polish` and the batch look are consumed in `_compose`'s per-cut
+        # encode and NOWHERE else (spec R6: the picture plane belongs to
+        # FFmpeg). Routed to Remotion or HyperFrames, a cut's punch-in, ramp,
+        # flash, whip and grade are simply not read — the render succeeds and
+        # the reel is quietly missing every accent it was cut for. Refuse
+        # rather than re-route: the runtime was locked at proposal and this
+        # repo does not silently downgrade, so the caller decides whether to
+        # drop the polish or to re-lock render_runtime='ffmpeg'.
+        #
+        # Note this contradicts `test_an_honest_identity_locked_plan_reaches_
+        # the_renderer`, which sends a batch_look down all three routes and
+        # expects it through. That expectation is the thing that is wrong: no
+        # runtime but FFmpeg reads `batch_look` anywhere in this file, so what
+        # "reaches the renderer" there reaches it as nothing. Check 5 gating a
+        # look on every route stays correct as defence in depth; check 6 is
+        # what stops the gated look from then being dropped on the floor.
+        runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
+        if runtime and runtime != "ffmpeg":
+            polished = [
+                c.get("id") for c in edit_decisions.get("cuts") or [] if c.get("polish")
+            ]
+            if polished or batch_look:
+                carried = []
+                if polished:
+                    shown = ", ".join(repr(c) for c in polished[:3])
+                    more = f" (+{len(polished) - 3} more)" if len(polished) > 3 else ""
+                    carried.append(f"a polish block on {len(polished)} cut(s) — {shown}{more}")
+                if batch_look:
+                    carried.append("a batch_look")
+                blocks.append(
+                    f"render_runtime={runtime!r} cannot render "
+                    + " and ".join(carried)
+                    + ". The picture plane (punch_in, speed_ramp, transition_out, "
+                    "grade/grain/sharpen) is applied only in the FFmpeg per-cut "
+                    "encode (spec R6); this runtime would drop it silently. "
+                    "Either remove the polish, or lock render_runtime='ffmpeg' "
+                    "at proposal — the tool will not swap runtimes for you."
+                )
+
         # Log warnings
         for w in warnings:
             log.warning("[pre-compose] %s", w)
@@ -1761,7 +1862,7 @@ class VideoCompose(BaseTool):
             resolved_cuts,
             inputs.get("scene_plan"),
             asset_manifest=asset_manifest,
-            batch_look=inputs.get("batch_look"),
+            batch_look=self._resolve_batch_look(inputs, edit_decisions),
         )
         if validation_block is not None:
             return validation_block

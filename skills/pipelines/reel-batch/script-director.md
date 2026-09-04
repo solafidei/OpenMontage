@@ -24,7 +24,7 @@ the words are and when they happen. `edit` owns the caption *style*, `compose` o
 | Reference | `skills/meta/checkpoint-protocol.md` | Checkpointing and cost-ledger rules |
 
 Neither required tool spends — `BeatGrid.estimate_cost` returns `0.0`
-(`tools/analysis/beat_grid.py:202-203`) and `transcriber` runs local faster-whisper
+(`tools/analysis/beat_grid.py:232-233`) and `transcriber` runs local faster-whisper
 (`tools/analysis/transcriber.py:39`). **This stage books nothing;** the ledger opened by the
 cost gate in `idea-director.md` is read only for the checkpoint snapshot.
 
@@ -70,7 +70,7 @@ chooses fewer. Never quietly cut two reels from one track.
 ### 1. Transcribe Each Track First
 
 Order matters and is not negotiable: `beat_grid` only produces its speech report when word
-timestamps are handed to it (`tools/analysis/beat_grid.py:275` — `if words else None`).
+timestamps are handed to it (`tools/analysis/beat_grid.py:320` — `if words else None`).
 Transcribe first, grid second.
 
 ```python
@@ -106,7 +106,7 @@ larger before concluding it has no usable speech.
 bg = BeatGrid().execute({
     "input_path": track,
     "output_dir": work,
-    "transcript_path": transcript_path,  # read as word_timestamps (beat_grid.py:149-153, :356)
+    "transcript_path": transcript_path,  # read as word_timestamps (beat_grid.py:405-409, :417)
     "devoice": True,                     # diagnostic second pass, default True (:131-137)
     "phrase_bars": 4,
 })
@@ -114,21 +114,21 @@ assert bg.success, bg.error
 ```
 
 `bg.data` carries the headline (`bpm`, `n_beats`, `n_bars`, `n_events`, `n_phrases`,
-`n_rolls`, `roll_seconds` — `beat_grid.py:326-342`), the `grid` (`beats_sec`,
-`downbeats_sec`), `phrases`, `rolls`, `energy_phases`, the `speech` report, and
-`proxy_comparison`. **The canonical grid always comes from the raw mix.** The de-voiced
+`n_rolls`, `roll_seconds` — `beat_grid.py:375-391`), the `grid` (`beats_sec`,
+`downbeats_sec`), `phrases`, `rolls`, `energy_phases`, the `speech` report,
+`speech_warning`, and `proxy_comparison`. **The canonical grid always comes from the raw mix.** The de-voiced
 proxy is a diagnostic and never answers the timing question — on a clean track its EQ scoop
 invents a confident tempo where the analyser honestly reported none
-(`beat_grid.py:255-264`). The de-voiced pass surfaces **headline numbers plus its own
+(`beat_grid.py:302-311`). The de-voiced pass surfaces **headline numbers plus its own
 `audiomap_path` and speech report** in `proxy_comparison` — `bpm`, `n_beats`, `n_rolls`,
 `roll_seconds` and the rest of `_headline`
-(`beat_grid.py:308-314`); its beat and downbeat lists are never exposed in `bg.data` at all,
+(`beat_grid.py:356-362`); its beat and downbeat lists are never exposed in `bg.data` at all,
 so there is no de-voiced grid to plan against even if you wanted one. Read it as a
 diagnostic ratio and nothing else — the canonical grid is always `bg.data["grid"]`.
 
 ### 3. Read The Contamination Verdict, Then Pick A Cut Policy
 
-The speech report (`beat_grid.py:494-513`) is measured, not estimated:
+The speech report (`beat_grid.py:519-538`) is measured, not estimated:
 
 | Field | What it says |
 |---|---|
@@ -238,7 +238,7 @@ and the hook lands mid-reel.
    anchor puts the hook more than a beat late, fall back to the nearest **beat** and record
    that the reel opens on a partial bar.
 4. `window_end = min(window_start + 10.0, bg.data["duration_seconds"])` (the analyser's own
-   duration, `beat_grid.py:332`; `tx.data["duration_seconds"]` is the same number),
+   duration, `beat_grid.py:380`; `tx.data["duration_seconds"]` is the same number),
    pulled back to the last snap boundary so the final cut lands on the grid rather than
    mid-hold.
 5. Rebase the hook off `window_start` the way step 6 rebases the caption — the stored
@@ -395,9 +395,16 @@ to snap cuts without re-analysing alongside it.
 ## Common Pitfalls
 
 - **Grid before transcript.** `beat_grid` returns `speech: None` with no words to check
-  against (`beat_grid.py:275`) — a grid and no verdict, and the verdict is the point.
+  against (`beat_grid.py:320`) — a grid and no verdict, and the verdict is the point.
+- **Reading `speech: None` as "the track is clean."** It means *no verdict was reached*,
+  which is a different thing, and there are two ways to get there. Check
+  `bg.data["speech_warning"]`: it is `None` when no transcript was supplied, and a
+  sentence naming the source and the entry count when one WAS supplied and not a single
+  entry carried both a start and an end. That second case is a broken transcript wearing
+  the same face as a clean instrumental — cut policy chosen from it is chosen from
+  nothing. Fix the transcript and re-run rather than planning against the silence.
 - **Cutting to the de-voiced proxy** because it looks cleaner. On a clean track it
-  fabricates confidence (`beat_grid.py:255-264`).
+  fabricates confidence (`beat_grid.py:302-311`).
 - **Writing hook lines instead of finding them**, or choosing the window first and hunting
   for a hook inside it. A hook the track never says cannot be word-synced to it.
 - **Storing track-relative caption times.** The burn adds no offset — every caption in the

@@ -100,7 +100,7 @@ this file, so sibling specs' line anchors are re-read off the final tree after A
 
 ---
 
-## A1. Legacy cost_snapshot tolerance missing from `_enforce_stage_prerequisites` (`lib/checkpoint.py:330`, MAJOR ×2 — python-correctness + schema-contract)
+## A1. Legacy cost_snapshot tolerance missing from `_enforce_stage_prerequisites` (`lib/checkpoint.py:363`, MAJOR ×2 — python-correctness + schema-contract)
 
 The branch defined the read-side tolerance twice (read_checkpoint:625-638,
 get_latest_checkpoint:660-673) and forgot the third validator of already-written
@@ -227,7 +227,7 @@ pipeline.
 
 ---
 
-## A2. decision_log orphan-absorption self-heal crashes on the malformed side files it exists to tolerate (`lib/checkpoint.py:458`, MAJOR ×2 — python-correctness + robustness)
+## A2. decision_log orphan-absorption self-heal crashes on the malformed side files it exists to tolerate (`lib/checkpoint.py:459`, MAJOR ×2 — python-correctness + robustness)
 
 Three verified defects in `_merge_decision_log` (lines 405-462): (a) a side entry with
 no `decision_id` passes the `.get()` filter (line 445-446, `None not in existing_ids`)
@@ -481,7 +481,7 @@ def _log(*decisions: dict) -> dict:
 
 
 **Open questions:** none
-**Dependencies:** Workstream G (tests): builds directly on the acceptance tests specced here — tests/lib/test_checkpoint_cost_snapshot.py additions (A1) and the new tests/lib/test_decision_log_merge.py (A2). G also owns direct get_latest_checkpoint tolerance coverage, which A1's helper extraction makes a one-test job. | Workstream B (cost_tracker): no code dependency, but B1's spec cites the tmp+os.replace idiom at lib/checkpoint.py:598-605 — A does not move that block, so B's anchor stays valid. A2 additionally applies the same idiom to the canonical decision_log.json write, consistent with B1's precedent. | Workstream C / doc specs touching docs/intent/context-cost-spec.md section 2: when the judgment-note instructions are redirected to the supported write_checkpoint path, they should note A2's semantics — malformed decisions in a hand-written artifacts/decision_log.json are skipped with a warning and left in place, never absorbed and never fatal.
+**Dependencies:** Workstream G (tests): builds directly on the acceptance tests specced here — tests/lib/test_checkpoint_cost_snapshot.py additions (A1) and the new tests/lib/test_decision_log_merge.py (A2). G also owns direct get_latest_checkpoint tolerance coverage, which A1's helper extraction makes a one-test job. | Workstream B (cost_tracker): no code dependency, but B1's spec cites the tmp+os.replace idiom at lib/checkpoint.py:599-606 — A does not move that block, so B's anchor stays valid. A2 additionally applies the same idiom to the canonical decision_log.json write, consistent with B1's precedent. | Workstream C / doc specs touching docs/intent/context-cost-spec.md section 2: when the judgment-note instructions are redirected to the supported write_checkpoint path, they should note A2's semantics — malformed decisions in a hand-written artifacts/decision_log.json are skipped with a warning and left in place, never absorbed and never fatal.
 
 
 ---
@@ -503,7 +503,7 @@ B1's atomic replace — do not land them separately.
 ### Fix
 
 `tools/cost_tracker.py`. Adopt the house atomic-write idiom from `write_checkpoint`
-([`lib/checkpoint.py:598-605`](lib/checkpoint.py#L598)). Add `import os` at module top.
+([`lib/checkpoint.py:599-606`](lib/checkpoint.py#L599)). Add `import os` at module top.
 
 `_save` (currently lines 525–541) — replace the final `open("w") + json.dump` with:
 
@@ -897,7 +897,7 @@ budget-check half).
 
 
 **Open questions:** none
-**Dependencies:** Workstream C (skill-block text): the compose-stage cost_log criterion-failure guidance and the checkpoint-protocol/compose-director blocks must instruct: call tracker.non_terminal_entries(), resolve each orphan by the reconcile-vs-refund rules in its docstring (billed or unknowable -> reconcile at estimate with success=False; confirmed unbilled -> refund), never hand-edit cost_log.json. B3's helper is the API those blocks must reference — land B before or with C. | Workstream C (skill-block text): skills that read a corrupt-ledger failure will now see CostLogCorruptedError with recovery text in the message; no skill block should instruct deleting/recreating cost_log.json, which would contradict B1's no-silent-reset policy. | Workstream F (docs): ARCHITECTURE.md $10.00 -> $15.00 text; after B4 it should describe the default as 'from config.yaml budget.total_usd' rather than a hard-coded constructor constant. | Workstream G (tests): the reconcile(success=False) coverage gap is partially closed by B3's acceptance tests (tracker side); G still owns the pipeline-level and user_approved-non-waiver suites and should build on, not duplicate, tests/tools/test_cost_tracker_persistence.py. | Workstream A (checkpoint.py): no code dependency — B1 only copies the tmp+os.replace idiom from lib/checkpoint.py:598-605; if A relocates that block, B1's comment anchor should follow.
+**Dependencies:** Workstream C (skill-block text): the compose-stage cost_log criterion-failure guidance and the checkpoint-protocol/compose-director blocks must instruct: call tracker.non_terminal_entries(), resolve each orphan by the reconcile-vs-refund rules in its docstring (billed or unknowable -> reconcile at estimate with success=False; confirmed unbilled -> refund), never hand-edit cost_log.json. B3's helper is the API those blocks must reference — land B before or with C. | Workstream C (skill-block text): skills that read a corrupt-ledger failure will now see CostLogCorruptedError with recovery text in the message; no skill block should instruct deleting/recreating cost_log.json, which would contradict B1's no-silent-reset policy. | Workstream F (docs): ARCHITECTURE.md $10.00 -> $15.00 text; after B4 it should describe the default as 'from config.yaml budget.total_usd' rather than a hard-coded constructor constant. | Workstream G (tests): the reconcile(success=False) coverage gap is partially closed by B3's acceptance tests (tracker side); G still owns the pipeline-level and user_approved-non-waiver suites and should build on, not duplicate, tests/tools/test_cost_tracker_persistence.py. | Workstream A (checkpoint.py): no code dependency — B1 only copies the tmp+os.replace idiom from lib/checkpoint.py:599-606; if A relocates that block, B1's comment anchor should follow.
 
 
 ---
@@ -1641,7 +1641,7 @@ Rewrite section 2 (lines 64–84, `### 2. The judgment note` through the `Rules:
 > Judgment state goes through the **supported decision-log path**: schema-valid entries in
 > the `decision_log` artifact of the gate checkpoint, which `write_checkpoint()` merges
 > into the canonical `projects/<id>/decision_log.json` via `_merge_decision_log()`
-> ([`lib/checkpoint.py:405`](../../lib/checkpoint.py#L405)). **Never hand-write
+> ([`lib/checkpoint.py:511`](../../lib/checkpoint.py#L511)). **Never hand-write
 > `projects/<id>/artifacts/decision_log.json`** — nothing in the codebase writes that
 > file, Backlot prefers it over the canonical log when both exist
 > ([`backlot/state.py`](../../backlot/state.py), artifact-first fallback), and
@@ -1758,7 +1758,7 @@ Near zero — status-text only. The scenario the finding warns about (a future s
 
 ### Fix
 
-Line 58: `[`lib/checkpoint.py:435`](../../lib/checkpoint.py#L435)` → `lib/checkpoint.py:465` / `#L465` — `def write_checkpoint(` sits at :465 on the current branch tree. **Final number is set after workstream A lands** (A refactors `lib/checkpoint.py` again; every insertion above :465 shifts it) — see Dependencies.
+Line 58: `[`lib/checkpoint.py:435`](../../lib/checkpoint.py#L435)` → `lib/checkpoint.py:621` / `#L621` — `def write_checkpoint(` sits at :465 on the current branch tree. **Final number is set after workstream A lands** (A refactors `lib/checkpoint.py` again; every insertion above :465 shifts it) — see Dependencies.
 
 Full anchor sweep of the spec, current status:
 
@@ -2068,7 +2068,7 @@ The finding is drift between copies; A1 collapses the copies into
 `_validate_tolerating_legacy_cost_snapshot`, and A's own risk note hands G exactly
 this: "the helper makes a single tolerance test sufficient per entry point." Testing
 the public function (not the helper) means these tests are meaningful both before A
-lands (they pin the current duplicated hunk at lib/checkpoint.py:660-673) and after
+lands (they pin the current duplicated hunk at lib/checkpoint.py:661-674) and after
 (they pin the call site that a dedup refactor could drop). Alternative — unit-testing
 A's helper directly — lost: the failure mode is a *call site* reverting to bare
 `validate_checkpoint`, which a helper unit test cannot see.

@@ -29,7 +29,7 @@ tool only reports numbers.
 from __future__ import annotations
 
 import bisect
-import importlib.util
+import importlib
 import json
 import shutil
 import subprocess
@@ -72,6 +72,36 @@ _DEVOICE_CHAIN = (
 )
 _PROXY_SR = 22050  # the analyser's own working rate (analyze-beatgrid.py:35)
 _RMS_FRAME = 0.02  # seconds — peak_rms is the loudest 20 ms inside a word
+
+# Answers of the real `import`, kept for the life of the process. See
+# _importable() for why the import has to be real and why the cache is here.
+_IMPORT_PROBE: dict[str, bool] = {}
+
+
+def _importable(module: str) -> bool:
+    """Can this module actually be imported, not merely located?
+
+    find_spec only proves the module is INSTALLED. The common librosa failure
+    is installed-but-unimportable — a numba/llvmlite/numpy ABI mismatch — where
+    the spec is found, preflight reports the dependency satisfied, and the
+    failure resurfaces much later as an opaque "analyze-beatgrid.py failed:
+    ..." out of the subprocess, pointing at the analyser instead of at the
+    broken install. So the probe imports.
+
+    The original concern was real: librosa costs seconds to import and
+    get_status() runs for every tool at preflight. Hence the cache — the import
+    is paid at most once per process, and every later get_status() is a dict
+    lookup. Any exception counts as unimportable: a half-built native extension
+    raises plenty of things that are not ImportError.
+    """
+    if module not in _IMPORT_PROBE:
+        try:
+            importlib.import_module(module)
+        except Exception:
+            _IMPORT_PROBE[module] = False
+        else:
+            _IMPORT_PROBE[module] = True
+    return _IMPORT_PROBE[module]
 
 
 class BeatGrid(BaseTool):
@@ -126,7 +156,8 @@ class BeatGrid(BaseTool):
             "output_dir": {
                 "type": "string",
                 "description": "Directory for the audiomap JSON and the proxy WAV "
-                "(default: alongside the input file)",
+                "(default: projects/_analysis/beat_grid_<stem>, never beside the "
+                "input file)",
             },
             "devoice": {
                 "type": "boolean",
@@ -171,6 +202,7 @@ class BeatGrid(BaseTool):
             "phrases": {"type": "array"},
             "rolls": {"type": "array"},
             "speech": {"type": "object"},
+            "speech_warning": {"type": ["string", "null"]},
             "proxy_comparison": {"type": "object"},
         },
     }
@@ -190,10 +222,8 @@ class BeatGrid(BaseTool):
         for binary in ("ffmpeg", "ffprobe"):
             if not shutil.which(binary):
                 return ToolStatus.UNAVAILABLE
-        # find_spec rather than a real import: librosa costs seconds to import
-        # and get_status() runs for every tool at preflight.
         for module in ("librosa", "soundfile"):
-            if importlib.util.find_spec(module) is None:
+            if not _importable(module):
                 return ToolStatus.UNAVAILABLE
         if not _ANALYZER.exists():
             return ToolStatus.UNAVAILABLE
@@ -228,13 +258,28 @@ class BeatGrid(BaseTool):
         if duration <= 0:
             return ToolResult(success=False, error=f"Zero-length audio: {input_path.name}")
 
-        output_dir = Path(inputs.get("output_dir", input_path.parent))
-        output_dir.mkdir(parents=True, exist_ok=True)
         stem = input_path.stem
+        # Never default INTO the operator's media folder. input_path is normally
+        # someone's project asset or source track, and defaulting to its parent
+        # dropped <stem>_devoiced.wav, <stem>_audiomap.json and
+        # <stem>_audiomap_devoiced.json next to their footage. Every caller in
+        # the repo passes an explicit output_dir already (the reel-batch
+        # script-director hands us "projects/<id>/analysis"), so this default
+        # only ever catches ad-hoc runs — and the tool is not told a project id,
+        # so it uses the same unowned-analysis workspace video_analyzer.py:158
+        # uses. Keyed by stem rather than a timestamp because this tool is
+        # DETERMINISTIC and keyed on input_path: re-running the same track must
+        # land on the same audiomap, not accumulate a new directory per run.
+        output_dir = (
+            Path(inputs["output_dir"])
+            if inputs.get("output_dir")
+            else Path("projects") / "_analysis" / f"beat_grid_{stem}"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
         devoice = inputs.get("devoice", True)
         phrase_bars = int(inputs.get("phrase_bars", 4))
 
-        words, words_error = self._load_words(inputs)
+        words, words_error, words_warning = self._load_words(inputs)
         if words_error:
             return ToolResult(success=False, error=words_error)
 
@@ -286,6 +331,9 @@ class BeatGrid(BaseTool):
             "grid": audiomap.get("grid", {}),
             "energy_phases": audiomap.get("energy_phases", []),
             "speech": speech,
+            # null when nothing was supplied; a sentence when a transcript was
+            # supplied and none of it could be used (_load_words).
+            "speech_warning": words_warning,
             "proxy_comparison": None,
         }
 
@@ -342,27 +390,49 @@ class BeatGrid(BaseTool):
         }
 
     @staticmethod
-    def _load_words(inputs: dict[str, Any]) -> tuple[list[dict], str | None]:
-        """Word timestamps from inline input or a transcriber transcript JSON."""
+    def _load_words(inputs: dict[str, Any]) -> tuple[list[dict], str | None, str | None]:
+        """Word timestamps from inline input or a transcriber transcript JSON.
+
+        Returns (words, error, warning). The warning exists because a transcript
+        with no usable entries and no transcript at all both end as
+        `speech: None`, and the operator cannot tell the two apart: the
+        cross-check that is the whole point of the tool silently does not
+        happen, and the director reads "no verdict" as "nothing to worry
+        about". It stays a WARNING, not an error — an unusable transcript is no
+        reason to throw away an otherwise-good grid.
+        """
+        source: str | None = None
         words = inputs.get("word_timestamps")
-        if words is None and inputs.get("transcript_path"):
+        if words is not None:
+            source = "word_timestamps"
+        elif inputs.get("transcript_path"):
             path = Path(inputs["transcript_path"])
+            source = f"transcript_path {path}"
             if not path.exists():
-                return [], f"transcript_path not found: {path}"
+                return [], f"transcript_path not found: {path}", None
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as exc:
-                return [], f"Failed to read transcript {path}: {exc}"
+                return [], f"Failed to read transcript {path}: {exc}", None
             words = loaded.get("word_timestamps") if isinstance(loaded, dict) else loaded
-        if not words:
-            return [], None
+        if source is None:
+            return [], None, None  # nothing was supplied — nothing to report
+        entries = words if isinstance(words, list) else []
         clean = [
             w
-            for w in words
+            for w in entries
             if isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None
         ]
+        if not clean:
+            return (
+                [],
+                None,
+                f"{source} supplied {len(entries)} entries, none of them carrying both a "
+                "start and an end — the speech cross-check was SKIPPED. `speech` is null "
+                "because the transcript was unusable, not because no transcript was given.",
+            )
         clean.sort(key=lambda w: float(w["start"]))
-        return clean, None
+        return clean, None, None
 
     def _write_proxy(self, src: Path, dst: Path, duration: float) -> str | None:
         """One ffmpeg pass: mono, the analyser's rate, speech bands ducked."""
