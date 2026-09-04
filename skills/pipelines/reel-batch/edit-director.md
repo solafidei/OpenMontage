@@ -248,11 +248,15 @@ effects in five cuts is an edit; five is a seizure.
 ### 4. One Look For The Whole Sitting — And The Identity Rule
 
 The batch look is `{"grade": ..., "grain": ..., "sharpen": ...}`, stamped
-identically on every cut of every reel. `edit_decisions` has no typed slot for
-it, so it rides in `metadata.batch_look` — `metadata` is open (no
-`additionalProperties: false`, `schemas/artifacts/edit_decisions.schema.json:263-271`),
-the same route `compose_target`
-already takes to the renderer (`tools/video/video_compose.py:508-515`).
+identically on every cut of every reel. Write it to the spine ROOT —
+`edit_decisions.batch_look` — which is the spec's home for it (§4.2) and now a
+declared property of the schema, so it validates at checkpoint write and the
+board and the audit trail can see what grade a batch was rendered with.
+`metadata.batch_look` is still read as the last rung of the precedence chain
+(`tools/video/video_compose._resolve_batch_look`) so spines already written that
+way keep working — but do not author it there: `metadata` is open, so a typo in
+the key there is silently a batch with no look, while the root is closed and
+rejects one.
 `compose-director` hands it over as `video_compose`'s `batch_look` input
 (`:205-219`, grade/grain/sharpen at `:215-217`), read at `:485` and applied per
 cut at `:623-626`.
@@ -427,7 +431,7 @@ claimed the segments — this is the last stage that can fix a collision cheaply
   at 30fps, `zoompan` re-times at its own fps, and the caption pass re-encodes again. A reel
   budgeted at exactly 10.0 lands near 10.1 and fails compose's own probe gate — which stays
   at 10.0, because that gate measures the actual deliverable.
-- `metadata.batch_look` survives `look_filters(look, "operator_footage")`; no
+- `batch_look` on the spine root survives `look_filters(look, "operator_footage")`; no
   grain; no `color_grade` profile name.
 - `subtitles` set, `subtitles.source` absent, `audio.music` absent.
 - `reel_plan` has one entry per reel and its `cut_ids` partition `cuts[]`;

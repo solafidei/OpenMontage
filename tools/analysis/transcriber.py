@@ -126,11 +126,14 @@ class Transcriber(BaseTool):
         # re-run of the same file lands on the same transcript rather than
         # accumulating a directory per run. Every pipeline caller passes an
         # explicit output_dir, so this only catches ad-hoc runs.
+        # .resolve(): the returned artifact path outlives this call — beat_grid
+        # consumes it as `transcript_path`, and a later stage running from a
+        # different cwd cannot open a relative one.
         output_dir = (
             Path(inputs["output_dir"])
             if inputs.get("output_dir")
             else Path("projects") / "_analysis" / f"transcriber_{input_path.stem}"
-        )
+        ).resolve()
 
         if not input_path.exists():
             return ToolResult(success=False, error=f"Input file not found: {input_path}")

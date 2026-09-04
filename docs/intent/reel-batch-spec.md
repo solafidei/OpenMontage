@@ -218,7 +218,7 @@ of the cut schema.
 One mechanism, one word, two machine checks, one gate, one test file.
 
 **(a) Classification.** Every file entering from the operator's pool is written to the corpus with
-`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:44-149`). There is no
+`identity_locked=True`, a typed field on `ClipRecord` (`lib/corpus.py:51-215`). There is no
 classification step and no per-clip judgement: **the pool is his footage, so the whole pool is
 locked.**
 
@@ -417,8 +417,10 @@ The `edit` stage therefore emits **two** artifacts:
   `video_compose` reads the look off the spine and keeps its `batch_look` tool input as an explicit
   override, in that order. The tool input alone was not enough: a look passed only as an argument is
   not in the artifact, so the board and the audit trail cannot say what grade a batch was rendered
-  with. Until the `batch_look` root property lands (§4.3) the spine spelling that validates is
-  `metadata.batch_look`, alongside the `metadata.compose_target` knob already there.
+  with. Both spine spellings validate (§4.3). The root `batch_look` is canonical and is what
+  `video_compose` prefers; `metadata.batch_look` — alongside the `metadata.compose_target` knob
+  already there — is still read, one place further down the precedence chain, so spines written
+  before the root property shipped keep working.
 - **`reel_plan` — a new registered artifact.** Carries exactly the axes the spine structurally cannot
   hold: per-reel `reel_id`, `music_asset_id`, `subtitle_source`, `hook`, and `cut_ids[]`.
 
@@ -439,16 +441,26 @@ Four additive, optional, backward-compatible changes to
 | `identity_lock` | root `metadata` | boolean | Per-project arming switch, not a per-clip label — correctly opaque |
 | `batch_look` | root | object — `grade`, `grain`, `sharpen` | The identity gate asserts on it against every cut's `provenance`; a look the schema cannot see is a look the audit trail cannot see |
 
-`batch_look` is the one of the four still outstanding: the schema root is `additionalProperties:
-false`, so a spine carrying it fails `validate_artifact` at checkpoint write. `video_compose` reads
-it today from `metadata.batch_look`, which validates as-is; the root spelling is read too and starts
-working the moment the property is added.
+All four have shipped. `batch_look` was the last, and the two claims recorded here while it was
+outstanding are now false and are corrected rather than deleted: the schema root is
+`additionalProperties: false`, which is exactly why the property had to be declared there — and it
+now is, so a spine carrying a root `batch_look` **passes** `validate_artifact("edit_decisions", ...)`
+and writes at checkpoint. It is no longer true that `video_compose` reads the look "from
+`metadata.batch_look`" alone either: `_resolve_batch_look` tries the `batch_look` tool input, then
+`edit_decisions.batch_look`, then `edit_decisions.metadata.batch_look`, and returns the first dict
+it finds — the root spelling outranks the metadata one.
+
+Carrying it per reel is a separate step from declaring it. `lib/reel_plan.py`'s `materialise` copies
+a fixed list of root properties down from the spine, and `batch_look` was not on it: a spine written
+to the newly-blessed root spelling materialised five reels whose `batch_look` was `None` — no grade,
+no grain, no sharpen, and nothing invalid for a validator or a checkpoint to object to. Both
+spellings now reach every reel, and `tests/lib/test_reel_plan.py` pins it.
 
 Plus two new registered artifacts: `reel_plan` and `clip_ledger`, both added to `ARTIFACT_NAMES`
 (`schemas/artifacts/__init__.py:13-34`); `clip_ledger` also to `SUPPLEMENTARY_ARTIFACTS`
 (`lib/checkpoint.py:44-50`).
 
-And on `ClipRecord` (`lib/corpus.py:44-149`): `start_seconds`, `end_seconds`, `sharpness`,
+And on `ClipRecord` (`lib/corpus.py:51-215`): `start_seconds`, `end_seconds`, `sharpness`,
 `identity_locked`.
 
 **Not fixed here:** the `cut.type` divergence (**D5**). The schema rejects a key the shipped code

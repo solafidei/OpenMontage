@@ -93,15 +93,45 @@ def _importable(module: str) -> bool:
     is paid at most once per process, and every later get_status() is a dict
     lookup. Any exception counts as unimportable: a half-built native extension
     raises plenty of things that are not ImportError.
+
+    SystemExit has to be caught too, and it is not an Exception. Importing a
+    module RUNS it, and a broken install's import-time version guard commonly
+    ends in sys.exit(...) rather than a raise — which, caught by nothing here,
+    left get_status() and with it the whole ToolRegistry preflight to die on
+    one unrelated tool's dependency. find_spec could never do that, so the
+    crash path arrived with the honest-import fix. A probe reporting "this
+    module is unusable" is exactly the right answer to that, so it is swallowed.
+    KeyboardInterrupt is the other BaseException in reach and is deliberately
+    NOT swallowed: it is the operator asking the run to stop, and turning it
+    into "dependency missing" would both ignore them and lie about why.
     """
     if module not in _IMPORT_PROBE:
         try:
             importlib.import_module(module)
-        except Exception:
+        except KeyboardInterrupt:
+            raise
+        except BaseException:
             _IMPORT_PROBE[module] = False
         else:
             _IMPORT_PROBE[module] = True
     return _IMPORT_PROBE[module]
+
+
+def _numeric(value: Any) -> bool:
+    """Will float() accept this? Asked before the word list is sorted.
+
+    A transcript is an untrusted document — hand-edited, or written by a
+    producer that spells a missing timestamp "n/a" instead of null. Those
+    entries walked through a `start is not None` filter and then raised an
+    uncaught ValueError out of `float()` inside the sort, taking down a run
+    whose grid was fine. This tool's stated contract is the opposite: an
+    unusable transcript costs you the cross-check, never the grid.
+    """
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 class BeatGrid(BaseTool):
@@ -270,11 +300,16 @@ class BeatGrid(BaseTool):
         # uses. Keyed by stem rather than a timestamp because this tool is
         # DETERMINISTIC and keyed on input_path: re-running the same track must
         # land on the same audiomap, not accumulate a new directory per run.
+        # .resolve() because artifacts and audiomap_path are handed back to a
+        # caller that opens them later. The old default came off the caller's
+        # absolute input_path.parent, so those paths were always absolute; a
+        # bare relative default silently swapped that for one that only
+        # resolves from the directory beat_grid happened to run in.
         output_dir = (
             Path(inputs["output_dir"])
             if inputs.get("output_dir")
             else Path("projects") / "_analysis" / f"beat_grid_{stem}"
-        )
+        ).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         devoice = inputs.get("devoice", True)
         phrase_bars = int(inputs.get("phrase_bars", 4))
@@ -402,9 +437,16 @@ class BeatGrid(BaseTool):
         reason to throw away an otherwise-good grid.
         """
         source: str | None = None
+        shadowed: str | None = None
         words = inputs.get("word_timestamps")
         if words is not None:
             source = "word_timestamps"
+            # Inline words win whenever the key is present — an empty list
+            # included — so a transcript_path handed over with them is never
+            # opened. The warning has to say that: blaming the unread file's
+            # words for being unusable is a fresh lie on the one channel whose
+            # entire job is explaining why the cross-check did not run.
+            shadowed = str(inputs["transcript_path"]) if inputs.get("transcript_path") else None
         elif inputs.get("transcript_path"):
             path = Path(inputs["transcript_path"])
             source = f"transcript_path {path}"
@@ -421,16 +463,26 @@ class BeatGrid(BaseTool):
         clean = [
             w
             for w in entries
-            if isinstance(w, dict) and w.get("start") is not None and w.get("end") is not None
+            if isinstance(w, dict) and _numeric(w.get("start")) and _numeric(w.get("end"))
         ]
         if not clean:
-            return (
-                [],
-                None,
-                f"{source} supplied {len(entries)} entries, none of them carrying both a "
-                "start and an end — the speech cross-check was SKIPPED. `speech` is null "
-                "because the transcript was unusable, not because no transcript was given.",
+            reason = (
+                f"{source} was empty"
+                if not entries
+                else f"{source} supplied {len(entries)} entries, none of them carrying a "
+                "numeric start and end"
             )
+            warning = (
+                f"{reason} — the speech cross-check was SKIPPED. `speech` is null "
+                "because the transcript was unusable, not because no transcript was given."
+            )
+            if shadowed:
+                warning += (
+                    f" transcript_path {shadowed} was NOT read: inline word_timestamps "
+                    "take precedence whenever the key is present, so the file could not "
+                    "rescue the cross-check."
+                )
+            return [], None, warning
         clean.sort(key=lambda w: float(w["start"]))
         return clean, None, None
 

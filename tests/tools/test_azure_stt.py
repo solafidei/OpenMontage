@@ -240,3 +240,61 @@ class TestExecute:
         res = AzureSpeechToText().execute({"input_path": str(audio), "output_dir": str(tmp_path)})
         assert not res.success
         assert "401" in res.error
+
+
+# ---- output ergonomics ----
+
+class TestOutputLocation:
+    def test_never_writes_beside_the_source_media(self, azure_env, tmp_path, monkeypatch):
+        """azure_stt is PREFERRED over `transcriber` whenever AZURE_SPEECH_KEY is
+        set, so defaulting output_dir to input_path.parent dropped
+        <stem>_transcript.json straight into the operator's footage pool on the
+        path that actually runs. transcriber and beat_grid were fixed; this was
+        the sibling that kept the defect alive."""
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(SAMPLE_PAYLOAD))
+
+        media = tmp_path / "footage"
+        media.mkdir()
+        audio = media / "clip.wav"
+        audio.write_bytes(b"RIFF....")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+
+        res = AzureSpeechToText().execute({"input_path": str(audio)})
+
+        assert res.success, res.error
+        assert [p.name for p in media.iterdir()] == ["clip.wav"], (
+            f"azure_stt wrote into the source media folder: "
+            f"{sorted(p.name for p in media.iterdir())}"
+        )
+        assert res.artifacts
+        written = Path(res.artifacts[0])
+        assert written.is_absolute(), f"{written} is relative — unopenable from another cwd"
+        assert written.is_relative_to(workspace.resolve())
+        assert "azure_stt_clip" in written.parts
+
+    def test_artifact_path_survives_a_change_of_directory(
+        self, azure_env, tmp_path, monkeypatch
+    ):
+        """The transcript is opened later, by callers that do not share our cwd."""
+        import requests
+
+        monkeypatch.setattr(requests, "post", lambda *a, **k: _FakeResponse(SAMPLE_PAYLOAD))
+
+        audio = tmp_path / "clip.wav"
+        audio.write_bytes(b"RIFF....")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(workspace)
+
+        res = AzureSpeechToText().execute({"input_path": str(audio)})
+        assert res.success, res.error
+
+        monkeypatch.chdir(elsewhere)
+        for artifact in res.artifacts:
+            assert Path(artifact).exists(), f"{artifact} does not resolve from {elsewhere}"

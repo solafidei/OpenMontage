@@ -469,3 +469,149 @@ def test_never_writes_beside_the_source_media(music_only, tmp_path, monkeypatch)
         assert Path(artifact).resolve().is_relative_to(workspace.resolve()), (
             f"{artifact} escaped the workspace"
         )
+
+
+@needs_deps
+def test_default_output_paths_are_absolute(music_only, tmp_path, monkeypatch) -> None:
+    """The paths are read back later, from somewhere else.
+
+    The old default came off the caller's absolute input_path.parent, so the
+    artifacts and audiomap_path were always absolute. Moving the default to
+    `projects/_analysis/...` made them relative to whatever cwd beat_grid
+    happened to run in — a consumer that opens them from another directory,
+    or after the runner has moved, gets a nonexistent path. Asserted from a
+    DIFFERENT cwd on purpose: resolving them while still standing in the
+    workspace is what hid this the first time.
+    """
+    media = tmp_path / "media"
+    media.mkdir()
+    track = media / "bed.wav"
+    shutil.copy(music_only, track)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(workspace)
+
+    result = BeatGrid().execute({"input_path": str(track), "devoice": False})
+    assert result.success, result.error
+
+    monkeypatch.chdir(elsewhere)
+    paths = [*result.artifacts, result.data["audiomap_path"]]
+    for path in paths:
+        assert Path(path).is_absolute(), f"{path} is relative — it only works from one cwd"
+        assert Path(path).exists(), f"{path} does not resolve from {elsewhere}"
+
+
+# ----------------------------------------------------------------------
+# the warning channel must not itself misinform
+# ----------------------------------------------------------------------
+def test_empty_word_timestamps_do_not_get_the_transcript_blamed() -> None:
+    """An empty inline list shadows transcript_path — say THAT, not something else.
+
+    `word_timestamps: []` wins over a perfectly good transcript_path, which is
+    then never opened. The warning claimed the supplied word timestamps were
+    unusable, which is at best half the story: it sent the operator looking at
+    a list while the file they actually pointed at sat unread.
+    """
+    _, error, warning = BeatGrid()._load_words(
+        {"word_timestamps": [], "transcript_path": "/footage/vo_transcript.json"}
+    )
+
+    assert error is None
+    assert warning
+    assert "/footage/vo_transcript.json" in warning, (
+        "the shadowed transcript is the thing the operator has to know about"
+    )
+    assert "NOT read" in warning
+    # and it must not describe the unread file's contents
+    assert "entries" not in warning
+
+
+def test_non_numeric_timestamps_warn_instead_of_crashing() -> None:
+    """`start: "n/a"` walked the `is not None` filter straight into float().
+
+    The result was an uncaught ValueError out of execute() — a whole run lost
+    to a bad transcript, which is exactly the trade _load_words' docstring
+    promises never to make ("an unusable transcript is no reason to throw away
+    an otherwise-good grid").
+    """
+    words, error, warning = BeatGrid()._load_words(
+        {"word_timestamps": [{"word": "one", "start": "n/a", "end": "n/a"}]}
+    )
+
+    assert words == []
+    assert error is None
+    assert warning and "word_timestamps" in warning
+
+    # a mixed list keeps the usable half and still sorts
+    usable, error, warning = BeatGrid()._load_words(
+        {
+            "word_timestamps": [
+                {"word": "late", "start": 2.0, "end": 2.5},
+                {"word": "bad", "start": "n/a", "end": 3.0},
+                {"word": "early", "start": 1.0, "end": 1.5},
+            ]
+        }
+    )
+    assert [w["word"] for w in usable] == ["early", "late"]
+    assert error is None and warning is None
+
+
+def test_get_status_survives_a_dependency_that_exits_at_import(monkeypatch) -> None:
+    """An honest import RUNS the module — including its version guard.
+
+    A broken install's guard commonly ends in sys.exit(...), and SystemExit is
+    not an Exception, so it escaped _importable(), escaped get_status(), and
+    killed the whole ToolRegistry preflight over one tool's dependency.
+    find_spec could never do that; the crash arrived with the import probe.
+    KeyboardInterrupt is the BaseException that must still get through — it is
+    the operator asking to stop, not a broken dependency.
+    """
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    monkeypatch.setattr(beat_grid_module.shutil, "which", lambda name: "/usr/bin/" + name)
+    real = importlib.import_module
+
+    def exits_at_import(name, *args, **kwargs):
+        if name == "librosa":
+            raise SystemExit("librosa requires numpy<2.3; found 2.3.1")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(beat_grid_module.importlib, "import_module", exits_at_import)
+
+    assert BeatGrid().get_status() is ToolStatus.UNAVAILABLE
+
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    monkeypatch.setattr(
+        beat_grid_module.importlib,
+        "import_module",
+        lambda name, *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        BeatGrid().get_status()
+
+
+def test_preflight_survives_a_dependency_that_exits_at_import(monkeypatch) -> None:
+    """The blast radius, not just the probe: the real registry preflight.
+
+    get_status() is called for every discovered tool, so one SystemExit out of
+    beat_grid's probe took the whole menu with it.
+    """
+    from tools.tool_registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.discover("tools")
+
+    monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    real = importlib.import_module
+
+    def exits_at_import(name, *args, **kwargs):
+        if name == "librosa":
+            raise SystemExit("librosa requires numpy<2.3; found 2.3.1")
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(beat_grid_module.importlib, "import_module", exits_at_import)
+
+    menu = registry.provider_menu()
+
+    assert menu is not None

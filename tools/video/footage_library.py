@@ -541,8 +541,35 @@ def _grey_frame(path: Path) -> Optional[np.ndarray]:
         return None
 
 
+# The resolution the focus measure is taken at, whatever the source is shot at.
+# Laplacian variance is a FIXED-PIXEL-NEIGHBOURHOOD measure, so it falls as
+# resolution rises: adjacent pixels of a 4K frame are more alike than adjacent
+# pixels of the same scene at 1080p, and the discrete Laplacian shrinks with
+# them. Measured on this repo's own gym pool (2160x3840, phone video, in
+# focus): the SAME frame scores 23.0 native, 143.8 normalised here and 481.9 at
+# 720p — a 20x swing from nothing but a resize. Against a floor of 60.0 that
+# gate was reading resolution, not focus, and it rejected 53 of 56 sharp
+# segments while passing the same footage downscaled.
+SHARPNESS_NORMALISED_LONG_SIDE = 1920
+
+
 def _sharpness(grey: np.ndarray) -> float:
-    """Variance of the Laplacian — the standard cheap focus measure."""
+    """Variance of the Laplacian at a normalised resolution — a focus measure.
+
+    Normalising the MEASUREMENT rather than the threshold is what keeps
+    `DEFAULT_SHARPNESS_FLOOR` meaning the same thing across a mixed pool, and
+    makes this a no-op (factor 1) for the ~1080p sources the floor was set on.
+
+    Box-average rather than subsample because dropping pixels aliases detail
+    back in; measured on a blurred frame carrying sensor noise, subsampling
+    scores 4x higher than box-averaging (2888 vs 721). Note what that measurement
+    also says: BOTH are far above the floor, so noise still reads as focus here.
+    That is a known limit of Laplacian variance and it predates this function —
+    do not read the box-average as making the gate noise-proof.
+    """
+    if grey.shape[0] < 3 or grey.shape[1] < 3:
+        return 0.0
+    grey = _normalise_for_sharpness(grey)
     if grey.shape[0] < 3 or grey.shape[1] < 3:
         return 0.0
     lap = (
@@ -553,6 +580,22 @@ def _sharpness(grey: np.ndarray) -> float:
         - 4.0 * grey[1:-1, 1:-1]
     )
     return float(lap.var())
+
+
+def _normalise_for_sharpness(grey: np.ndarray) -> np.ndarray:
+    """Box-downsample so the long side is about SHARPNESS_NORMALISED_LONG_SIDE."""
+    height, width = grey.shape
+    factor = max(1, int(round(max(height, width) / SHARPNESS_NORMALISED_LONG_SIDE)))
+    if factor == 1:
+        return grey
+    trimmed_h, trimmed_w = (height // factor) * factor, (width // factor) * factor
+    if trimmed_h < factor or trimmed_w < factor:
+        return grey
+    return (
+        grey[:trimmed_h, :trimmed_w]
+        .reshape(trimmed_h // factor, factor, trimmed_w // factor, factor)
+        .mean(axis=(1, 3))
+    )
 
 
 def _motion_score(greys: list[np.ndarray]) -> float:

@@ -276,3 +276,79 @@ def test_interval_on_an_image_row_refuses_rather_than_reading_zero_length():
     )
     with pytest.raises(ValueError, match="undefined for image row"):
         rec.interval
+
+
+# ----------------------------------------------------------------------
+# The three shapes the out-point guard could not see
+# ----------------------------------------------------------------------
+#
+# Each of these reached `interval` and was answered with a degenerate range
+# rather than an error, which is the whole failure the trust boundary above
+# exists to prevent — a zero-length cut ffmpeg drops without a word.
+
+
+def _row(**kw) -> ClipRecord:
+    """A minimal row; every field the guards read is passed by the caller."""
+    return ClipRecord(
+        clip_id="pool_gym_set_02",
+        source="pool",
+        source_id="gym_set_02",
+        source_url="",
+        local_path="clips/gym_set_02.mp4",
+        **kw,
+    )
+
+
+def test_in_point_past_the_end_of_the_file_is_rejected_at_interval():
+    # `start_seconds` alone is the legal open-ended shape, so it survives
+    # construction — but resolved against `duration` it is the same inverted
+    # interval the pairwise check rejects, written where that check cannot
+    # see it. It used to answer (30.0, 10.0).
+    rec = _row(duration=10.0, start_seconds=30.0)
+    with pytest.raises(ValueError, match="empty or inverted"):
+        rec.interval
+
+
+def test_a_video_row_with_no_duration_is_rejected_rather_than_read_as_zero_length():
+    # This is the exact (0.0, 0.0) the image guard was written to stop,
+    # reached by a row `kind == "video"` — so it also passes rank_by_text's
+    # kind filter and lands on the caller that guard was protecting.
+    rec = _row(kind="video", duration=0.0)
+    with pytest.raises(ValueError, match="empty or inverted"):
+        rec.interval
+
+
+@pytest.mark.parametrize("spelling", ["IMAGE", "Image", " image", "image "])
+def test_an_alternately_spelled_image_row_still_hits_the_still_guard(spelling):
+    # `kind` is read straight off disk by `ClipRecord(**data)`, so the exact
+    # `== "image"` compare was bypassable by capitalisation or a stray space:
+    # the row sailed through and was answered (0.0, 0.0) off its zero duration.
+    rec = _row(kind=spelling, duration=0.0)
+    assert rec.kind == "image"
+    with pytest.raises(ValueError, match="undefined for image row"):
+        rec.interval
+
+
+def test_a_kind_no_adapter_writes_is_refused_at_construction():
+    # Not merely unknown: `rank_by_text` filters on `rec.kind == kind`, so
+    # such a row can never be returned by any query the pipeline issues.
+    with pytest.raises(ValueError, match="kind must be one of"):
+        _row(kind="gif", duration=5.0)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_out_point_is_rejected_at_construction(bad):
+    # NaN compares False against every bound, so `end_seconds <= 0` and
+    # `end_seconds <= start_seconds` both passed it through.
+    with pytest.raises(ValueError, match="end_seconds must be a finite number"):
+        _row(duration=45.0, start_seconds=1.0, end_seconds=bad)
+
+
+def test_a_row_mutated_after_construction_is_still_caught_at_interval():
+    # The dataclass is not frozen — `Corpus.add` stamps `added_at` on the
+    # record it is handed — so __post_init__ alone cannot be the whole guard.
+    rec = _row(duration=45.0, start_seconds=4.0, end_seconds=9.5)
+    assert rec.interval == (4.0, 9.5)
+    rec.end_seconds = -5.0
+    with pytest.raises(ValueError, match="empty or inverted"):
+        rec.interval

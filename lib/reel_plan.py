@@ -66,7 +66,25 @@ def materialise(spine: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     }
     # edit_decisions is additionalProperties:false at the root — only real properties
     # may be carried, or the materialised reel fails validation at compose.
-    for carried in ("renderer_family", "composition_mode", "transitions"):
+    #
+    # `batch_look` is on this list because it is the spelling the schema now declares
+    # and the one `video_compose._resolve_batch_look` prefers over metadata.batch_look
+    # (tools/video/video_compose.py:1510-1512). Leaving it off carried the look only
+    # for spines using the older metadata spelling — a spine written to the blessed
+    # root spelling materialised five reels with `batch_look` None, still schema-valid,
+    # and rendered them with no grade at all.
+    #
+    # `bespoke` is here because `composition_mode` is: video_compose routes on
+    # composition_mode == "atelier" and then requires bespoke.entry and
+    # bespoke.composition_id, so carrying the mode without the block turns an atelier
+    # batch into five hard failures ("atelier mode requires edit_decisions.bespoke...").
+    for carried in (
+        "renderer_family",
+        "composition_mode",
+        "bespoke",
+        "transitions",
+        "batch_look",
+    ):
         if spine.get(carried):
             reel[carried] = spine[carried]
     return reel

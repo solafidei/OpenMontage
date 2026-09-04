@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import uuid
 from contextlib import contextmanager
@@ -93,6 +94,37 @@ class ClipReuseError(Exception):
     pass
 
 
+def _canonical_source(source: str) -> str:
+    """The one spelling of a footage path that the ledger keys claims on.
+
+    One file has many spellings, and comparing them raw was a hole straight
+    through the no-reuse rule: reel 1 held ``/pool/set.mp4`` [0, 3) while both
+    ``/pool/./set.mp4`` and ``/pool//set.mp4`` claimed the same frames without
+    a refusal, because ``_overlaps`` asked ``a["source"] == b["source"]``.
+
+    ``Path.resolve()`` rather than ``os.path.normpath``: normpath collapses
+    ``.`` and ``//`` but leaves ``footage/set.mp4`` and ``/pool/footage/
+    set.mp4`` looking like two different takes, and leaves a symlink looking
+    different from the file it points at. A claim is on the *frames*, so both
+    of those are one segment.
+
+    The canonical form is what gets PERSISTED (see ``_new_claim``), not merely
+    what gets compared. A ledger row outlives the process that wrote it: store
+    the caller's relative spelling and a later stage running from another cwd
+    resolves it against a different directory, and the bypass is back. The
+    cost is that ``clip_ledger.json`` records absolute paths instead of the
+    operator's shorthand — the collision report in ``claim`` still quotes the
+    spelling the caller passed.
+    """
+    try:
+        return str(Path(source).resolve())
+    except OSError:
+        # resolve() itself can fail (a symlink loop, a dead mount). Falling
+        # back to a lexical form keeps SOME key rather than letting the claim
+        # through unkeyed, which is the failure this function exists to stop.
+        return os.path.normpath(os.path.abspath(source))
+
+
 def _overlaps(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Do two claims name the same source with overlapping intervals?
 
@@ -101,9 +133,13 @@ def _overlaps(a: dict[str, Any], b: dict[str, Any]) -> bool:
     yield several distinct cuts. This predicate is the whole no-reuse rule;
     widening it to "same source" alone would starve the pool, narrowing it to
     an exact key match would let two reels ship the same frames.
+
+    Sources are canonicalised on both sides even though ``_new_claim`` already
+    stores the canonical form: rows written by an older ledger, or edited by
+    hand, still reach this predicate and must not be let through on a spelling.
     """
     return (
-        a["source"] == b["source"]
+        _canonical_source(a["source"]) == _canonical_source(b["source"])
         and a["in_seconds"] < b["out_seconds"]
         and b["in_seconds"] < a["out_seconds"]
     )
@@ -121,7 +157,7 @@ class ClipLedger:
     def __init__(self, ledger_path: Optional[Path] = None) -> None:
         self.ledger_path = Path(ledger_path) if ledger_path is not None else None
         self.claims: list[dict[str, Any]] = []
-        if self.ledger_path is not None and self.ledger_path.exists():
+        if self._ledger_exists():
             self._load()
 
     @classmethod
@@ -141,7 +177,7 @@ class ClipLedger:
         base = projects_dir if projects_dir is not None else PROJECTS_DIR
         path = base / project_id / "artifacts" / "clip_ledger.json"
         ledger = cls(ledger_path=path)
-        if not path.exists():
+        if not ledger._ledger_exists():
             with ledger._locked():
                 ledger._save()
         return ledger
@@ -253,6 +289,17 @@ class ClipLedger:
     ) -> dict[str, Any]:
         in_seconds = float(in_seconds)
         out_seconds = float(out_seconds)
+        if not (math.isfinite(in_seconds) and math.isfinite(out_seconds)):
+            # NaN slips under every comparison in this module: `nan <= nan` is
+            # False so the interval check below never fires, and `_overlaps` is
+            # False for every NaN pair, so a NaN claim is claimable by every
+            # reel at once, in silence — the exact reuse this ledger prevents.
+            # json.dump would also emit a bare `NaN` token, which RFC 8259 does
+            # not allow, so the file stops being readable by non-Python tools.
+            raise ValueError(
+                f"Segment {source!r} needs finite in_seconds/out_seconds, got "
+                f"[{in_seconds}, {out_seconds})"
+            )
         if in_seconds < 0 or out_seconds <= in_seconds:
             # A zero-length or inverted interval overlaps nothing, so it would
             # be claimed by every reel in silence — reuse with no error.
@@ -263,7 +310,8 @@ class ClipLedger:
         return {
             "claim_id": str(uuid.uuid4()),
             "reel_id": reel_id,
-            "source": source,
+            # Canonical, not the caller's spelling — see _canonical_source.
+            "source": _canonical_source(source),
             "clip_id": clip_id,
             "in_seconds": in_seconds,
             "out_seconds": out_seconds,
@@ -337,7 +385,12 @@ class ClipLedger:
         tmp_path = self.ledger_path.with_suffix(".json.tmp")
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+                # allow_nan=False: Python's default emits bare `NaN`/`Infinity`
+                # tokens, which RFC 8259 forbids, so a ledger written that way
+                # cannot be read back by anything but Python. Failing the write
+                # is better than persisting a file only half the world can
+                # parse — the guard in _new_claim should mean it never fires.
+                json.dump(data, f, indent=2, allow_nan=False)
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
@@ -361,18 +414,26 @@ class ClipLedger:
                 )
             validate_artifact("clip_ledger", data)
             self._validate_intervals(data)
+            self._validate_claim_ids(data)
         except OSError as exc:
             # Ordered before the content errors (the two hierarchies are
             # disjoint, so this only claims genuine IO). Folding it in with
             # them told the operator a chmod meant CORRUPT and sent them off
             # to rebuild claims from cut lists — destructive advice for a
             # file that is still perfectly intact on disk.
+            # The causes named are only the ones that actually land here.
+            # This site opens the ledger for READING; a full disk or a
+            # read-only mount surfaces from `_save`'s write/os.replace and
+            # `_locked`'s open(lock_path, "w") instead, as a raw OSError that
+            # never passes through this handler — so naming disk space here
+            # promised coverage the code does not have.
             raise ClipLedgerUnreadableError(
                 f"Clip ledger {self.ledger_path} could not be read ({exc}). "
                 "The ledger's contents were never examined, so this is NOT a "
                 "corruption report: do not delete, reset or rebuild it. Fix "
-                "the access problem (permissions, mount, disk space) and run "
-                "the stage again."
+                "whatever is blocking the read — permissions on the file or "
+                "its directory, or a mount that has gone away — and run the "
+                "stage again."
             ) from exc
         except (
             json.JSONDecodeError,
@@ -400,11 +461,69 @@ class ClipLedger:
         ledger exists to prevent.
         """
         for claim in data.get("claims", []):
-            if claim["out_seconds"] <= claim["in_seconds"]:
+            in_seconds = claim["in_seconds"]
+            out_seconds = claim["out_seconds"]
+            if not (math.isfinite(in_seconds) and math.isfinite(out_seconds)):
+                # `json.load` accepts the bare `NaN` token and the schema calls
+                # it a number, but `nan <= nan` is False, so the emptiness
+                # check below waves it through and `_overlaps` then reports no
+                # collision against anything — every reel may claim it.
+                raise ValueError(
+                    f"claim {claim['claim_id']!r} has non-finite interval "
+                    f"[{in_seconds}, {out_seconds})"
+                )
+            if out_seconds <= in_seconds:
                 raise ValueError(
                     f"claim {claim['claim_id']!r} has empty interval "
-                    f"[{claim['in_seconds']}, {claim['out_seconds']})"
+                    f"[{in_seconds}, {out_seconds})"
                 )
+
+    @staticmethod
+    def _validate_claim_ids(data: dict[str, Any]) -> None:
+        """A claim_id appearing twice in one file is corruption, not an update.
+
+        `_merge_from_disk` unions by claim_id and `_pick_claim` lets the higher
+        lifecycle rank win. That is the right rule *between* memory and disk —
+        it is how a release performed by another process reaches this one — but
+        it makes a second row carrying an existing claim_id a silent revocation
+        of the first: appending a copy of reel 1's row with status "released"
+        emptied `live_claims()` and let reel 2 claim reel 1's frames. The
+        schema cannot see it (uniqueness across array items is not expressible
+        there), so the check lives here. Nothing legitimate writes a duplicate:
+        `_new_claim` mints a uuid4 per claim and settling mutates in place.
+        """
+        seen: set[str] = set()
+        for claim in data.get("claims", []):
+            claim_id = claim["claim_id"]
+            if claim_id in seen:
+                raise ValueError(
+                    f"claim_id {claim_id!r} appears more than once; a second "
+                    "row with an existing claim_id retires the live claim it "
+                    "shadows and frees that segment for another reel"
+                )
+            seen.add(claim_id)
+
+    def _ledger_exists(self) -> bool:
+        """Does the ledger file exist? Reports an inaccessible parent honestly.
+
+        Path.exists() lets an EACCES on the containing directory out as a raw
+        OSError, which reached the caller as a bare traceback with none of the
+        do-not-rebuild guidance the same failure gets one line later in
+        `_read_ledger`.
+        """
+        if self.ledger_path is None:
+            return False
+        try:
+            return self.ledger_path.exists()
+        except OSError as exc:
+            raise ClipLedgerUnreadableError(
+                f"Clip ledger {self.ledger_path} could not be reached ({exc}). "
+                "The ledger's contents were never examined, so this is NOT a "
+                "corruption report: do not delete, reset or rebuild it. Fix "
+                "whatever is blocking the read — permissions on the file or "
+                "its directory, or a mount that has gone away — and run the "
+                "stage again."
+            ) from exc
 
     def _load(self) -> None:
         self.claims = self._read_ledger().get("claims", [])
@@ -415,7 +534,7 @@ class ClipLedger:
         Deterministic rule: claims union by claim_id, where a terminal status
         (released/reconciled) never regresses to `claimed`.
         """
-        if self.ledger_path is None or not self.ledger_path.exists():
+        if not self._ledger_exists():
             return
         data = self._read_ledger()
 

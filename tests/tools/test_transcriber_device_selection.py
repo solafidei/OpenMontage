@@ -125,5 +125,9 @@ def test_transcriber_never_writes_beside_the_source_media(monkeypatch, tmp_path)
         "transcriber wrote into the operator's media folder: "
         f"{sorted(p.name for p in pool.iterdir())}"
     )
-    written = Path(result.artifacts[0]).resolve()
+    written = Path(result.artifacts[0])
+    assert written.is_absolute(), (
+        f"the artifact path is relative ({written}) — beat_grid consumes it as "
+        "transcript_path and a later stage runs from a different cwd"
+    )
     assert written.is_relative_to((tmp_path / "projects" / "_analysis").resolve()), written

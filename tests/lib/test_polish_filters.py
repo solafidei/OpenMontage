@@ -402,6 +402,107 @@ def test_scale_headroom_refuses_what_punch_in_refuses():
         pf.scale_headroom({"polish": {"punch_in": "big"}})
 
 
+def test_polish_that_is_not_a_mapping_is_a_polish_error():
+    """The module invariant: everything it refuses, it refuses as PolishError.
+
+    `(cut.get("polish") or {}).get("punch_in")` raised a bare AttributeError
+    on a non-mapping block, which fails closed but tells the caller a crash
+    rather than a diagnosis.
+    """
+    for bad in ("punch_in", ["punch_in"], 1.6):
+        with pytest.raises(pf.PolishError, match="polish must be a mapping"):
+            pf.scale_headroom({"id": "c1", "polish": bad})
+        with pytest.raises(pf.PolishError, match="polish must be a mapping"):
+            pf.cut_filters({"id": "c1", "polish": bad}, 2.0, 1080, 1920)
+
+
+def test_headroom_never_builds_bigger_than_the_source_can_fill():
+    """A source smaller than headroom x target has nothing left to recover.
+
+    The docstring used to justify taking no ffprobe as the reason to apply the
+    headroom blind; `_compose` already probes each source, so the ceiling is
+    free. `cover` fills then crops, so the SMALLER ratio binds; `pad` fits then
+    letterboxes, so the larger one does.
+    """
+    cut = {"polish": {"punch_in": 1.6}}
+    target = (1080, 1920)
+
+    # 640x1138 into 1080x1920 cannot even fill the output: headroom 1.0.
+    assert pf.scale_headroom(cut, target=target, source=(640, 1138), fit="cover") == 1.0
+    assert pf.scale_headroom(cut, target=target, source=(640, 1138), fit="pad") == 1.0
+    # Exactly the headroom canvas → exactly the headroom.
+    assert pf.scale_headroom(
+        cut, target=target, source=(1728, 3072), fit="cover") == pytest.approx(1.6)
+    # Plenty of source → the punch-in's own headroom, unchanged.
+    assert pf.scale_headroom(
+        cut, target=target, source=(2160, 3840), fit="cover") == pytest.approx(1.6)
+    # Partway: 1512x2688 is 1.4x the output, so 1.4x is all it can fill.
+    assert pf.scale_headroom(
+        cut, target=target, source=(1512, 2688), fit="cover") == pytest.approx(1.4)
+    # `pad` letterboxes, so one long edge is enough: 3840 wide covers 1.6x even
+    # though the height alone would cap it at 1.125.
+    assert pf.scale_headroom(
+        cut, target=target, source=(3840, 2160), fit="pad") == pytest.approx(1.6)
+    assert pf.scale_headroom(
+        cut, target=target, source=(3840, 2160), fit="cover") == pytest.approx(1.125)
+    # No source known → the old source-blind answer.
+    assert pf.scale_headroom(cut, target=target) == pytest.approx(1.6)
+
+
+@requires_ffmpeg
+def test_a_source_too_small_for_the_headroom_pays_nothing_for_it(tmp_path):
+    """End to end: the geometry canvas of an under-sized source stays at target.
+
+    Source-blind, this cut built a 1728x3072 intermediate out of a 640x1138
+    clip — interpolation billed at 2.6x the output's area. Measured through
+    `_compose` (interleaved, paired, n=9, medians) that cost 0.636s -> 0.748s,
+    1.18x, for Laplacian variance 30.8 -> 33.6 on pixels the source never had.
+    """
+    src = tmp_path / "in.mp4"
+    _clip(src, 640, 1138)
+    result, seen = _compose(
+        tmp_path,
+        [{"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 1,
+          "polish": {"punch_in": 1.6}}],
+        spine={"metadata": {"compose_target":
+                            {"width": 1080, "height": 1920, "fit": "cover"}}},
+    )
+    assert result.success, result.error
+    vf = _segment_vf(seen)[0]
+    assert "scale=1080:1920" in vf and "crop=1080:1920" in vf
+    assert "1728" not in vf
+    # The punch-in itself is untouched — only the canvas it crops from moved.
+    assert "zoompan" in vf and "s=1080x1920" in vf
+
+
+@requires_ffmpeg
+def test_a_rotated_source_is_measured_by_its_display_size(tmp_path):
+    """A phone clip's coded 2160x3840 arrives at the filter graph rotated.
+
+    Capping on the coded size would read this portrait source as landscape and
+    cut the headroom to 1.125 on a clip that can fill the whole 1.6x.
+    """
+    src = tmp_path / "in.mp4"
+    _clip(src, 3840, 2160, d=1)
+    rotated = tmp_path / "rot.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-display_rotation", "-90", "-i", str(src),
+         "-c", "copy", str(rotated)],
+        capture_output=True, check=True,
+    )
+    assert VideoCompose._probe_source(rotated)[1] == (2160, 3840)
+
+    result, seen = _compose(
+        tmp_path,
+        [{"id": "c1", "source": str(rotated), "in_seconds": 0, "out_seconds": 1,
+          "polish": {"punch_in": 1.6}}],
+        spine={"metadata": {"compose_target":
+                            {"width": 1080, "height": 1920, "fit": "cover"}}},
+    )
+    assert result.success, result.error
+    assert "scale=1728:3072" in _segment_vf(seen)[0]
+
+
 @requires_ffmpeg
 @pytest.mark.parametrize("fit", ["pad", "cover"])
 def test_geom_scales_to_the_headroom_so_the_punch_in_crops_real_pixels(tmp_path, fit):
@@ -409,9 +510,14 @@ def test_geom_scales_to_the_headroom_so_the_punch_in_crops_real_pixels(tmp_path,
 
     zoompan blows a region of its INPUT back up to the output size. Geom scaled
     to 1080x1920 first, the detail the crop wanted was already gone.
+
+    The source is 1728x3072 — exactly the headroom canvas — because the
+    headroom is now capped by what the source can fill. On the 1280x720 clip
+    this test used to build, the honest answer at 1080x1920 is headroom 1.0,
+    and asserting 1728 there was asserting a canvas nothing could fill.
     """
     src = tmp_path / "in.mp4"
-    _clip(src, 1280, 720)
+    _clip(src, 1728, 3072)
     result, seen = _compose(
         tmp_path,
         [{"id": "c1", "source": str(src), "in_seconds": 0, "out_seconds": 1,
@@ -435,7 +541,9 @@ def test_geom_scales_to_the_headroom_so_the_punch_in_crops_real_pixels(tmp_path,
 def test_headroom_dimensions_are_rounded_to_even(tmp_path):
     """libx264 + yuv420p refuses an odd width or height outright."""
     src = tmp_path / "in.mp4"
-    _clip(src, 1280, 720)
+    # 2560x1440 into the 1920x1080 default: big enough to fill 1.115x headroom,
+    # which is what makes the rounding question reachable at all.
+    _clip(src, 2560, 1440)
     # 1920 * 1.115 = 2140.8 and 1080 * 1.115 = 1204.2 — the width rounds to an
     # odd 2141 before it is evened off.
     result, seen = _compose(tmp_path, [
@@ -483,7 +591,9 @@ def test_headroom_actually_recovers_high_frequency_detail(tmp_path):
         return (-4 * a[1:-1, 1:-1] + a[:-2, 1:-1] + a[2:, 1:-1]
                 + a[1:-1, :-2] + a[1:-1, 2:]).var()
 
-    before = render(tmp_path / "flat", lambda cut: 1.0)
+    # `**kw` because `_compose` now hands scale_headroom the target, the
+    # source size and the fit mode; the control ignores all three.
+    before = render(tmp_path / "flat", lambda cut, **kw: 1.0)
     after = render(tmp_path / "headroom", pf.scale_headroom)
     assert after > before * 1.2, f"{before=} {after=}"
 
@@ -686,13 +796,21 @@ def _axis_detail(path: Path, axis: int, from_end: float = 0.04) -> float:
 
 @requires_ffmpeg
 def test_whip_smears_the_last_frame_horizontally_and_only_horizontally(tmp_path):
-    """sigmaV=0 is the whole point: a whip-pan blurs across, not down."""
+    """sigmaV=0 is the whole point: a whip-pan blurs across, not down.
+
+    The fixture is a GRID, not vertical bars, and the "only horizontally" half
+    is asserted as a floor rather than a tolerance. Both were needed to make
+    the test able to fail: on vertical bars there is no vertical detail to
+    lose, and `abs=1.0` on a quantity whose whole measured range is ~0.05
+    passes whatever the filter does — deleting `sigmaV=0` from `whip_out` left
+    the old version green.
+    """
     src = tmp_path / "in.mp4"
-    # Vertical bars: all of the detail is horizontal, so a horizontal-only
-    # blur has something to destroy and a vertical one would not.
+    # A grid has detail on BOTH axes, so a blur that leaks into the vertical
+    # has something to destroy and the second assertion has something to see.
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:d=2:r=30",
-         "-vf", "drawgrid=w=16:h=1080:t=8:color=white",
+         "-vf", "drawgrid=w=16:h=16:t=4:color=white",
          "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
          "-g", "30", "-keyint_min", "30", str(src)],
         capture_output=True, check=True,
@@ -705,7 +823,9 @@ def test_whip_smears_the_last_frame_horizontally_and_only_horizontally(tmp_path)
     assert plain.success and whipped.success, whipped.error
 
     a, b = tmp_path / "a" / "out.mp4", tmp_path / "b" / "out.mp4"
-    # Across the bars: the whip has flattened them.
+    # Across the grid: the whip has flattened it.
     assert _axis_detail(b, 1) < _axis_detail(a, 1) * 0.5
-    # Down the bars: there was nothing to smear and nothing was smeared.
-    assert _axis_detail(b, 0) == pytest.approx(_axis_detail(a, 0), abs=1.0)
+    # Down the grid: the horizontal lines survive. Measured on this fixture,
+    # 23.36 of 23.74 (98%) with sigmaV=0 and 0.07 of 23.74 without it, so the
+    # 0.9 floor sits nowhere near either — it is a wall, not a tolerance.
+    assert _axis_detail(b, 0) > _axis_detail(a, 0) * 0.9

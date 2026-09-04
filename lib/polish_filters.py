@@ -87,6 +87,24 @@ def _bounded(name: str, value: object, bounds: tuple[float, float]) -> float:
     return number
 
 
+def _polish(cut: dict) -> dict:
+    """The cut's polish block, or `{}` — refusing a block that is not a mapping.
+
+    `(cut.get("polish") or {}).get(...)` was written straight into two
+    callers, so `{"polish": "punch_in"}` left this module as a bare
+    `AttributeError: 'str' object has no attribute 'get'` — breaking the one
+    invariant the rest of the file keeps: everything it refuses, it refuses as
+    `PolishError`. It failed closed, so nothing reached ffmpeg; what was lost
+    was the caller's ability to tell a malformed cut from a crash.
+    """
+    polish = cut.get("polish")
+    if not polish:
+        return {}
+    if not isinstance(polish, dict):
+        raise PolishError(f"polish must be a mapping of settings, got {polish!r}")
+    return polish
+
+
 # ---- per-cut motion ----
 
 def is_ramp(speed_from: float, speed_to: float) -> bool:
@@ -99,27 +117,89 @@ def is_ramp(speed_from: float, speed_to: float) -> bool:
     return float(f"{speed_to - speed_from:.{_EMITTED_DECIMALS}f}") != 0.0
 
 
-def scale_headroom(cut: dict) -> float:
+def source_ceiling(
+    target: tuple[int, int] | None,
+    source: tuple[int, int] | None,
+    fit: str = "cover",
+) -> float:
+    """The largest headroom `source` can still fill without being upscaled.
+
+    Headroom only buys detail that the source actually carries. Building a
+    canvas bigger than the source can fill interpolates first and then bills
+    the whole re-encode at the larger area, so on a small source it is pure
+    cost. `fit` decides which of the two ratios runs out first: `cover` scales
+    by the LARGER ratio (fill, then crop), so the smaller one binds; `pad`
+    scales by the smaller (fit, then letterbox), so the larger one binds.
+
+    `source` is the DISPLAY size — a rotated phone clip's coded 3840x2160 is
+    2160x3840 by the time the filter graph sees it, and using the coded size
+    would cap a portrait reel at the wrong ratio.
+
+    Never returns below 1.0: the geometry canvas is what `zoompan` crops from
+    and `s=<output size>` lands back on, so it can never be smaller than the
+    output. Unknown target or source returns infinity — the caller then keeps
+    the punch-in's own headroom, which is what this module did everywhere
+    before it could see a source at all.
+    """
+    if not target or not source:
+        return float("inf")
+    target_w, target_h = target
+    source_w, source_h = source
+    if min(target_w, target_h, source_w, source_h) <= 0:
+        return float("inf")
+    ratios = (source_w / target_w, source_h / target_h)
+    return max(min(ratios) if fit == "cover" else max(ratios), 1.0)
+
+
+def scale_headroom(
+    cut: dict,
+    target: tuple[int, int] | None = None,
+    source: tuple[int, int] | None = None,
+    fit: str = "cover",
+) -> float:
     """How much bigger than the output this cut's geometry stage should build.
 
     `punch_in` crops a region of its *input* and blows it back up to the output
     size. Scaled to the output size first, that crop magnifies pixels thrown
     away one filter earlier, and every punch-in lands soft — on a beat hit,
     which is exactly where the eye is. Handing the geometry stage the punch-in's
-    headroom instead lets the same zoompan crop real detail. Measured through
-    `_compose` on a 2s z=1.6 cut of 3840x2160 source
-    (`projects/gym-footage/raw/IMG_1384.MOV`) at 1080x1920/cover, Laplacian
-    variance of the final — most zoomed — frame went 37.1 -> 54.8, a 1.48x
-    gain, for 1.82s -> 1.81s of wall clock and no extra ffprobe calls.
+    headroom instead lets the same zoompan crop real detail.
+
+    The headroom is capped by what the source can fill (`source_ceiling`),
+    because past that point the canvas is interpolation billed at full price.
+    `_compose` gets the source's display size from the ffprobe it already runs
+    per cut for audio-stream presence, so this costs no extra probe — but it is
+    optional, and omitting it keeps the old source-blind behaviour.
+
+    IT IS NOT FREE, and this docstring used to say it was ("1.82s -> 1.81s of
+    wall clock"). Re-measured interleaved and paired — one discarded warm-up
+    sweep, then 11 rounds of {headroom forced to 1.0, real headroom} back to
+    back through `_compose`, 2s z=1.6 cut of
+    `projects/gym-footage/raw/IMG_1384.MOV` (3840x2160 coded, rotation -90, so
+    2160x3840 displayed) at 1080x1920/cover: median 1.730s -> 1.812s, a 1.05x
+    cost, and all 11 paired samples were slower with the headroom. What it
+    buys is real: Laplacian variance of the final — most zoomed — frame 74.3
+    -> 113.4, a 1.53x gain. Quality bought with wall clock, not for nothing.
+
+    The source cap is what makes the cost proportionate. On a 640x1138 clip
+    into the same 1080x1920/cover frame, where the source cannot even fill the
+    output, the uncapped headroom measured (same harness, n=9) median 0.636s
+    -> 0.748s, a 1.18x cost, for Laplacian variance 30.8 -> 33.6 — 1.09x, and
+    that 9% is scaler ringing on pixels the source never had, since at
+    headroom 1.0 it is already being upscaled. Capped, the same cut measures
+    0.620s: the same frame as headroom 1.0, at no extra cost. On the 4K phone
+    clip above the cap is 2.0 and changes nothing, which is the case that
+    matters for reel-batch.
 
     A cut with no punch-in reports 1.0, so it renders byte-identically to what
     `_compose` built before this existed. `punch_in` itself is unchanged — it
     still lands on the output size, which is what closes the loop.
     """
-    zoom_end = (cut.get("polish") or {}).get("punch_in")
+    zoom_end = _polish(cut).get("punch_in")
     if zoom_end is None:
         return 1.0
-    return min(_bounded("punch_in", zoom_end, PUNCH_IN_RANGE), SCALE_HEADROOM_CAP)
+    headroom = min(_bounded("punch_in", zoom_end, PUNCH_IN_RANGE), SCALE_HEADROOM_CAP)
+    return min(headroom, source_ceiling(target, source, fit))
 
 
 def punch_in(zoom_end: float, duration: float, width: int, height: int, fps: int = 30) -> str:
@@ -290,7 +370,7 @@ def cut_filters(
     A cut with no `polish` and no `look` yields exactly what `_compose` built
     before this module existed: nothing, or the same constant `setpts`.
     """
-    polish = cut.get("polish") or {}
+    polish = _polish(cut)
     speed = _number("speed", cut.get("speed", 1.0) or 1.0)
     ramp_to = polish.get("speed_ramp")
     parts: list[str] = []

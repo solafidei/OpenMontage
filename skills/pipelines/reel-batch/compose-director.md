@@ -179,7 +179,8 @@ picture = VideoCompose().execute({
     # The bed starts at the reel's window, not at t=0 — `video_compose` seeks the
     # audio input with -ss. The normalised track is whole; the reel is a slice of it.
     "audio_start_seconds": entry.get("audio_offset_seconds", 0.0),
-    "batch_look": spine["metadata"]["batch_look"],   # {"grade": "talking_head_standard", "sharpen": "sharpen_light"}
+    # Root first (spec 4.2, schema-declared); metadata is the legacy spelling.
+    "batch_look": spine.get("batch_look") or spine["metadata"].get("batch_look"),
     "output_path": f"projects/{project_id}/renders/{entry['reel_id']}-picture.mp4",
 })
 ```

@@ -1054,6 +1054,14 @@ def _anchor_docs() -> list[str]:
     return docs
 
 
+# Every `lib/checkpoint.py:NNN` / `lib/corpus.py:NNN` mention, in or out of the
+# convention. Used only to count what the convention regex above declines to
+# examine — the guard fails on nothing this matches.
+_ANY_ANCHOR = re.compile(
+    r"(?:" + "|".join(re.escape(module) for module in ANCHOR_MODULES) + r"):\d+"
+)
+
+
 def _top_level_symbols(source_lines: list[str]) -> dict[str, tuple[int, int]]:
     """Every top-level `def`/`class` in a module, mapped to its 1-indexed span.
 
@@ -1079,20 +1087,25 @@ def _top_level_symbols(source_lines: list[str]) -> dict[str, tuple[int, int]]:
     return spans
 
 
-def test_every_doc_anchor_into_checkpoint_and_corpus_is_fresh() -> None:
-    """Drift guard for `lib/checkpoint.py:NNN` anchors in EVERY doc.
+def _scan_anchors() -> tuple[list[str], int, int]:
+    """`(rotted, checked, skipped)` over every anchor doc.
 
-    Scoped to the citation convention above, so what it checks is exactly what
-    a doc actually promises the reader. Anchors outside that form are counted
-    and reported in the failure message but never failed."""
+    `checked` counts anchors in the citation convention whose symbol resolves in
+    the module — the only ones this guard can and does verify. `skipped` counts
+    every other `<module>:NNN` mention: region references and historical quotes,
+    deliberately not failed, but counted so the caller can say how much of the
+    file went unexamined rather than implying it checked all of it.
+    """
     sources = {module: _read(module).splitlines() for module in ANCHOR_MODULES}
     symbols = {module: _top_level_symbols(lines) for module, lines in sources.items()}
 
     rotted: list[str] = []
     checked = 0
+    skipped = 0
 
     for doc in _anchor_docs():
         for line_number, line in enumerate(_read(doc).splitlines(), start=1):
+            here = 0
             for match in _ANCHOR_CITATION.finditer(line):
                 module = match.group("module")
                 symbol = match.group("symbol")
@@ -1100,6 +1113,7 @@ def test_every_doc_anchor_into_checkpoint_and_corpus_is_fresh() -> None:
                     continue
                 first, last = symbols[module][symbol]
                 checked += 1
+                here += 1
                 for group in ("start", "end"):
                     cited = match.group(group)
                     if cited is None:
@@ -1110,8 +1124,97 @@ def test_every_doc_anchor_into_checkpoint_and_corpus_is_fresh() -> None:
                             f"{module}:{cited}, outside its span "
                             f"[:{first}, :{last}] — fresh number :{first}"
                         )
+            skipped += len(_ANY_ANCHOR.findall(line)) - here
 
-    assert not rotted, (
+    return rotted, checked, skipped
+
+
+def _anchor_report(rotted: list[str], checked: int, skipped: int) -> str:
+    """The guard's own summary, message and scope in one place.
+
+    The count of what was NOT examined belongs beside the count of what was:
+    on its own the checked count reads as coverage of the file, when the
+    convention matches only a minority of the anchors these docs carry.
+    """
+    return (
         f"{len(rotted)} rotted anchor(s) of {checked} checked across "
-        f"{len(_anchor_docs())} docs:\n  " + "\n  ".join(rotted)
+        f"{len(_anchor_docs())} docs; {skipped} further anchor(s) are outside "
+        f"the citation convention and were not examined:\n  "
+        + "\n  ".join(rotted)
+    )
+
+
+def test_every_doc_anchor_into_checkpoint_and_corpus_is_fresh() -> None:
+    """Drift guard for `lib/checkpoint.py:NNN` anchors in EVERY doc.
+
+    Scoped to the citation convention above, so what it checks is exactly what
+    a doc actually promises the reader. Anchors outside that form are counted
+    and reported alongside the checked count — never failed, and never left
+    out of the tally either: on this repo the convention covers a small
+    minority of the anchors present, and a summary that reported only the
+    checked ones read as full coverage of the file."""
+    rotted, checked, skipped = _scan_anchors()
+    assert not rotted, _anchor_report(rotted, checked, skipped)
+
+
+def test_the_anchor_guard_says_how_many_anchors_it_did_not_examine() -> None:
+    """The docstring above promises the skipped anchors are counted and reported.
+
+    They were not: the message named `checked` alone, and `checked` counts only
+    the in-convention anchors, so a green run gave no signal that most anchors
+    in these docs went unexamined. The narrow scope is deliberate — this test
+    pins the disclosure, not a wider check.
+    """
+    rotted, checked, skipped = _scan_anchors()
+
+    # Recount independently of _scan_anchors' per-line bookkeeping.
+    total = sum(len(_ANY_ANCHOR.findall(_read(doc))) for doc in _anchor_docs())
+    assert checked + skipped == total, (
+        f"the guard's own tally ({checked} checked + {skipped} skipped) does not "
+        f"account for the {total} anchors present"
+    )
+
+    report = _anchor_report(rotted, checked, skipped)
+    assert f"{checked} checked" in report
+    assert f"{skipped} further anchor(s)" in report
+    assert "not examined" in report
+
+
+# ----------------------------------------------------------------------
+# An instruction may not name a decision category the schema rejects
+# ----------------------------------------------------------------------
+
+
+def test_every_decision_category_the_instructions_name_is_in_the_schema() -> None:
+    """AGENT_GUIDE.md told agents to log pre-authorisation as
+    `category: "approval_policy"`; the schema's enum did not contain it, so an
+    agent that followed the instruction exactly got a
+    CheckpointValidationError and could not write the gate at all.
+
+    Both halves read as authoritative and neither mentioned the other, which is
+    why it survived: the guide is prose, the enum is data, and nothing compared
+    them. Found by running the pipeline end to end rather than by reading
+    either file.
+    """
+    schema = json.loads(_read("schemas/artifacts/decision_log.schema.json"))
+    allowed = set(
+        schema["properties"]["decisions"]["items"]["properties"]["category"]["enum"]
+    )
+
+    # `category: "<name>"` is how every instruction file spells one.
+    pattern = re.compile(r'`?category`?\s*:\s*"([a-z_]+)"')
+    named: dict[str, list[str]] = {}
+    for doc in ["AGENT_GUIDE.md", *sorted(
+        str(p.relative_to(REPO_ROOT))
+        for p in (REPO_ROOT / "skills").rglob("*.md")
+    )]:
+        for match in pattern.finditer(_read(doc)):
+            named.setdefault(match.group(1), []).append(doc)
+
+    assert named, "no decision categories found in the instructions — regex rotted"
+    unknown = {name: docs for name, docs in named.items() if name not in allowed}
+    assert not unknown, (
+        "instruction files name decision categories the schema rejects, so an "
+        "agent following them writes an invalid artifact:\n  "
+        + "\n  ".join(f"{name!r} named by {sorted(set(docs))}" for name, docs in unknown.items())
     )

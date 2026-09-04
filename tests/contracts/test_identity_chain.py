@@ -640,3 +640,238 @@ def test_one_look_verdict_per_provenance_not_one_per_cut(tmp_path, monkeypatch) 
     ]
     assert len(violations) == 1, f"one look, {len(violations)} verdicts"
     assert "25" in violations[0] and "reel_01-01" in violations[0]
+
+
+# ----------------------------------------------------------------------
+# Link 4, second door — `operation='compose'`
+# ----------------------------------------------------------------------
+#
+# `_pre_compose_validation` is reached from `_render` and from nowhere else,
+# while `operation='compose'` is a second, documented entry into the same
+# FFmpeg encode. So the SAME artifact that `render` refused — a relabelled
+# operator clip, an unsafe look on a locked face, a polish block under a
+# runtime that cannot apply it — composed happily through `compose`, with no
+# gate and no warning. Everything below is parametrised over both doors,
+# because a per-door test is exactly what let this survive: the existing
+# link-4 tests only ever knock on `render`.
+
+DOORS = ["render", "compose"]
+
+
+def _through_door(tmp_path, door: str, *, cuts: list[dict],
+                  assets: list[dict] | None = None, runtime: str = "ffmpeg",
+                  **overrides) -> "ToolResult":
+    """The same artifact, offered to whichever entry point `door` names."""
+    inputs: dict = {
+        "operation": "render" if door == "render" else "compose",
+        "edit_decisions": {
+            "version": "1.0",
+            "renderer_family": "documentary-montage",
+            "render_runtime": runtime,
+            "cuts": cuts,
+            **overrides.pop("spine", {}),
+        },
+        "output_path": str(tmp_path / "out.mp4"),
+        **overrides,
+    }
+    if assets is not None:
+        inputs["asset_manifest"] = {"version": "1.0", "assets": assets}
+    return VideoCompose().execute(inputs)
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_a_relabelled_operator_clip_is_refused_at_both_doors(
+    tmp_path, monkeypatch, door: str
+) -> None:
+    """The identity cross-check, asked wherever the pixels are made.
+
+    `provenance: ai_generated` on an asset that `footage_library` produced is
+    how identity protection gets switched off. Through `compose` that
+    contradiction was never looked at.
+    """
+    _no_renderer_runs(monkeypatch, door)
+
+    result = _through_door(
+        tmp_path, door,
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "ai_generated"}],
+        assets=[POOL_ASSET],
+    )
+
+    assert not result.success, f"{door}: a relabelled operator clip composed"
+    assert "Identity violation" in (result.error or "")
+    assert "reel_01-01" in (result.error or "")
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_an_unsafe_look_on_an_operator_cut_is_refused_at_both_doors(
+    tmp_path, monkeypatch, door: str
+) -> None:
+    """A colour grade and grain on the operator's own face."""
+    _no_renderer_runs(monkeypatch, door)
+
+    result = _through_door(
+        tmp_path, door,
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "operator_footage"}],
+        assets=[POOL_ASSET],
+        batch_look=UNSAFE_LOOK,
+    )
+
+    assert not result.success, f"{door}: an unsafe look reached the encode"
+    assert "Identity violation" in (result.error or "")
+    assert "identity-safe" in (result.error or "")
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_polish_under_a_runtime_that_cannot_apply_it_is_refused_at_both_doors(
+    tmp_path, monkeypatch, door: str
+) -> None:
+    """The runtime half of the same gate — the violation the walk actually ran.
+
+    `render_runtime='remotion'` with a polish block: refused through `render`,
+    and through `compose` it not only rendered but rendered the polish, which
+    is the silent runtime swap governance forbids in the other direction.
+    """
+    _no_renderer_runs(monkeypatch, door)
+
+    result = _through_door(
+        tmp_path, door, runtime="remotion",
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "operator_footage",
+               "polish": {"punch_in": 1.6}}],
+        assets=[POOL_ASSET],
+    )
+
+    assert not result.success, f"{door}: a polish block rendered off-runtime"
+    assert "cannot render" in (result.error or "")
+    assert "reel_01-01" in (result.error or "")
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_an_honest_plan_is_not_blocked_at_either_door(
+    tmp_path, monkeypatch, door: str
+) -> None:
+    """The negative control for the new door.
+
+    A gate that blocks everything proves nothing, and the compose door must
+    keep composing cut lists that were never a proposal — so the plan-quality
+    checks (delivery promise, slideshow risk, renderer_family) stay with
+    `render` and only the identity/runtime half is asked here.
+    """
+    sentinel = ToolResult(success=True, data={"reached": door})
+    for method in ("_render_via_ffmpeg", "_compose"):
+        monkeypatch.setattr(VideoCompose, method, lambda *a, **k: sentinel)
+    monkeypatch.setattr(VideoCompose, "_needs_remotion", lambda self, cuts: False)
+    monkeypatch.setattr(VideoCompose, "_run_final_review", lambda *a, **k: {})
+
+    result = _through_door(
+        tmp_path, door,
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "operator_footage"}],
+        assets=[POOL_ASSET],
+        batch_look={"grade": "talking_head_standard", "sharpen": "sharpen_light"},
+    )
+
+    assert result.success, f"{door}: an honest plan was blocked — {result.error}"
+
+
+def test_compose_still_takes_a_cut_list_that_was_never_a_proposal(
+    tmp_path, monkeypatch
+) -> None:
+    """The compose door keeps its documented job.
+
+    `operation='compose'` is the direct trim/concat entry: no asset manifest,
+    no renderer_family, no delivery promise. Asking the whole pre-compose gate
+    here would have blocked every one of those on `No renderer_family`, which
+    is a statement about a PLAN and there is no plan.
+    """
+    sentinel = ToolResult(success=True, data={"reached": "compose"})
+    monkeypatch.setattr(VideoCompose, "_compose", lambda *a, **k: sentinel)
+
+    result = VideoCompose().execute({
+        "operation": "compose",
+        "edit_decisions": {
+            "version": "1.0",
+            "cuts": [{"id": "c1", "source": "/tmp/whatever.mp4",
+                      "in_seconds": 0.0, "out_seconds": 1.0}],
+        },
+        "output_path": str(tmp_path / "out.mp4"),
+    })
+
+    assert result.success, result.error
+
+
+# ----------------------------------------------------------------------
+# A malformed batch_look is refused, not dropped
+# ----------------------------------------------------------------------
+
+
+MALFORMED_LOOKS = ["bright_clean", [{"grade": "bright_clean"}], 7]
+MALFORMED_IDS = ["str", "list", "int"]
+
+
+@pytest.mark.parametrize("look", MALFORMED_LOOKS, ids=MALFORMED_IDS)
+@pytest.mark.parametrize("where", ["batch_look", "metadata"],
+                         ids=["spine root", "spine metadata"])
+def test_a_malformed_spine_look_is_refused_rather_than_dropped(
+    tmp_path, monkeypatch, look, where: str
+) -> None:
+    """Dropping the look also drops the gate that is asked against it.
+
+    `_resolve_batch_look` filtered with `isinstance(candidate, dict)`, so a
+    look written in any other shape resolved to None: the batch rendered
+    ungraded AND check 5 — which runs against the RESOLVED look — never ran,
+    on a cut declaring `operator_footage`. That is the silent-drop harm the
+    polish gate exists to prevent, arriving through the spine.
+    """
+    _no_renderer_runs(monkeypatch, where)
+    spine = ({"batch_look": look} if where == "batch_look"
+             else {"metadata": {"batch_look": look}})
+
+    result = _through_door(
+        tmp_path, "compose",
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "operator_footage"}],
+        assets=[POOL_ASSET],
+        spine=spine,
+    )
+
+    assert not result.success, f"{where}: a malformed look was dropped silently"
+    assert "must be a mapping" in (result.error or ""), result.error
+
+
+@pytest.mark.parametrize("look", MALFORMED_LOOKS, ids=MALFORMED_IDS)
+def test_a_malformed_tool_input_look_is_refused_too(tmp_path, monkeypatch, look) -> None:
+    _no_renderer_runs(monkeypatch, "tool input")
+
+    result = _through_door(
+        tmp_path, "render",
+        cuts=[{"id": "reel_01-01", "source": "/pool/rack_pulls_A.mp4",
+               "in_seconds": 0.0, "out_seconds": 1.9,
+               "provenance": "operator_footage"}],
+        assets=[POOL_ASSET],
+        batch_look=look,
+    )
+
+    assert not result.success, "a malformed tool-input look was dropped silently"
+    assert "must be a mapping" in (result.error or ""), result.error
+
+
+def test_a_well_formed_look_still_resolves_by_precedence() -> None:
+    """The refusal must not cost the precedence the field is documented with."""
+    tool = {"grade": "warm"}
+    root = {"grade": "sharpen"}
+    meta = {"grade": "talking_head_standard"}
+    resolve = VideoCompose._resolve_batch_look
+
+    assert resolve({"batch_look": tool},
+                   {"batch_look": root, "metadata": {"batch_look": meta}}) == tool
+    assert resolve({}, {"batch_look": root, "metadata": {"batch_look": meta}}) == root
+    assert resolve({}, {"metadata": {"batch_look": meta}}) == meta
+    assert resolve({}, {}) is None

@@ -503,3 +503,183 @@ def test_processes_racing_for_one_segment_leave_exactly_one_winner(tmp_path):
     assert len(persisted["claims"]) == rounds
     assert sorted(c["in_seconds"] for c in persisted["claims"]) == starts
     ClipLedger(ledger_path=path).assert_no_reuse()
+
+
+# ---- one file, many spellings ----
+
+def test_alternate_spellings_of_one_source_are_one_segment(tmp_path, monkeypatch):
+    """A path is a spelling; a claim is on the frames behind it.
+
+    Revert check for `_canonical_source` (and its use in `_new_claim` /
+    `_overlaps`): with the raw `a["source"] == b["source"]` comparison back,
+    reel 1 holds '<pool>/set.mp4' [0, 3) and every spelling below CLAIMS the
+    same three seconds without a refusal — two reels, identical frames.
+    """
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    take = pool / "set.mp4"
+    take.write_bytes(b"\0")
+
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0, source=str(take))
+
+    aliases = [
+        f"{pool}/./set.mp4",     # a '.' component
+        f"{pool}//set.mp4",      # a doubled separator
+        f"{pool}/../pool/set.mp4",  # a round trip through the parent
+    ]
+    link = pool / "same_take.mp4"
+    link.symlink_to(take)
+    aliases.append(str(link))    # a symlink to the same take
+
+    for alias in aliases:
+        with pytest.raises(SegmentAlreadyClaimedError):
+            _claim(ledger, "reel-2", 0.0, 3.0, source=alias)
+        assert not ledger.is_available(
+            source=alias, in_seconds=1.0, out_seconds=2.0
+        )
+
+    # A relative spelling and an absolute one name the same segment.
+    monkeypatch.chdir(pool)
+    with pytest.raises(SegmentAlreadyClaimedError):
+        _claim(ledger, "reel-2", 0.0, 3.0, source="set.mp4")
+
+    # The rule has not widened: a genuinely different file is still free, and
+    # a relative spelling may claim it...
+    other = pool / "other_set.mp4"
+    other.write_bytes(b"\0")
+    _claim(ledger, "reel-2", 0.0, 3.0, source="other_set.mp4")
+    ledger.assert_no_reuse()
+
+    # ...but what gets PERSISTED is the canonical form, so the stage that
+    # reads the file next still sees one segment even though it is running
+    # from a different working directory. Revert check for storing the
+    # canonical source in `_new_claim` (as opposed to canonicalising only
+    # inside `_overlaps`): the stored "other_set.mp4" would resolve against
+    # tmp_path here, name a file nobody claimed, and free reel 2's frames.
+    monkeypatch.chdir(tmp_path)
+    reopened = ClipLedger(ledger_path=ledger.ledger_path)
+    assert not reopened.is_available(
+        source=str(other), in_seconds=1.0, out_seconds=2.0
+    )
+    assert not reopened.is_available(
+        source=str(take), in_seconds=1.0, out_seconds=2.0
+    )
+
+
+# ---- non-finite intervals ----
+
+def test_nan_interval_is_refused_rather_than_claimable_by_everyone(tmp_path):
+    """`nan <= nan` is False, so NaN walks through every guard in the module.
+
+    Revert check for the `math.isfinite` guard in `_new_claim`: without it the
+    NaN claim below is accepted, `_overlaps` reports no collision against it
+    for any reel, and `json.dump` writes a bare `NaN` token into
+    clip_ledger.json — which RFC 8259 does not allow.
+    """
+    nan = float("nan")
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0)
+
+    for in_seconds, out_seconds in ((nan, nan), (0.0, nan), (float("inf"), 3.0)):
+        with pytest.raises(ValueError):
+            _claim(ledger, "reel-2", in_seconds, out_seconds)
+        assert (
+            ledger.is_available(
+                source=SET, in_seconds=in_seconds, out_seconds=out_seconds
+            )
+            is False
+        )
+
+    text = ledger.ledger_path.read_text()
+    # parse_constant fires only on the bare NaN/Infinity tokens Python emits
+    # by default and no strict JSON reader accepts.
+    json.loads(
+        text, parse_constant=lambda token: pytest.fail(f"bare {token} in ledger")
+    )
+    assert [c["reel_id"] for c in ledger.live_claims()] == ["reel-1"]
+
+
+def test_nan_interval_already_on_disk_is_reported_as_corruption(tmp_path):
+    """The file-level half: a hand-written NaN row must not read as healthy.
+
+    Revert check for the `math.isfinite` arm of `_validate_intervals`: without
+    it `validate_artifact` calls NaN a number, the `out <= in` test is False,
+    and `_read_ledger` pronounces the ledger healthy.
+    """
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0)
+    data = json.loads(ledger.ledger_path.read_text())
+    data["claims"][0]["out_seconds"] = float("nan")
+    ledger.ledger_path.write_text(json.dumps(data))  # emits a bare NaN token
+
+    with pytest.raises(ClipLedgerCorruptedError):
+        ClipLedger(ledger_path=ledger.ledger_path)
+
+
+# ---- duplicate claim ids ----
+
+def test_duplicate_claim_id_cannot_retire_a_live_claim(tmp_path):
+    """One appended row must not silently free a segment its owner holds.
+
+    `_merge_from_disk` unions by claim_id and `_pick_claim` lets the higher
+    lifecycle rank win, so a second row carrying reel 1's claim_id with status
+    "released" retired reel 1's claim. Revert check for `_validate_claim_ids`:
+    without it `live_claims()` returns [] here and reel 2 claims reel 1's
+    frames.
+    """
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0, clip_id="seg-a")
+    path = ledger.ledger_path
+
+    # A second stage that already has the healthy ledger open.
+    other = ClipLedger(ledger_path=path)
+
+    data = json.loads(path.read_text())
+    shadow = dict(data["claims"][0])
+    shadow["status"] = "released"
+    data["claims"].append(shadow)
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(ClipLedgerCorruptedError):
+        ClipLedger(ledger_path=path)
+    # The live instance refuses the segment instead of handing it over.
+    with pytest.raises(ClipLedgerCorruptedError):
+        _claim(other, "reel-2", 0.0, 3.0, clip_id="seg-b")
+
+
+# ---- honesty of the unreadable message ----
+
+def test_unreadable_message_names_only_failures_that_reach_it(tmp_path):
+    """The message must not promise coverage the code does not have.
+
+    A previous round's message offered guidance for "permissions, mount, disk
+    space". A full disk or a read-only mount never passes through
+    `_read_ledger`: it surfaces from `_save`'s write/os.replace and `_locked`'s
+    open(lock_path, "w"), which raise bare OSError. Revert check: put "disk
+    space" back in the message and this test fails.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the permission bits this test relies on")
+    ledger = _ledger(tmp_path)
+    _claim(ledger, "reel-1", 0.0, 3.0)
+    path = ledger.ledger_path
+
+    os.chmod(path, 0o000)
+    try:
+        with pytest.raises(ClipLedgerUnreadableError) as unreadable:
+            ClipLedger(ledger_path=path)
+        assert "disk space" not in str(unreadable.value).lower()
+    finally:
+        os.chmod(path, 0o600)
+
+    # An unreadable *directory* reaches Path.exists() before any open(), and
+    # used to escape as a bare PermissionError with none of this guidance.
+    # Revert check for `_ledger_exists`: PermissionError, not this error.
+    os.chmod(path.parent, 0o000)
+    try:
+        with pytest.raises(ClipLedgerUnreadableError) as unreachable:
+            ClipLedger(ledger_path=path)
+        assert "do not delete" in str(unreachable.value).lower()
+    finally:
+        os.chmod(path.parent, 0o700)

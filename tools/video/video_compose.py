@@ -390,6 +390,25 @@ class VideoCompose(BaseTool):
 
         try:
             if operation == "compose":
+                # The identity gate's SECOND door. `_pre_compose_validation`
+                # is reached from `_render` only, so the same artifact that
+                # `render` refused — a relabelled operator clip, an unsafe look
+                # on a locked face, a polish block under a non-ffmpeg runtime —
+                # rendered here with no gate and no warning.
+                #
+                # Asked HERE and not inside `_compose`, because `_render`
+                # reaches `_compose` (directly and via `_render_via_ffmpeg`)
+                # having already validated: putting it there would ask the same
+                # question twice on every render. One door, one gate, each.
+                edit_decisions = inputs.get("edit_decisions")
+                if edit_decisions:
+                    gate = self._identity_blocks(
+                        edit_decisions,
+                        asset_manifest=inputs.get("asset_manifest"),
+                        batch_look=self._resolve_batch_look(inputs, edit_decisions),
+                    )
+                    if gate:
+                        return self._validation_failure(gate)
                 result = self._compose(inputs)
             elif operation == "render":
                 result = self._render(inputs)
@@ -417,30 +436,68 @@ class VideoCompose(BaseTool):
         return path.suffix.lower() in VideoCompose._IMAGE_EXTENSIONS
 
     @staticmethod
-    def _has_audio_stream(path: Path) -> bool:
-        """Return True iff ffprobe reports at least one audio stream.
+    def _probe_source(path: Path) -> tuple[bool, tuple[int, int] | None]:
+        """Both questions the per-cut encode asks of a source, in ONE ffprobe.
 
-        Many stock video clips (especially from Pexels) ship with no audio
-        stream at all. If we blindly tell ffmpeg to transcode the 0:a stream
-        on such a file it errors out. This helper lets the segment builder
-        branch on stream presence so it can synthesize a silent track when
-        needed, keeping the concat segment layout consistent.
+        1. Is there an audio stream? Many stock clips (especially from Pexels)
+           ship with none; telling ffmpeg to transcode 0:a on such a file
+           errors out, so the segment builder synthesizes silence instead and
+           the concat segment layout stays consistent.
+        2. What is the video's DISPLAY size? `polish_filters.scale_headroom`
+           must never build a canvas bigger than the source can fill. This used
+           to be unavailable, so the headroom was applied blind and a source
+           smaller than headroom x target paid for an interpolated intermediate
+           it could not fill.
+
+        Display, not coded, size: a phone clip carries `rotation: -90` and a
+        coded 3840x2160 arrives at the filter graph as 2160x3840 (ffmpeg
+        autorotates). Capping on the coded size would cap a portrait reel on
+        the wrong ratio.
+
+        Returns `(False, None)` on any probe failure — the caller then behaves
+        exactly as it did before this existed: synthesize silence, and keep the
+        punch-in's own headroom.
         """
-        try:
-            out = subprocess.check_output(
-                [
-                    "ffprobe", "-v", "error",
-                    "-select_streams", "a",
-                    "-show_entries", "stream=codec_type",
-                    "-of", "default=nw=1:nk=1",
-                    str(path),
-                ],
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            return "audio" in out
-        except Exception:
-            return False
+        # The `stream_side_data` section is the newer of the two selectors; an
+        # ffprobe that rejects it must still answer the audio question, because
+        # getting THAT wrong makes ffmpeg fail the encode outright while a
+        # missing source size only costs the headroom cap.
+        streams: list[dict] = []
+        for entries in (
+            "stream=codec_type,width,height:stream_side_data=rotation",
+            "stream=codec_type,width,height",
+        ):
+            try:
+                out = subprocess.check_output(
+                    ["ffprobe", "-v", "error",
+                     "-show_entries", entries, "-of", "json", str(path)],
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                streams = json.loads(out).get("streams", [])
+                break
+            except Exception:
+                continue
+        if not streams:
+            return False, None
+
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        dimensions: tuple[int, int] | None = None
+        for stream in streams:
+            if stream.get("codec_type") != "video":
+                continue
+            width, height = stream.get("width"), stream.get("height")
+            if not width or not height:
+                continue
+            rotation = 0.0
+            for side_data in stream.get("side_data_list") or []:
+                if side_data.get("rotation") is not None:
+                    rotation = float(side_data["rotation"])
+            if round(abs(rotation)) % 180 == 90:
+                width, height = height, width
+            dimensions = (int(width), int(height))
+            break
+        return has_audio, dimensions
 
     def _mux_external_audio(self, video_path: Path, audio_path: str | Path) -> ToolResult:
         """Atomically replace a rendered video's audio with the approved mix."""
@@ -623,6 +680,13 @@ class VideoCompose(BaseTool):
                     # pix_fmt / sar across ALL segments — otherwise it throws
                     # "Non-monotonous DTS" or silently produces corrupt output.
                     #
+                    # One probe per cut, hoisted above the filter build. It
+                    # answers the audio-stream question the encode has always
+                    # asked AND the source-size question the headroom needs;
+                    # asking it here rather than twice keeps the per-cut probe
+                    # count at the one it has always been.
+                    has_audio, source_dimensions = self._probe_source(source)
+
                     # Target is target_w x target_h @ 30fps, yuv420p, sar=1
                     # (default 1920x1080; overridable via `profile` or
                     # edit_decisions.metadata.compose_target — see above).
@@ -635,17 +699,35 @@ class VideoCompose(BaseTool):
                     # size; downscaled to 1080x1920 first, that crop magnifies
                     # detail thrown away one filter earlier and every punch-in —
                     # which lands on a beat hit, where the eye is — comes out
-                    # soft. Measured here on 3840x2160 source at z=1.6:
-                    # Laplacian variance of the final frame 37.1 -> 54.8
-                    # (1.48x), wall clock 1.82s -> 1.81s, zero extra ffprobe
-                    # calls (the per-cut ffprobe this replaces). Both fit branches
-                    # scale to the same canvas, and zoompan (which keeps
-                    # s=<output size>) lands it back on target. A cut with no
-                    # punch-in gets headroom 1.0 and renders byte-identically.
+                    # soft. Both fit branches scale to the same canvas, and
+                    # zoompan (which keeps s=<output size>) lands it back on
+                    # target. A cut with no punch-in gets headroom 1.0 and
+                    # renders byte-identically.
+                    #
+                    # The source's display size is passed in so the headroom is
+                    # capped by what the source can actually fill — it comes
+                    # from the ffprobe this loop already ran for audio-stream
+                    # presence, so it costs no extra probe.
+                    #
+                    # The headroom costs wall clock — the comment that used to
+                    # sit here claimed "1.82s -> 1.81s", i.e. free, and that
+                    # was false. Re-measured interleaved and paired through
+                    # this function (one discarded warm-up sweep, then 11
+                    # rounds of {headroom forced to 1.0, real headroom} back to
+                    # back), 2s z=1.6 cut of
+                    # projects/gym-footage/raw/IMG_1384.MOV at 1080x1920/cover:
+                    # median 1.730s -> 1.812s (1.05x, all 11 pairs slower) for
+                    # Laplacian variance of the final frame 74.3 -> 113.4
+                    # (1.53x). Zero extra ffprobe calls either way.
                     #
                     # Even dimensions are not cosmetic: libx264 + yuv420p
                     # refuses an odd width or height outright.
-                    headroom = polish_filters.scale_headroom(cut)
+                    headroom = polish_filters.scale_headroom(
+                        cut,
+                        target=(target_w, target_h),
+                        source=source_dimensions,
+                        fit=fit_mode,
+                    )
                     geom_w = int(round(target_w * headroom)) // 2 * 2
                     geom_h = int(round(target_h * headroom)) // 2 * 2
                     if fit_mode == "cover":
@@ -702,10 +784,9 @@ class VideoCompose(BaseTool):
                     # Audio handling: some source clips have no audio stream
                     # (Pexels stock often ships silent). If we unconditionally
                     # ask ffmpeg to copy/encode the 0:a stream it errors out.
-                    # Probe for an audio stream first — if present, transcode
-                    # to AAC; if absent, synthesize a silent stereo track so
-                    # concat segments have a consistent stream layout.
-                    has_audio = self._has_audio_stream(source)
+                    # `_probe_source` above already answered this — if present,
+                    # transcode to AAC; if absent, synthesize a silent stereo
+                    # track so concat segments have a consistent stream layout.
                     if has_audio:
                         cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"])
                     else:
@@ -1505,14 +1586,32 @@ class VideoCompose(BaseTool):
         `metadata.batch_look` is the older spelling, kept because it is where
         the other compose knob already lives (`metadata.compose_target`) and
         `tests/lib/test_reel_plan.py` materialises it per reel.
+
+        A look in any other shape is REFUSED, not skipped. This used to filter
+        with `isinstance(candidate, dict)`, so `batch_look: "bright_clean"` or
+        `[{"grade": "bright_clean"}]` on the spine resolved to None and the
+        batch rendered ungraded — and, worse, the operator_footage identity
+        gate runs *against* the resolved look, so dropping it silently skipped
+        the identity check with it. That is the silent-drop harm the polish
+        gate exists to prevent, arriving through the spine.
         """
-        for candidate in (
-            inputs.get("batch_look"),
-            edit_decisions.get("batch_look"),
-            (edit_decisions.get("metadata") or {}).get("batch_look"),
+        for source, candidate in (
+            ("batch_look tool input", inputs.get("batch_look")),
+            ("edit_decisions.batch_look", edit_decisions.get("batch_look")),
+            ("edit_decisions.metadata.batch_look",
+             (edit_decisions.get("metadata") or {}).get("batch_look")),
         ):
-            if isinstance(candidate, dict):
-                return candidate
+            if candidate is None:
+                continue
+            if not isinstance(candidate, dict):
+                raise polish_filters.PolishError(
+                    f"{source} must be a mapping of "
+                    f"{{grade, grain, sharpen}}, got {candidate!r}. A look in "
+                    f"another shape is refused rather than dropped: dropping it "
+                    f"would also skip the operator_footage identity gate, which "
+                    f"is asked against the resolved look."
+                )
+            return candidate
         return None
 
     def _needs_remotion(self, cuts: list[dict]) -> bool:
@@ -1554,6 +1653,152 @@ class VideoCompose(BaseTool):
         # clips natively via <OffthreadVideo> and gives us transitions,
         # overlays, and profile scaling for free.
         return True
+
+    def _identity_blocks(
+        self,
+        edit_decisions: dict[str, Any],
+        *,
+        asset_manifest: dict[str, Any] | None = None,
+        batch_look: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """The identity and runtime half of the pre-compose gate.
+
+        Split out of `_pre_compose_validation` because that function is called
+        from `_render` and from nowhere else, while `operation='compose'` is a
+        second, documented door into the same FFmpeg encode. The same artifact
+        that `render` refused for an identity violation composed happily
+        through `compose`: no gate, no warning, and checks 4 and 5 — the
+        operator-footage cross-check and the unsafe-look refusal — simply did
+        not run. These three checks are the ones that must hold wherever the
+        pixels are made. Checks 1-3 (delivery promise, slideshow risk,
+        renderer_family) are about the PLAN `render` is handed and stay with
+        it: `compose` is documented as the direct trim/concat entry and is
+        called with cut lists that were never a proposal.
+
+        Returns the blocking reasons, empty when there are none.
+        """
+        blocks: list[str] = []
+
+        # --- 4. Identity: declared provenance vs the tool that made the pixels ---
+        # `provenance` is a declaration, never inferred from the pixels (R5). The
+        # one corroborating signal that travels in-band is the producing tool:
+        # `footage_library` is the sole ingest that stamps identity_locked=True on
+        # a corpus row, and `cutaway_gen` is the sole producer of AI frames. A cut
+        # whose declaration contradicts its producer is the failure this gate
+        # exists for — an operator clip relabelled `ai_generated` is an operator
+        # clip with its identity protection switched off.
+        # Keyed by BOTH id and path, because `_render` resolves a cut's `source`
+        # either way (`if source_id in asset_lookup` — else it is opened as a
+        # path). Keyed on id alone, naming the operator's clip by its filename
+        # instead of its manifest id walked straight past this check while the
+        # corroborating row sat in the same manifest. `setdefault` so the first
+        # row wins: a duplicate id appended later must not shadow the original.
+        assets_by_ref: dict[str, dict] = {}
+        for asset in (asset_manifest or {}).get("assets", []):
+            for key in (asset.get("id"), asset.get("path")):
+                if key:
+                    assets_by_ref.setdefault(key, asset)
+
+        # What the manifest says each cut's pixels are, where it knows.
+        implied: dict[str, str] = {}
+        for cut in edit_decisions.get("cuts") or []:
+            asset = assets_by_ref.get(cut.get("source"))
+            if not asset:
+                continue
+            expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
+            if expected:
+                implied[cut.get("id")] = expected
+            declared = cut.get("provenance")
+            if expected and declared and declared != expected:
+                blocks.append(
+                    f"Identity violation on cut {cut.get('id')!r}: declared "
+                    f"provenance {declared!r} but its asset {asset.get('id')!r} was "
+                    f"produced by {asset.get('source_tool')!r}, which only makes "
+                    f"{expected!r}. provenance is declared at ingest and carried "
+                    f"forward — a disagreement here means it was rewritten "
+                    f"downstream (spec R5)."
+                )
+
+        # --- 5. Identity: the look applied to an operator_footage cut ---
+        # `look_filters` is the authority on what is identity-safe; calling it
+        # here asks the same question the ffmpeg encode would ask, early enough
+        # that the answer holds for every runtime.
+        if batch_look:
+            from lib.polish_filters import PolishError, look_filters
+
+            # One look for the whole batch, so it is one verdict per distinct
+            # provenance — not one line per cut. A hundred-cut batch used to
+            # emit a hundred identical lines.
+            #
+            # Unlocked first, which separates the two reasons `look_filters`
+            # raises: a name it cannot resolve is a typo in the look, and
+            # calling that an "identity violation" sent whoever hit it looking
+            # for a provenance bug that was not there.
+            try:
+                look_filters(batch_look, None)
+            except PolishError as e:
+                blocks.append(f"Invalid batch_look: {e}")
+            else:
+                by_provenance: dict[str | None, list[str]] = {}
+                for cut in edit_decisions.get("cuts") or []:
+                    # A cut that omits `provenance` falls back to what its
+                    # asset row implies. Omission was the softer hole: the
+                    # manifest said `footage_library` and the gate let a colour
+                    # grade through anyway, because the word was missing from
+                    # the cut. Where the manifest knows, silence is no waiver.
+                    provenance = cut.get("provenance") or implied.get(cut.get("id"))
+                    by_provenance.setdefault(provenance, []).append(cut.get("id"))
+
+                for provenance, cut_ids in by_provenance.items():
+                    try:
+                        look_filters(batch_look, provenance)
+                    except PolishError as e:
+                        shown = ", ".join(repr(c) for c in cut_ids[:3])
+                        more = f" (+{len(cut_ids) - 3} more)" if len(cut_ids) > 3 else ""
+                        blocks.append(
+                            f"Identity violation on {len(cut_ids)} "
+                            f"{provenance!r} cut(s) — {shown}{more}: {e}"
+                        )
+
+        # --- 6. Polish is FFmpeg's, and no other runtime reads it ---
+        # `polish` and the batch look are consumed in `_compose`'s per-cut
+        # encode and NOWHERE else (spec R6: the picture plane belongs to
+        # FFmpeg). Routed to Remotion or HyperFrames, a cut's punch-in, ramp,
+        # flash, whip and grade are simply not read — the render succeeds and
+        # the reel is quietly missing every accent it was cut for. Refuse
+        # rather than re-route: the runtime was locked at proposal and this
+        # repo does not silently downgrade, so the caller decides whether to
+        # drop the polish or to re-lock render_runtime='ffmpeg'.
+        #
+        # Check 5 gates the look on every route as defence in depth; this
+        # check is what stops a gated look from then being dropped on the
+        # floor. The rule, restated: `batch_look` and `polish` are read in
+        # `_compose` and nowhere else in this file, so on any other runtime
+        # "reaches the renderer" means "reaches it as nothing".
+        runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
+        if runtime and runtime != "ffmpeg":
+            polished = [
+                c.get("id") for c in edit_decisions.get("cuts") or [] if c.get("polish")
+            ]
+            if polished or batch_look:
+                carried = []
+                if polished:
+                    shown = ", ".join(repr(c) for c in polished[:3])
+                    more = f" (+{len(polished) - 3} more)" if len(polished) > 3 else ""
+                    carried.append(f"a polish block on {len(polished)} cut(s) — {shown}{more}")
+                if batch_look:
+                    carried.append("a batch_look")
+                blocks.append(
+                    f"render_runtime={runtime!r} cannot render "
+                    + " and ".join(carried)
+                    + ". The picture plane (punch_in, speed_ramp, transition_out, "
+                    "grade/grain/sharpen) is applied only in the FFmpeg per-cut "
+                    "encode (spec R6); this runtime would drop it silently. "
+                    "Either remove the polish, or lock render_runtime='ffmpeg' "
+                    "at proposal — the tool will not swap runtimes for you."
+                )
+
+        return blocks
 
     def _pre_compose_validation(
         self,
@@ -1653,126 +1898,18 @@ class VideoCompose(BaseTool):
                 "Re-run the proposal stage with a renderer_family selection."
             )
 
-        # --- 4. Identity: declared provenance vs the tool that made the pixels ---
-        # `provenance` is a declaration, never inferred from the pixels (R5). The
-        # one corroborating signal that travels in-band is the producing tool:
-        # `footage_library` is the sole ingest that stamps identity_locked=True on
-        # a corpus row, and `cutaway_gen` is the sole producer of AI frames. A cut
-        # whose declaration contradicts its producer is the failure this gate
-        # exists for — an operator clip relabelled `ai_generated` is an operator
-        # clip with its identity protection switched off.
-        # Keyed by BOTH id and path, because `_render` resolves a cut's `source`
-        # either way (`if source_id in asset_lookup` — else it is opened as a
-        # path). Keyed on id alone, naming the operator's clip by its filename
-        # instead of its manifest id walked straight past this check while the
-        # corroborating row sat in the same manifest. `setdefault` so the first
-        # row wins: a duplicate id appended later must not shadow the original.
-        assets_by_ref: dict[str, dict] = {}
-        for asset in (asset_manifest or {}).get("assets", []):
-            for key in (asset.get("id"), asset.get("path")):
-                if key:
-                    assets_by_ref.setdefault(key, asset)
+        # Checks 4-6 are the identity/runtime half of this gate, and they are
+        # asked at BOTH doors into the FFmpeg encode — see
+        # `_identity_blocks` and the `operation == "compose"` branch of
+        # `execute`.
+        blocks.extend(
+            self._identity_blocks(
+                edit_decisions,
+                asset_manifest=asset_manifest,
+                batch_look=batch_look,
+            )
+        )
 
-        # What the manifest says each cut's pixels are, where it knows.
-        implied: dict[str, str] = {}
-        for cut in edit_decisions.get("cuts") or []:
-            asset = assets_by_ref.get(cut.get("source"))
-            if not asset:
-                continue
-            expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
-            if expected:
-                implied[cut.get("id")] = expected
-            declared = cut.get("provenance")
-            if expected and declared and declared != expected:
-                blocks.append(
-                    f"Identity violation on cut {cut.get('id')!r}: declared "
-                    f"provenance {declared!r} but its asset {asset.get('id')!r} was "
-                    f"produced by {asset.get('source_tool')!r}, which only makes "
-                    f"{expected!r}. provenance is declared at ingest and carried "
-                    f"forward — a disagreement here means it was rewritten "
-                    f"downstream (spec R5)."
-                )
-
-        # --- 5. Identity: the look applied to an operator_footage cut ---
-        # `look_filters` is the authority on what is identity-safe; calling it
-        # here asks the same question the ffmpeg encode would ask, early enough
-        # that the answer holds for every runtime.
-        if batch_look:
-            from lib.polish_filters import PolishError, look_filters
-
-            # One look for the whole batch, so it is one verdict per distinct
-            # provenance — not one line per cut. A hundred-cut batch used to
-            # emit a hundred identical lines.
-            #
-            # Unlocked first, which separates the two reasons `look_filters`
-            # raises: a name it cannot resolve is a typo in the look, and
-            # calling that an "identity violation" sent whoever hit it looking
-            # for a provenance bug that was not there.
-            try:
-                look_filters(batch_look, None)
-            except PolishError as e:
-                blocks.append(f"Invalid batch_look: {e}")
-            else:
-                by_provenance: dict[str | None, list[str]] = {}
-                for cut in edit_decisions.get("cuts") or []:
-                    # A cut that omits `provenance` falls back to what its
-                    # asset row implies. Omission was the softer hole: the
-                    # manifest said `footage_library` and the gate let a colour
-                    # grade through anyway, because the word was missing from
-                    # the cut. Where the manifest knows, silence is no waiver.
-                    provenance = cut.get("provenance") or implied.get(cut.get("id"))
-                    by_provenance.setdefault(provenance, []).append(cut.get("id"))
-
-                for provenance, cut_ids in by_provenance.items():
-                    try:
-                        look_filters(batch_look, provenance)
-                    except PolishError as e:
-                        shown = ", ".join(repr(c) for c in cut_ids[:3])
-                        more = f" (+{len(cut_ids) - 3} more)" if len(cut_ids) > 3 else ""
-                        blocks.append(
-                            f"Identity violation on {len(cut_ids)} "
-                            f"{provenance!r} cut(s) — {shown}{more}: {e}"
-                        )
-
-        # --- 6. Polish is FFmpeg's, and no other runtime reads it ---
-        # `polish` and the batch look are consumed in `_compose`'s per-cut
-        # encode and NOWHERE else (spec R6: the picture plane belongs to
-        # FFmpeg). Routed to Remotion or HyperFrames, a cut's punch-in, ramp,
-        # flash, whip and grade are simply not read — the render succeeds and
-        # the reel is quietly missing every accent it was cut for. Refuse
-        # rather than re-route: the runtime was locked at proposal and this
-        # repo does not silently downgrade, so the caller decides whether to
-        # drop the polish or to re-lock render_runtime='ffmpeg'.
-        #
-        # Note this contradicts `test_an_honest_identity_locked_plan_reaches_
-        # the_renderer`, which sends a batch_look down all three routes and
-        # expects it through. That expectation is the thing that is wrong: no
-        # runtime but FFmpeg reads `batch_look` anywhere in this file, so what
-        # "reaches the renderer" there reaches it as nothing. Check 5 gating a
-        # look on every route stays correct as defence in depth; check 6 is
-        # what stops the gated look from then being dropped on the floor.
-        runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
-        if runtime and runtime != "ffmpeg":
-            polished = [
-                c.get("id") for c in edit_decisions.get("cuts") or [] if c.get("polish")
-            ]
-            if polished or batch_look:
-                carried = []
-                if polished:
-                    shown = ", ".join(repr(c) for c in polished[:3])
-                    more = f" (+{len(polished) - 3} more)" if len(polished) > 3 else ""
-                    carried.append(f"a polish block on {len(polished)} cut(s) — {shown}{more}")
-                if batch_look:
-                    carried.append("a batch_look")
-                blocks.append(
-                    f"render_runtime={runtime!r} cannot render "
-                    + " and ".join(carried)
-                    + ". The picture plane (punch_in, speed_ramp, transition_out, "
-                    "grade/grain/sharpen) is applied only in the FFmpeg per-cut "
-                    "encode (spec R6); this runtime would drop it silently. "
-                    "Either remove the polish, or lock render_runtime='ffmpeg' "
-                    "at proposal — the tool will not swap runtimes for you."
-                )
 
         # Log warnings
         for w in warnings:
@@ -1780,16 +1917,28 @@ class VideoCompose(BaseTool):
 
         # Block on critical violations
         if blocks:
-            return ToolResult(
-                success=False,
-                error=(
-                    "Pre-compose validation failed — render blocked.\n"
-                    + "\n".join(f"  • {b}" for b in blocks)
-                    + ("\n\nWarnings:\n" + "\n".join(f"  • {w}" for w in warnings) if warnings else "")
-                ),
-            )
+            return self._validation_failure(blocks, warnings)
 
         return None
+
+    @staticmethod
+    def _validation_failure(
+        blocks: list[str], warnings: list[str] | None = None
+    ) -> ToolResult:
+        """The one wording for a blocked compose, whichever door asked.
+
+        Shared so the `operation='compose'` gate reports a violation in the
+        exact words `operation='render'` reports it — a caller that learned to
+        read one of them can read the other.
+        """
+        return ToolResult(
+            success=False,
+            error=(
+                "Pre-compose validation failed — render blocked.\n"
+                + "\n".join(f"  • {b}" for b in blocks)
+                + ("\n\nWarnings:\n" + "\n".join(f"  • {w}" for w in warnings) if warnings else "")
+            ),
+        )
 
     def _render(self, inputs: dict[str, Any]) -> ToolResult:
         """High-level render: assemble edit decisions + asset manifest into final video.

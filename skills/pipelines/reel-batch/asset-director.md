@@ -376,8 +376,8 @@ The pool is identity-locked at ingest and nothing in this stage may loosen that.
 
 **One look, every cut, locked ones included.** `batch_look` is a single project-level dict; there
 is no per-provenance variant and no stage can put one look on cutaways and another on pool cuts.
-No artifact readable at this stage carries it — edit-director authors it later into
-`edit_decisions.metadata.batch_look` — so the value to check here is the pipeline's canonical
+No artifact readable at this stage carries it — edit-director authors it later onto the spine
+root as `edit_decisions.batch_look` — so the value to check here is the pipeline's canonical
 one, unless the operator named something else at this sitting:
 
 ```python

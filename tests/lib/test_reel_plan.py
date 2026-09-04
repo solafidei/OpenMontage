@@ -264,3 +264,78 @@ def test_aborting_after_reel_three_resumes_on_four_and_five(tmp_path) -> None:
     assert [o["path"].rsplit("/", 1)[-1] for o in rebuilt] == [
         f"{r}.mp4" for r in reel_ids(plan)
     ]
+
+
+# --- the spine root the reel must not lose ------------------------------
+
+
+def _atelier_spine() -> dict:
+    """The same batch, spelled the way the shipped schema blesses.
+
+    `batch_look` at the root (not under `metadata`) is what
+    `video_compose._resolve_batch_look` prefers, and `composition_mode: atelier`
+    is meaningless to `_render_via_atelier` without the `bespoke` block beside it.
+    """
+    spine = _spine()
+    spine["batch_look"] = {"grade": "talking_head_standard", "sharpen": "sharpen_light"}
+    del spine["metadata"]["batch_look"]
+    spine["composition_mode"] = "atelier"
+    spine["bespoke"] = {
+        "entry": "projects/b/index.tsx",
+        "composition_id": "Reel",
+        "art_direction": "hard shadow, single key, no stock components",
+    }
+    return spine
+
+
+@pytest.mark.parametrize("reel_id", [f"reel_{r:02d}" for r in range(1, REELS + 1)])
+def test_the_root_batch_look_spelling_reaches_every_reel(reel_id: str) -> None:
+    """A batch rendered with no look at all, silently and schema-valid.
+
+    The schema gained a root `batch_look` and `_resolve_batch_look` prefers it,
+    but `materialise` carried only renderer_family/composition_mode/transitions,
+    so a spine written to the blessed spelling produced five reels whose
+    `batch_look` was None — no grade, no grain, no sharpen, and nothing invalid
+    for a checkpoint or a validator to complain about.
+    """
+    spine = _atelier_spine()
+    reel = materialise(spine, entry_for(_plan(), reel_id))
+
+    validate_artifact("edit_decisions", reel)
+    assert reel["batch_look"] == spine["batch_look"]
+
+
+def test_an_atelier_reel_carries_the_bespoke_block_beside_the_mode() -> None:
+    """`composition_mode` without `bespoke` is worse than neither.
+
+    video_compose routes on `composition_mode == "atelier"` and then hard-fails
+    with "atelier mode requires edit_decisions.bespoke.entry ... composition_id"
+    (tools/video/video_compose.py:1076-1086). Carrying the mode alone turned one
+    atelier batch into five of those errors.
+    """
+    spine = _atelier_spine()
+    reel = materialise(spine, entry_for(_plan(), "reel_04"))
+
+    validate_artifact("edit_decisions", reel)
+    assert reel["composition_mode"] == "atelier"
+    assert reel["bespoke"]["entry"] == spine["bespoke"]["entry"]
+    assert reel["bespoke"]["composition_id"] == spine["bespoke"]["composition_id"]
+
+
+def test_a_spine_carrying_a_root_batch_look_writes_at_the_edit_checkpoint(tmp_path) -> None:
+    """The spec claim this replaces: "the schema root is additionalProperties:
+    false, so a spine carrying it fails validate_artifact at checkpoint write."
+
+    That was true before the property was declared and false the moment it was.
+    docs/intent/reel-batch-spec.md §4.3 now says so; this is the executable half.
+    """
+    _project(tmp_path)
+    spine = _atelier_spine()
+
+    write_checkpoint(
+        tmp_path, "b", "edit", "completed",
+        {"edit_decisions": spine, "reel_plan": _plan()},
+        pipeline_type="reel-batch",
+    )
+    restored = read_checkpoint(tmp_path, "b", "edit")
+    assert restored["artifacts"]["edit_decisions"]["batch_look"] == spine["batch_look"]

@@ -146,7 +146,13 @@ class AzureSpeechToText(BaseTool):
                 "enum": ["None", "Masked", "Removed", "Tags"],
                 "default": "Masked",
             },
-            "output_dir": {"type": "string", "description": "Directory for output files"},
+            "output_dir": {
+                "type": "string",
+                "description": (
+                    "Directory for output files (default: "
+                    "projects/_analysis/azure_stt_<stem>, never beside the source media)"
+                ),
+            },
         },
     }
 
@@ -252,7 +258,19 @@ class AzureSpeechToText(BaseTool):
     ) -> ToolResult:
         import requests
 
-        output_dir = Path(inputs.get("output_dir", input_path.parent))
+        # Never default beside the operator's source media: transcribing a clip
+        # in a footage pool would drop <stem>_transcript.json into the folder the
+        # operator curates. Identical defect and identical remedy to transcriber
+        # and beat_grid -- and azure_stt is the one the agent PREFERS whenever
+        # AZURE_SPEECH_KEY is set, so leaving it unfixed left the pollution in
+        # place on the path that actually runs. Resolved so the returned
+        # transcript path stays openable from any cwd, the way it was while it
+        # came off the caller's absolute input_path.parent.
+        output_dir = (
+            Path(inputs["output_dir"])
+            if inputs.get("output_dir")
+            else Path("projects") / "_analysis" / f"azure_stt_{input_path.stem}"
+        ).resolve()
         diarize = inputs.get("diarize", False)
         output_dir.mkdir(parents=True, exist_ok=True)
 

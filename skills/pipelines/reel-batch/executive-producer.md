@@ -223,7 +223,7 @@ G5 — after EDIT
     with music_asset_id / subtitle_source / subtitle_srt_source being asset_manifest
     asset ids, NOT paths? The schema types the shape; only this bullet checks the ids resolve.
   - Per-reel axes are in reel_plan, NOT smuggled into edit_decisions.metadata?
-  - `edit_decisions.metadata.batch_look` survives `look_filters(look, "operator_footage")`
+  - `edit_decisions.batch_look` (spine root) survives `look_filters(look, "operator_footage")`
     — a `face_enhance` preset in the `grade` slot, no `grain` key, no `color_grade` profile
     name — and it is the SAME single dict for every reel, locked cuts included?
 

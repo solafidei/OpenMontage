@@ -370,3 +370,79 @@ def test_embedding_needs_no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", _refuse)
     vector = fl._embed_text("empty gym at 5am, cold light")
     assert vector.shape == (512,)
+
+
+# ----------------------------------------------------------------------
+# The focus measure must measure focus, not resolution
+# ----------------------------------------------------------------------
+
+
+def _synthetic_detail(height: int, width: int) -> "np.ndarray":
+    """A frame with real high-frequency detail at every scale."""
+    import numpy as np
+
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float32)
+    # Fine checker plus a coarse gradient — detail that survives a box
+    # downsample, so the two resolutions describe the SAME scene.
+    return (
+        120.0
+        + 60.0 * np.sin(xs / 1.5) * np.sin(ys / 1.5)
+        + 40.0 * (xs / max(width - 1, 1))
+    )
+
+
+def test_sharpness_scores_the_same_scene_the_same_at_any_resolution() -> None:
+    """The gate rejected 53 of 56 in-focus 4K segments and passed the same
+    footage downscaled.
+
+    Laplacian variance is a fixed-pixel-neighbourhood measure, so it falls as
+    resolution rises — adjacent pixels of a 4K frame are more alike. Against a
+    fixed floor that made `sharpness_floor` a resolution filter wearing a focus
+    filter's name, and it discarded the *better* source. Measured on real gym
+    footage the same frame scored 23.0 native and 167.1 at 1080p.
+    """
+    from PIL import Image
+    import numpy as np
+
+    from tools.video.footage_library import _sharpness
+
+    base = _synthetic_detail(1920, 1080)
+    big = np.asarray(
+        Image.fromarray(base).resize((2160, 3840), Image.LANCZOS), dtype=np.float32
+    )
+
+    at_1080 = _sharpness(base)
+    at_4k = _sharpness(big)
+
+    assert at_1080 > 0, "the synthetic frame carries no detail — test is vacuous"
+    assert at_4k == pytest.approx(at_1080, rel=0.5), (
+        f"the same scene scored {at_1080:.1f} at 1080p and {at_4k:.1f} at 4K — "
+        "the focus measure is reading resolution"
+    )
+
+
+def test_a_genuinely_blurred_frame_still_fails_the_floor() -> None:
+    """The counter-test: normalising must not turn the gate off.
+
+    Scoped deliberately to a CLEAN blurred frame. It does not police the
+    box-average-vs-subsample choice — measured, a blurred frame carrying sensor
+    noise clears the floor under both (721 vs 2888), so no assertion here could
+    tell them apart. Claiming otherwise would be coverage this test does not
+    have; the reason for box-averaging is written at the implementation instead.
+    """
+    from PIL import Image, ImageFilter
+    import numpy as np
+
+    from tools.video.footage_library import DEFAULT_SHARPNESS_FLOOR, _sharpness
+
+    sharp = _synthetic_detail(1920, 1080)
+    blurred = np.asarray(
+        Image.fromarray(sharp).convert("L").filter(ImageFilter.GaussianBlur(6)),
+        dtype=np.float32,
+    )
+
+    assert _sharpness(sharp) > DEFAULT_SHARPNESS_FLOOR
+    assert _sharpness(blurred) < DEFAULT_SHARPNESS_FLOOR, (
+        f"a heavily blurred frame scored {_sharpness(blurred):.1f}, above the "
+        f"{DEFAULT_SHARPNESS_FLOOR} floor — the gate stopped gating"
+    )
