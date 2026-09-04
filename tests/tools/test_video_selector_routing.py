@@ -621,3 +621,246 @@ def test_divergence_does_not_touch_the_cost_ledger(probe_selector, tmp_path):
     assert entry["id"] == entry_id
     assert "estimate_divergence" not in entry
     assert entry["estimated_usd"] == pytest.approx(0.10)  # still the QUOTED figure
+
+
+# ---------------------------------------------------------------------------
+# The divergence guard itself: four ways past it, and one way to crash it.
+#
+# Each of these was executed against the pre-fix selector before it was written:
+# the guard compared the REQUEST (so a reroute caused by the world was silent),
+# the request slice omitted preferred_provider_gap (so one field moved the money
+# unseen), the quote was consumed by the first execute (so clips 2..N of a batch
+# were unwarned), a duplicated pin made it cry wolf on an identical route, and a
+# provider that declines to price made the warning itself raise.
+# ---------------------------------------------------------------------------
+
+class _FailingStub(_StubTool):
+    """A provider whose execute() fails — no money moves, no quote is consumed."""
+
+    def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        self.last_execute_inputs = dict(inputs)
+        return ToolResult(success=False, error="provider blew up")
+
+
+def _two_provider_selector(rankings, *, kling_cost: float | None = 0.10):
+    """seedance (top-ranked, $1.52) + kling ($0.10), with handles on both."""
+    seedance = _StubTool("seedance_video", "seedance", cost=1.52)
+    kling = _StubTool("kling_video", "kling", cost=kling_cost)
+    rankings.extend([
+        _ScoreStub("seedance_video", "seedance", 0.90),
+        _ScoreStub("kling_video", "kling", 0.60),
+    ])
+    sel = VideoSelector()
+    sel._providers = lambda: [seedance, kling]  # type: ignore[assignment]
+    return sel, seedance, kling
+
+
+# --- (A) the outcome, not the request --------------------------------------
+
+def test_divergence_flagged_when_the_world_reroutes_identical_inputs(rankings, caplog):
+    """ONE dict, priced and executed — and the money still moves.
+
+    kling goes UNAVAILABLE between the quote and the call, so the same inputs
+    route to seedance at 15x. Comparing the request finds nothing to compare:
+    the routing slices here are equal, which is exactly why the comparison has
+    to be on the executed provider and the executed price.
+    """
+    sel, _seedance, kling = _two_provider_selector(rankings)
+    inputs = {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.5}
+
+    assert sel.estimate_cost(inputs) == pytest.approx(0.10)
+    kling._status = ToolStatus.UNAVAILABLE  # the world changes, the inputs do not
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        result = sel.execute(inputs)
+
+    assert result.success is True
+    divergence = result.data["estimate_divergence"]
+    assert divergence["estimated_provider"] == "kling"
+    assert divergence["executed_provider"] == "seedance"
+    assert divergence["estimated_usd"] == pytest.approx(0.10)
+    assert divergence["executed_estimate_usd"] == pytest.approx(1.52)
+    assert divergence["estimated_routing"] == divergence["executed_routing"], (
+        "the request never changed — a request-only guard has nothing to fire on"
+    )
+    assert [r for r in caplog.records if "divergence" in r.getMessage()]
+
+
+def test_same_provider_repriced_between_quote_and_call_is_flagged(rankings):
+    """A provider that re-prices its own route is a divergence too."""
+    sel, seedance, _kling = _two_provider_selector(rankings)
+    inputs = {"prompt": "x"}
+
+    assert sel.estimate_cost(inputs) == pytest.approx(1.52)
+    seedance._cost = 3.04  # same route, twice the money
+
+    result = sel.execute(inputs)
+
+    divergence = result.data["estimate_divergence"]
+    assert divergence["executed_provider"] == "seedance"
+    assert divergence["estimated_usd"] == pytest.approx(1.52)
+    assert divergence["executed_estimate_usd"] == pytest.approx(3.04)
+
+
+# --- (B) the omitted field -------------------------------------------------
+
+def test_changing_only_the_preference_gap_is_flagged(rankings):
+    """preferred_provider_gap alone reroutes kling -> seedance; it must not be silent.
+
+    The field is in the tool's own input_schema and decides whether a preference
+    wins at all, and it was absent from the routing slice — the omission shape.
+    """
+    sel, _seedance, _kling = _two_provider_selector(rankings)
+
+    quoted = sel.estimate_cost(
+        {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.5}
+    )
+    assert quoted == pytest.approx(0.10)
+
+    result = sel.execute(
+        {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.0}
+    )
+
+    divergence = result.data["estimate_divergence"]
+    assert divergence["executed_provider"] == "seedance"
+    assert divergence["executed_estimate_usd"] == pytest.approx(1.52)
+    # The payload must also NAME the field that moved the money.
+    assert divergence["estimated_routing"]["preferred_provider_gap"] == "0.5"
+    assert divergence["executed_routing"]["preferred_provider_gap"] == "0.0"
+
+
+def test_routing_slice_carries_the_declared_price_and_route_fields():
+    """Every schema field measured to steer routing or pricing is reported."""
+    slice_ = VideoSelector._routing_slice({
+        "prompt": "x",
+        "preferred_provider": "kling",
+        "preferred_provider_gap": 0.5,
+        "model_variant": "master",
+        "resolution": "4k",
+        "mode": "pro",
+        "api_family": "omni",
+        "sound": "on",
+        "workflow_json": "{}",
+    })
+    assert slice_["preferred_provider_gap"] == "0.5"
+    assert slice_["model_variant"] == "master"
+    assert slice_["resolution"] == "4k"
+    assert slice_["mode"] == "pro"
+    assert slice_["api_family"] == "omni"
+    assert slice_["sound"] == "on"
+    assert slice_["custom_workflow"] is True
+
+
+# --- (C) one quote, N clips ------------------------------------------------
+
+def test_every_clip_of_a_batch_is_flagged_against_the_one_quote(rankings, caplog):
+    """reel-batch's real shape: price one cutaway, generate five.
+
+    Consuming the quote on the first execute flagged [True, False, False, False,
+    False] while $7.60 went out against a $0.10 quote — 4 of 5 paid calls unwarned.
+    """
+    sel, _seedance, _kling = _two_provider_selector(rankings)
+    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.10)
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        results = [sel.execute({"prompt": f"clip {i}"}) for i in range(5)]
+
+    flagged = ["estimate_divergence" in r.data for r in results]
+    assert flagged == [True] * 5, f"one quote must answer for every clip, got {flagged}"
+    assert [r.data["estimate_divergence"]["executions_against_estimate"] for r in results] == [1, 2, 3, 4, 5]
+    assert len([r for r in caplog.records if "divergence" in r.getMessage()]) == 5
+
+
+def test_a_failed_execute_does_not_consume_the_quote(rankings):
+    """A call that spent nothing must not disarm the guard for the next one."""
+    seedance = _StubTool("seedance_video", "seedance", cost=1.52)
+    kling = _StubTool("kling_video", "kling", cost=0.10)
+    broken = _FailingStub("broken_video", "broken", cost=0.0)
+    rankings.extend([
+        _ScoreStub("broken_video", "broken", 0.99),
+        _ScoreStub("seedance_video", "seedance", 0.90),
+        _ScoreStub("kling_video", "kling", 0.60),
+    ])
+    sel = VideoSelector()
+    sel._providers = lambda: [seedance, kling, broken]  # type: ignore[assignment]
+
+    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.10)
+    assert sel.execute({"prompt": "x"}).success is False  # top-ranked provider fails
+
+    broken._status = ToolStatus.UNAVAILABLE
+    result = sel.execute({"prompt": "x"})  # the retry that actually spends
+
+    assert result.success is True
+    assert result.data["estimate_divergence"]["executed_provider"] == "seedance"
+
+
+def test_a_new_quote_supersedes_the_old_one(rankings):
+    """Re-pricing the route that is about to run clears the standing divergence."""
+    sel, _seedance, _kling = _two_provider_selector(rankings)
+    sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]})
+
+    sel.estimate_cost({"prompt": "x"})  # re-quoted on the route about to run
+    result = sel.execute({"prompt": "x"})
+
+    assert "estimate_divergence" not in result.data
+
+
+# --- (D) no wolf-crying on an identical route ------------------------------
+
+def test_duplicate_pin_prices_and_routes_identically_and_is_not_flagged(rankings, caplog):
+    """['kling','kling'] and ['kling'] are the same one provider at the same price."""
+    sel, _seedance, _kling = _two_provider_selector(rankings)
+    assert sel.estimate_cost(
+        {"prompt": "x", "allowed_providers": ["kling", "kling"]}
+    ) == pytest.approx(0.10)
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        result = sel.execute({"prompt": "x", "allowed_providers": ["kling"]})
+
+    assert result.data["selected_provider"] == "kling"
+    assert result.data["executed_estimate_usd"] == pytest.approx(0.10)
+    assert "estimate_divergence" not in result.data
+    assert not [r for r in caplog.records if "divergence" in r.getMessage()]
+
+
+def test_routing_slice_deduplicates_a_repeated_pin():
+    """The reported route must not differ on repetition alone."""
+    assert (
+        VideoSelector._routing_slice({"allowed_providers": ["kling", "kling"]})
+        == VideoSelector._routing_slice({"allowed_providers": ["kling"]})
+    )
+
+
+# --- (E) the warning must survive a provider that will not price -----------
+
+def test_warning_survives_an_unpriced_quote(rankings, caplog):
+    """A None quote used to blow up '$%.4f' inside logging.
+
+    Two consequences, both proven: the record was dropped from the run log (the
+    channel this guard exists for), and under caplog's raising handler the
+    TypeError escaped execute() and failed an already-successful paid call.
+    """
+    sel, _seedance, _kling = _two_provider_selector(rankings, kling_cost=None)
+    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) is None
+
+    with caplog.at_level("WARNING", logger="tools.video.video_selector"):
+        result = sel.execute({"prompt": "x"})  # pin dropped -> seedance at $1.52
+
+    assert result.success is True
+    warnings = [r.getMessage() for r in caplog.records if "divergence" in r.getMessage()]
+    assert warnings, "an unpriced quote must not silence the warning it exists for"
+    assert "None" in warnings[0] and "$1.5200" in warnings[0]
+    assert result.data["estimate_divergence"]["estimated_usd"] is None
+
+
+def test_unpriced_quote_on_the_same_route_is_not_a_divergence(rankings):
+    """Two Nones on one provider are not a price change — the guard stays rare."""
+    seedance = _StubTool("seedance_video", "seedance", cost=None)
+    rankings.append(_ScoreStub("seedance_video", "seedance", 0.90))
+    sel = VideoSelector()
+    sel._providers = lambda: [seedance]  # type: ignore[assignment]
+
+    assert sel.estimate_cost({"prompt": "x"}) is None
+    result = sel.execute({"prompt": "x"})
+
+    assert "estimate_divergence" not in result.data

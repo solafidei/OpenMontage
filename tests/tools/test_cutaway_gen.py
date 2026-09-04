@@ -19,6 +19,7 @@ which skips when the pin does not resolve on this machine.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -530,3 +531,212 @@ def test_removing_the_pin_would_route_the_same_sitting_to_the_15x_provider(
         "longer contains a materially more expensive alternative, so this test and "
         "the five-cent-sitting test above police nothing"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. The measurement itself — right stream, plausible values, total refusal
+# ---------------------------------------------------------------------------
+
+
+def _rendered_size(path: Path) -> tuple[int, int]:
+    """What ffmpeg's OWN default stream selection decodes from `path`.
+
+    Measured, not asserted: the point of the tests below is that `_probe` agrees
+    with the renderer, so the expected value has to come from the renderer.
+    """
+    out = path.parent / f"{path.stem}_rendered.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(path), "-t", "0.2",
+         "-c:v", "libx264", "-crf", "30", "-pix_fmt", "yuv420p", str(out)],
+        capture_output=True, check=True,
+    )
+    csv = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out)]
+    ).decode().strip()
+    width, height = csv.split(",")[:2]
+    return int(width), int(height)
+
+
+def _make_two_video_stream_clip(
+    path: Path, first: tuple[int, int], second: tuple[int, int]
+) -> None:
+    """An mp4 whose FIRST video stream is not the one a renderer decodes."""
+    a, b = path.parent / "_first.mp4", path.parent / "_second.mp4"
+    _make_clip(a, first, 2.0, False)
+    _make_clip(b, second, 2.0, False)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(a), "-i", str(b),
+         "-map", "0:v", "-map", "1:v", "-c", "copy", str(path)],
+        capture_output=True, check=True,
+    )
+
+
+def test_probe_measures_the_stream_a_renderer_decodes(tmp_path):
+    """Not `streams[0]` — the stream ffmpeg actually feeds the crop filter.
+
+    The operator's own iPhone .MOV pool clips probe as six streams (one video,
+    one audio, four Core Media Metadata), so this is not about that footage; it
+    is about the crop being computed from one frame and applied to another the
+    moment a container carries more than one video stream. Picking the first
+    measured 320x240 on this file while ffmpeg rendered 1920x1080, and the
+    resulting crop kept a 134-pixel sliver of a 1080p frame.
+    """
+    clip = tmp_path / "two_streams.mp4"
+    _make_two_video_stream_clip(clip, first=(320, 240), second=(1920, 1080))
+
+    probed = probe_measured_facts(clip)
+    assert (probed["width"], probed["height"]) == _rendered_size(clip), (
+        "the probe measured a different stream than ffmpeg renders, so the 9:16 "
+        "crop is computed for a frame the trim never sees"
+    )
+    assert (probed["width"], probed["height"]) != (320, 240)
+
+
+def test_cover_art_is_not_mistaken_for_the_frame(tmp_path):
+    """A thumbnail track must lose even when it is the LARGEST video stream.
+
+    Excluding attached_pic is a separate clause from "take the biggest": drop it
+    and this 2000x2000 cover out-sizes the real 320x240 video, which ffmpeg
+    itself renders as 320x240.
+    """
+    video, cover = tmp_path / "_v.mp4", tmp_path / "_cover.png"
+    clip = tmp_path / "with_cover.mp4"
+    _make_clip(video, (320, 240), 2.0, False)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+         "-i", "color=c=red:s=2000x2000:d=0.04", "-frames:v", "1", str(cover)],
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-i", str(cover),
+         "-map", "0:v", "-map", "1:v", "-c", "copy",
+         "-disposition:v:1", "attached_pic", str(clip)],
+        capture_output=True, check=True,
+    )
+
+    probed = probe_measured_facts(clip)
+    assert (probed["width"], probed["height"]) == _rendered_size(clip)
+    assert (probed["width"], probed["height"]) == (320, 240)
+
+
+def _ffprobe_returns(monkeypatch, payload: str) -> None:
+    """Make every ffprobe call inside cutaway_gen succeed with `payload`."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("tools.video.cutaway_gen.subprocess.run", fake_run)
+
+
+def _probe_json(width: Any, height: Any, duration: Any) -> str:
+    return json.dumps({
+        "streams": [{"codec_type": "video", "width": width, "height": height}],
+        "format": {"duration": duration},
+    })
+
+
+@pytest.mark.parametrize(
+    "label,payload",
+    [
+        ("negative width", _probe_json(-100, 1080, "2.0")),
+        ("width past the encoder's ceiling", _probe_json(99999, 1080, "2.0")),
+        ("a frame too small to crop", _probe_json(3, 3, "2.0")),
+        ("negative height", _probe_json(1080, -1, "2.0")),
+        ("an hours-long cutaway", _probe_json(1080, 1920, "999999")),
+    ],
+)
+def test_implausible_measurement_is_refused_like_a_missing_one(
+    tmp_path, monkeypatch, label, payload
+):
+    """"Measured" has to mean measured, not merely non-empty.
+
+    Each of these values is recorded into the cutaway dict and the top-level data
+    as fact, and each steers the trim. A tool that refuses a MISSING measurement
+    but accepts a nonsense one is labelling, not guaranteeing.
+    """
+    _ffprobe_returns(monkeypatch, payload)
+    with pytest.raises(ProbeFailedError):
+        probe_measured_facts(tmp_path / "clip.mp4")
+
+
+def test_an_implausible_width_would_otherwise_silently_skip_the_crop(tmp_path):
+    """Why the floor exists: a negative width fails open, it does not fail loudly.
+
+    `_crop_to_vertical` guards `width <= 0` by returning None, which the trim
+    reads as "already 9:16" — so an absurd measurement produces a cheerful
+    success carrying an uncropped flash.
+    """
+    from tools.video.cutaway_gen import _crop_to_vertical
+
+    assert _crop_to_vertical(-100, 1080) is None
+
+
+@pytest.mark.parametrize(
+    "label,payload",
+    [
+        ("json that is not an object", "[]"),
+        ("json that is null", "null"),
+        ("a non-numeric dimension", _probe_json("wide", 1080, "2.0")),
+    ],
+)
+def test_malformed_probe_output_is_refused_not_raised_as_a_traceback(
+    tmp_path, provider, monkeypatch, label, payload
+):
+    """execute() promises a ToolResult on any probe failure, not only on ours.
+
+    _probe parses whatever ffprobe printed, so malformed-but-valid JSON surfaced
+    as AttributeError ("'list' object has no attribute 'get'") or ValueError
+    ("invalid literal for int() with base 10: 'wide'"). Guards that caught only
+    ProbeFailedError let those escape execute() as a crash.
+    """
+    _ffprobe_returns(monkeypatch, payload)
+    result = CutawayGen().execute(_inputs(tmp_path))
+
+    assert not result.success, "a malformed probe must be refused, not accepted"
+    assert "could not be measured" in result.error
+
+
+@pytest.mark.parametrize(
+    "label,payload",
+    [
+        ("json that is not an object", "[]"),
+        ("a non-numeric dimension", _probe_json("wide", 1080, "2.0")),
+    ],
+)
+def test_probe_converts_its_own_parse_failures_into_the_documented_error(
+    tmp_path, monkeypatch, label, payload
+):
+    """Directly: _probe's only failure type is ProbeFailedError."""
+    _ffprobe_returns(monkeypatch, payload)
+    with pytest.raises(ProbeFailedError):
+        probe_measured_facts(tmp_path / "clip.mp4")
+
+
+@pytest.mark.parametrize("marker", ["cutaway_", "_flash"])
+def test_execute_refuses_even_a_probe_failure_of_an_undocumented_type(
+    tmp_path, provider, monkeypatch, marker
+):
+    """Both guards must be total, not just correct for today's failure modes.
+
+    _probe now converts its own parse failures into ProbeFailedError, so this
+    injects the escape directly: guards written as `except ProbeFailedError`
+    turn any other type into a raw traceback out of execute(), which is a crash
+    where the contract promises a refusal. `cutaway_` hits the generated-clip
+    guard, `_flash` the trimmed-flash one.
+    """
+    real_probe = probe_measured_facts
+
+    def flaky(path: Path) -> dict[str, Any]:
+        if marker in Path(path).name:
+            raise AttributeError("'list' object has no attribute 'get'")
+        return real_probe(path)
+
+    monkeypatch.setattr("tools.video.cutaway_gen._probe", flaky)
+    result = CutawayGen().execute(_inputs(tmp_path))
+
+    assert not result.success, "an unmeasurable clip must be refused, not accepted"
+    assert "could not be measured" in result.error

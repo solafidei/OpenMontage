@@ -214,15 +214,27 @@ def test_video_src_has_no_public_prefix(render, tmp_path):
     assert _props(root)["videoSrc"] == f"talking-head/{key}/master.mp4"
 
 
-def test_default_preset_stages_and_renders_exactly_as_before(render, tmp_path):
+def test_default_preset_stages_and_renders_exactly_as_before(render, tmp_path, monkeypatch):
     tool, root, calls = render
+    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
+    staged = root / "public" / "talking-head" / key / "master.mp4"
+    real_run = tool.run_command
+    present: list[bool] = []
+
+    def spy(cmd, **kwargs):
+        if "render" in cmd:
+            present.append(staged.is_file())
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(tool, "run_command", spy)
     result = _burn(tool, tmp_path)
 
     props = _props(root)
     assert "captionPreset" not in props
     assert "captionSafeZone" not in props
-    key = RemotionCaptionBurn._source_key(str(tmp_path / "master.mp4"))
-    assert (root / "public" / "talking-head" / key / "master.mp4").is_file()
+    # Staged for the render, then swept — asserted at render time, because
+    # after the call the dir is gone (see the un-scoped footprint test).
+    assert present == [True]
     assert "--fps=30" in _argv(calls)
     assert result.data["preset"] == "default"
 
@@ -302,6 +314,50 @@ def test_failed_render_still_removes_run_scoped_media(render, tmp_path, monkeypa
         _burn(tool, tmp_path, run_id="reel-04")
 
     assert not (root / "public" / "talking-head" / "reel-04").exists()
+
+
+def _staged(root: Path) -> list[str]:
+    base = root / "public" / "talking-head"
+    return sorted(str(p.relative_to(base)) for p in base.rglob("*")) if base.exists() else []
+
+
+def test_unscoped_staging_does_not_accumulate_a_dir_per_source(render, tmp_path):
+    """Without a run_id the footprint stays flat as distinct sources pile up.
+
+    The path digest in ``_source_key`` gave every distinct master its own
+    staging dir, and cleanup was gated on ``run_id``, so a pipeline burning
+    captions on N un-scoped files left N full copies of them under
+    public/talking-head/ forever. Measured on the gated code with the render
+    stubbed out: 6 sources -> 6 dirs, 6 more -> 12, and a rerun of the same 6
+    added none (they overwrite their own dir, they do not free it).
+    """
+    tool, root, _ = render
+
+    for i in range(3):
+        _burn(tool, tmp_path, src=tmp_path / f"reel{i}" / "master.mp4")
+    assert _staged(root) == []
+
+    for i in range(3, 6):
+        _burn(tool, tmp_path, src=tmp_path / f"reel{i}" / "master.mp4")
+    assert _staged(root) == []
+
+
+def test_failed_render_still_removes_unscoped_media(render, tmp_path, monkeypatch):
+    """The sweep is in ``finally``: a raising render must not strand a copy."""
+    tool, root, _ = render
+
+    def boom(cmd, **kwargs):
+        if "render" in cmd:
+            raise RuntimeError("remotion exploded")
+        return subprocess.CompletedProcess(
+            cmd, 0, "10.0\n" if "format=duration" in cmd else "1080x1920\n", ""
+        )
+
+    monkeypatch.setattr(tool, "run_command", boom)
+    with pytest.raises(RuntimeError):
+        _burn(tool, tmp_path)
+
+    assert _staged(root) == []
 
 
 # --- CaptionOverlay.tsx / TalkingHead.tsx wiring ---------------------------

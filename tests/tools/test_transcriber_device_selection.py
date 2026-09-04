@@ -131,3 +131,48 @@ def test_transcriber_never_writes_beside_the_source_media(monkeypatch, tmp_path)
         "transcript_path and a later stage runs from a different cwd"
     )
     assert written.is_relative_to((tmp_path / "projects" / "_analysis").resolve()), written
+
+
+def test_vad_filter_defaults_on_but_can_be_turned_off(monkeypatch, tmp_path) -> None:
+    """reel-batch's captions come from a music track's own sung words.
+
+    `vad_filter` was hardcoded True, and a VAD scores sung vocals under a bed as
+    non-speech: measured on a 186s track with continuous vocals it returned 10
+    words at large-v3 with the language forced, and the words it DID return were
+    correct — so the model hears the vocal, the VAD discards it. The default
+    stays True for every speech caller; the pipeline that needs it off can now
+    ask.
+    """
+    seen: list[bool] = []
+
+    class FakeWhisperModel:
+        def __init__(self, model_size, *, device, compute_type):
+            pass
+
+        def transcribe(self, *args, **kwargs):
+            seen.append(kwargs["vad_filter"])
+            return iter(()), _Info()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 0,
+            get_supported_compute_types=lambda device: {"int8"},
+        ),
+    )
+    audio = tmp_path / "track.mp3"
+    audio.write_bytes(b"fake")
+
+    Transcriber().execute({"input_path": str(audio), "output_dir": str(tmp_path)})
+    Transcriber().execute(
+        {"input_path": str(audio), "output_dir": str(tmp_path), "vad_filter": False}
+    )
+
+    assert seen == [True, False], (
+        f"vad_filter reached faster-whisper as {seen}; it must default True and "
+        "be switchable off for sung vocals"
+    )

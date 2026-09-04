@@ -143,7 +143,8 @@ class RemotionCaptionBurn(BaseTool):
                     "Scopes staged media to one run. Without it every render "
                     "stages into the same shared public/talking-head/ dir, so a "
                     "batch of reels whose masters share a filename overwrite "
-                    "each other. The run-scoped dir is deleted after the render."
+                    "each other. Staged media is deleted after the render "
+                    "either way; run_id only groups it while it is live."
                 ),
             },
             "corrections": {
@@ -401,10 +402,25 @@ class RemotionCaptionBurn(BaseTool):
         try:
             self.run_command(render_cmd, cwd=str(root))
         finally:
-            # Only the run-scoped dir is ours to delete; the shared one may hold
-            # media staged by another render.
+            # pub_dir ends in source_key, whose digest is of *this* resolved
+            # input path, so no other source can be staged inside it — this call
+            # owns it and sweeps it whether the render succeeded or raised.
+            # Un-scoped renders used to keep theirs, back when the leaf was the
+            # bare stem: one dir per stem, overwritten on every rerun, so the
+            # footprint stayed flat. Once the digest made the leaf per-source it
+            # became one dir per distinct source path, kept forever, and a
+            # pipeline that burns many files fills the disk with copies of them.
+            #
+            # Sweeping only our own leaf is the bounded rule that cannot delete
+            # a directory a concurrent render still needs. An age or count cap
+            # would evict *other* sources' dirs, and a slow neighbouring render
+            # would lose its media mid-flight. The one caller that shares this
+            # leaf is a second burn of the same source path under the same
+            # run_id (or, un-scoped, of the same source at all) — and those two
+            # already write the same props filename and clobber each other, so
+            # they were never concurrency-safe here to begin with.
+            shutil.rmtree(pub_dir, ignore_errors=True)
             if run_id:
-                shutil.rmtree(pub_dir, ignore_errors=True)
                 # The run dir above it is shared by every source in the batch,
                 # so it goes only once it is empty — rmdir refuses while a
                 # sibling burn of the same run is still staged there.

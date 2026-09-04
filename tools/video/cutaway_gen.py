@@ -29,7 +29,9 @@ the model chooses the actual length, so no code here depends on getting 5 second
 The trim also strips audio (the music bed comes from the operator's track) and crops to
 9:16, and the result is probed rather than assumed. When the probe cannot measure, the
 sitting is refused (:class:`ProbeFailedError`): an unmeasurable clip passed the silence
-check vacuously and skipped the crop, which is failing open in a fail-closed tool.
+check vacuously and skipped the crop, which is failing open in a fail-closed tool. An
+implausible measurement is refused on the same grounds, and the probe measures the
+stream a renderer would decode rather than whichever video stream happens to be first.
 """
 
 from __future__ import annotations
@@ -71,6 +73,28 @@ DEFAULT_FLASH_START_SECONDS = 1.0
 
 # A generated clip smaller than this is a failed download, not a cache hit.
 _MIN_USABLE_BYTES = 1024
+
+# Plausibility bounds on the facts `_probe` calls "measured". A fail-closed tool has
+# to refuse an absurd measurement as readily as a missing one, or "measured" is a
+# label rather than a guarantee: every one of these values is recorded into the
+# cutaway dict and the top-level data as fact, and every one of them steers the trim.
+#
+# Floor: one H.264 macroblock edge. Nothing smaller is a real generated frame, and
+# below it `_crop_to_vertical`'s 9:16 inset collapses to zero — measured this session,
+# `_crop_to_vertical(3, 3)` returns "crop=0:2:1:0", which ffmpeg then refuses with
+# "Invalid too big or non positive size for width '0'" (ffmpeg -i real.mp4 -vf
+# crop=0:100:0:0). A refusal here names the bad measurement instead.
+_MIN_PLAUSIBLE_DIMENSION = 16
+# Ceiling: libx264's own limit — the encoder `_trim_to_flash` re-encodes with — so
+# anything above it could not be trimmed anyway. Measured this session: `ffmpeg -f
+# lavfi -i color=c=red:s=16386x16:d=0.1 -frames:v 1 -c:v libx264 -pix_fmt yuv420p`
+# fails with "invalid width x height (16386x16)", while s=16384x16 encodes.
+_MAX_PLAUSIBLE_DIMENSION = 16384
+# One hour. Every generative video route returns clips measured in seconds — this
+# tool asks the pinned route for CUTAWAY_CLIP_SECONDS of them — so an hour-long
+# "cutaway" is a probe that read a container/playlist duration, or the wrong file
+# entirely. Far enough above any real return that a long clip is never refused.
+_MAX_PLAUSIBLE_DURATION_SECONDS = 3600.0
 
 
 class MediaReferenceRefusedError(ValueError):
@@ -407,9 +431,13 @@ class CutawayGen(BaseTool):
 
             try:
                 probed = _probe(source)
-            except ProbeFailedError as exc:
+            except Exception as exc:
                 # Fail closed: unmeasured, the trim below would skip the 9:16 crop
                 # and clamp against a duration of zero. Refuse the sitting instead.
+                # Not just ProbeFailedError: _probe parses whatever ffprobe printed,
+                # so malformed output surfaced as AttributeError ('list' object has
+                # no attribute 'get') or ValueError (int('wide')) and escaped as a
+                # raw traceback — a crash where the contract promises a ToolResult.
                 return ToolResult(
                     success=False,
                     error=f"Cutaway {index + 1}/{len(prompts)} could not be measured: {exc}",
@@ -424,7 +452,7 @@ class CutawayGen(BaseTool):
 
             try:
                 trimmed_probe = _probe(trimmed)
-            except ProbeFailedError as exc:
+            except Exception as exc:  # any probe failure, not only ProbeFailedError
                 # An unmeasurable trim cannot be declared silent. Passing the audio
                 # check on a missing measurement is how a cutaway with the model's
                 # own soundtrack would reach the operator's music bed.
@@ -541,9 +569,19 @@ def _probe(path: Path) -> dict[str, Any]:
             f"ffprobe returned no readable measurement for {path}"
         ) from exc
 
+    if not isinstance(data, Mapping):
+        # ffprobe's JSON is normally an object, but a truncated or wrapped payload
+        # parses to a list or a scalar and every `.get` below is an AttributeError
+        # escaping execute() as a traceback where the contract promises a refusal.
+        raise ProbeFailedError(
+            f"ffprobe returned no readable measurement for {path} "
+            f"(got {type(data).__name__}, not an object)"
+        )
+
     streams = data.get("streams") or []
-    video = next((s for s in streams if s.get("codec_type") == "video"), {})
-    duration = data.get("format", {}).get("duration")
+    video = _render_stream(streams)
+    fmt = data.get("format")
+    duration = fmt.get("duration") if isinstance(fmt, Mapping) else None
     # Name the fact that is missing: "could not be measured" is actionable only if
     # the operator learns whether ffprobe saw no video, or saw one of unknown size.
     try:
@@ -553,12 +591,74 @@ def _probe(path: Path) -> dict[str, Any]:
         seconds = 0.0
     if seconds <= 0:
         raise ProbeFailedError(f"ffprobe measured no duration for {path} ({duration!r})")
+    if seconds > _MAX_PLAUSIBLE_DURATION_SECONDS:
+        raise ProbeFailedError(
+            f"ffprobe measured an implausible duration for {path}: {seconds}s "
+            f"exceeds {_MAX_PLAUSIBLE_DURATION_SECONDS}s"
+        )
     if not video.get("width") or not video.get("height"):
         raise ProbeFailedError(f"ffprobe measured no video stream dimensions for {path}")
 
+    try:
+        width, height = int(video["width"]), int(video["height"])
+    except (TypeError, ValueError) as exc:
+        # A non-numeric dimension used to escape as a raw ValueError from int().
+        raise ProbeFailedError(
+            f"ffprobe reported unreadable dimensions for {path}: "
+            f"{video.get('width')!r}x{video.get('height')!r}"
+        ) from exc
+    for label, value in (("width", width), ("height", height)):
+        if not _MIN_PLAUSIBLE_DIMENSION <= value <= _MAX_PLAUSIBLE_DIMENSION:
+            raise ProbeFailedError(
+                f"ffprobe measured an implausible {label} for {path}: {value} is "
+                f"outside {_MIN_PLAUSIBLE_DIMENSION}..{_MAX_PLAUSIBLE_DIMENSION}"
+            )
+
     return {
         "duration_seconds": round(seconds, 3),
-        "width": int(video["width"]),
-        "height": int(video["height"]),
-        "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+        "width": width,
+        "height": height,
+        "has_audio": any(
+            isinstance(s, Mapping) and s.get("codec_type") == "audio" for s in streams
+        ),
     }
+
+
+def _render_stream(streams: Any) -> dict[str, Any]:
+    """The video stream a renderer would actually decode — not merely the first one.
+
+    ffmpeg's default selection (no ``-map``) is not "the first video stream": it
+    skips cover-art/thumbnail streams and then takes the largest by pixel area.
+    Taking ``streams[0]`` measures the wrong frame, and since those dimensions are
+    what `_crop_to_vertical` builds the 9:16 crop from, the crop is then computed
+    for one frame and applied to another.
+
+    Measured this session on a two-video-stream mp4 (320x240 at index 0, 1920x1080
+    at index 1): ffmpeg renders 1920x1080, the old first-stream pick measured
+    320x240, and the resulting `crop=134:240:93:0` cut a 134-pixel sliver out of a
+    1080p frame instead of the correct 606x1080. Cover art is excluded rather than
+    just out-sized because it can be the larger stream — also measured, on an mp4
+    carrying a 2000x2000 attached_pic beside a 320x240 video, which ffmpeg renders
+    as 320x240.
+    """
+    if not isinstance(streams, Sequence) or isinstance(streams, (str, bytes)):
+        return {}
+
+    def pixels(stream: Mapping[str, Any]) -> int:
+        try:
+            return int(stream["width"]) * int(stream["height"])
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    candidates = [
+        s for s in streams
+        if isinstance(s, Mapping)
+        and s.get("codec_type") == "video"
+        and not (s.get("disposition") or {}).get("attached_pic")
+    ]
+    if not candidates:
+        return {}
+    # max() keeps the earliest of equal keys, matching ffmpeg's strict-greater
+    # comparison — so single-video-stream files (all of the operator's own
+    # footage) measure exactly as they did before.
+    return dict(max(candidates, key=pixels))
