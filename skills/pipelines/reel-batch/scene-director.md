@@ -69,13 +69,13 @@ ledger = ClipLedger.for_project(project_id)    # lib/clip_ledger.py:114-134
 ```
 
 `identity_locked=True` is set on every row `footage_library` writes and nowhere else
-(`tools/video/footage_library.py:369-371`), so that filter *is* the operator's pool.
+(`tools/video/footage_library.py:462-464`), so that filter *is* the operator's pool.
 `ClipLedger.for_project` creates the ledger on first call and re-opens the same file on
 every later one — never build a second ledger from a hand-written path.
 
 Take the reel count, the reel ids and the armed/not-armed cutaway verdict from the brief,
 not from your own count of the pool: the gate's `usable_segments` / `max_reels` /
-`spare_segments` numbers (`tools/video/footage_library.py:402-411`) are what the cost gate
+`spare_segments` numbers (`tools/video/footage_library.py:476-477`, `:507`) are what the cost gate
 in `idea-director.md` priced.
 
 **The brief is `optional_artifacts_in` in the manifest and binding here.** `read_checkpoint`
@@ -366,7 +366,7 @@ reel entry carries its own `track_id` and `cut_policy`, so `edit` reads them off
 `scene_plan.metadata` without reaching back for the brief — edit-director blocks the render
 on an empty `scene_meta["renderer_family"]`. `clip_id` is whatever `record.clip_id` holds;
 never hand-write one, its shape is `footage_<slug>_<digest>_<in_ms>_<out_ms>`
-(`tools/video/footage_library.py:588-600`) and an invented id matches no corpus row.
+(`tools/video/footage_library.py:831-843`) and an invented id matches no corpus row.
 
 The cut's `in_seconds` / `out_seconds` are in/out points **inside `source_path`**, the pool
 file; the `start_seconds` / `end_seconds` on the matching `scenes[]` entry are reel-local

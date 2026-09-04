@@ -26,14 +26,17 @@ number. A brief written before the pool is indexed is a guess.
 
 One call probes the pool through the governance gate, splits every file into cut-sized
 segments, drops the blurry ones with a reason, and writes one corpus row per segment with
-`identity_locked=True` (`tools/video/footage_library.py:343-375`).
+`identity_locked=True` (`tools/video/footage_library.py:436-468`).
 
 ```python
 from tools.video.footage_library import FootageLibrary
 
 index = FootageLibrary().execute({
     "footage_dir": operator_footage_dir,          # searched recursively
-    "corpus_dir": f"projects/{project_id}/corpus",
+    # No corpus_dir. It defaults to projects/_footage_index/<pool>_<digest> —
+    # keyed to the POOL, so next week's batch reuses this week's measurements
+    # instead of re-decoding footage that has not changed. Pass one only to
+    # deliberately index from scratch.
     "cuts_per_reel": 5,                           # a 10s reel at ~2s a cut
     # Without this the floor defaults to 1.5s, so every segment in [1.5, 2.0) counts
     # toward usable_segments and therefore toward max_reels and cutaway_count — while
@@ -46,14 +49,31 @@ if not index.success:                     # BOTH failure modes still return a fu
 pool = index.data       # usable_segments, max_reels, exclusions, source_media_review
 ```
 
-Re-running is safe: segment ids derive from (path, in-point, out-point)
-(`footage_library.py:588-600`), so a second index of the same folder adds nothing.
+Re-running is safe: segment ids derive from (path, in-point, out-point), so a second
+index of the same folder adds nothing. It is also **cheap across batches** — the index
+outlives the project, and `measurements.json` beside it holds the sharpness of every
+segment ever measured here, *including the excluded ones*. So a later batch re-decodes
+only what you have shot since. Read `segments_already_indexed` and
+`segments_remeasure_skipped` to see how much was free.
+
+Two changes the stored index cannot absorb, because `Corpus` is append-only — both
+return a failure naming the remedy rather than proceeding:
+
+| Change | Why it is refused |
+|---|---|
+| `min/max_segment_seconds`, `frames_per_segment` | New segment boundaries; the old chunking's rows stay and the two overlap |
+| **raising** `sharpness_floor` | Rows admitted under the old floor cannot be evicted, and nothing downstream re-checks `sharpness` |
+
+Lowering the floor is fine and needs no rebuild: previously excluded segments are
+re-decided from their cached measurements. To rebuild anyway, delete the index directory.
+`dead_source_rows` counts rows whose source file you have since deleted — they cannot
+inflate `usable_segments`, but a growing count means the index is worth rebuilding.
 
 **Two failures look alike and are not.** Read `index.error` before you speak:
 `segments_unembeddable > 0` with `usable_segments == 0` is the **CLIP stack being down**,
-not a thin pool (`footage_library.py:419-435`) — never send the operator back to the gym
+not a thin pool (`footage_library.py:515-531`) — never send the operator back to the gym
 over that one; `usable_segments == 0` with exclusions is a genuinely unusable pool
-(`:437-449`). Either way, stop and escalate per `AGENT_GUIDE.md` → "Escalate Blockers
+(`:533-545`). Either way, stop and escalate per `AGENT_GUIDE.md` → "Escalate Blockers
 Explicitly". Never plan reels against a pool that failed to measure.
 
 ### 2. The Valve — Measure The Pool Against The Batch (spec R8)
@@ -79,7 +99,7 @@ shortfall_reel_ids = planned_reel_ids[:cutaway_count]  # one AI flash a reel, so
 ```
 
 `max_reels` and `spare_segments` are `footage_library`'s own names, read straight off
-`pool` (`tools/video/footage_library.py:410-411`) — do not recompute them under a local
+`pool` (`tools/video/footage_library.py:496`, `:506`) — do not recompute them under a local
 alias. `planned_reel_ids` is minted **here and nowhere else**: it goes onto the brief as
 `metadata.reel_ids`, and every later stage takes its reel ids from there.
 
@@ -174,7 +194,7 @@ Wait for explicit approval before advancing, and re-log with the **same `categor
 ### 4. Arm The Identity Lock
 
 `footage_library` already set `identity_locked=True` on every row it wrote
-(`footage_library.py:369-371`); `pool["identity_locked"]` comes back `True`. Record it on
+(`footage_library.py:462-464`); `pool["identity_locked"]` comes back `True`. Record it on
 the brief and say plainly what it forbids — the operator hears this once, in words,
 rather than discovering it as a raise at compose:
 
@@ -233,10 +253,17 @@ The brief carries the batch axes in `metadata` (its root is closed):
       {"track_id": "track_03", "path": "projects/<id>/audio/leg_day.mp3"},
       {"track_id": "track_04", "path": "projects/<id>/audio/five_am.mp3"},
       {"track_id": "track_05", "path": "projects/<id>/audio/last_set.mp3"}
-    ]
+    ],
+    "pool_dir": "projects/gym-footage/raw",
+    "corpus_dir": index.data["corpus_dir"]
   }
 }
 ```
+
+Write `corpus_dir` from `index.data["corpus_dir"]` — the path the tool resolved, never
+one you build from `project_id`. The index is keyed to the pool and outlives this batch;
+asset-director reopens the corpus from this key, and rebuilding it from `project_id`
+would open an empty one and silently find no clips.
 
 `target_duration_seconds` is **one reel**, not the sitting. `reel_count`,
 `usable_segments` and `paid_cutaways_armed` are what the success criteria check for.
@@ -257,7 +284,7 @@ These keys exist only because a later stage reads them by name:
   material, and edit-director requires the field non-empty.
 - **`max_reels` / `spare_segments`** — `footage_library`'s own names and its own numbers,
   copied off `pool`. The tool defines them as `usable // cuts_per_reel` and
-  `usable - max_reels * cuts_per_reel` (`tools/video/footage_library.py:383`, `:411`), so at
+  `usable - max_reels * cuts_per_reel` (`tools/video/footage_library.py:477`, `:507`), so at
   31 usable segments and 5 cuts a reel that is `max_reels = 6` and
   `spare_segments = 31 - 6 x 5 = 1` — one spare, **not** the six that `usable - reels x cuts`
   would give. Never recompute either against the number of reels planned, and never a

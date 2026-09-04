@@ -108,8 +108,8 @@ measured** — the shortfall was measured at gate 1 as
 gate 2 as `scene_plan.metadata.shortfall`. The number you fire is
 `len(scene_plan["metadata"]["shortfall"])` — never a number you derive here.
 `usable_segments // cuts_per_reel` is a different quantity: it is the pool's *capacity*,
-which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:382-383`,
-surfaced at `:410`). Reading capacity as shortfall fires a cutaway for every reel the pool
+which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:476-477`,
+surfaced at `:506`). Reading capacity as shortfall fires a cutaway for every reel the pool
 could have carried — unapproved spend, and it fails this file's own quality gate.
 **Provenance is declared, never inferred** — a row is identity-locked because
 `footage_library` wrote it that way at ingest (`:371`, `:412`), and nothing downstream
@@ -126,7 +126,9 @@ compose, after the money is spent.
 ### 1. Reopen Both Ledgers Before Touching Anything
 
 ```python
-corpus = Corpus(Path(f"projects/{project_id}/corpus")); corpus.load()
+# The index is keyed to the POOL, not this batch — read the path the idea stage
+# resolved (brief.metadata.corpus_dir), never rebuild it from project_id.
+corpus = Corpus(Path(brief["metadata"]["corpus_dir"])); corpus.load()
 clips = ClipLedger.for_project(project_id)      # lib/clip_ledger.py:115-134
 tracker = CostTracker.for_project(project_id)   # the ledger the idea stage seeded
 ```
@@ -165,9 +167,16 @@ for reel in scene_plan["metadata"]["reels"]:
         # overruns its own budget and drifts off every beat after the first cut.
         start, end = slot["in_seconds"], slot["out_seconds"]
         # local_path is ABSOLUTE for operator rows — the pool lives outside the corpus
-        # and is never copied (tools/video/footage_library.py:349-352); the join still
+        # and is never copied (tools/video/footage_library.py:442-445); the join still
         # resolves, because an absolute right-hand side wins.
         path = (corpus.corpus_dir / rec.local_path).as_posix()
+        # The index now outlives the batch, so it can outlive the footage too.
+        # `Corpus` is append-only — a row for a file the operator has since
+        # deleted cannot be removed, only skipped here. `footage_library`
+        # reports the count as `dead_source_rows`; a growing one means rebuild.
+        if not Path(path).exists():
+            unfilled.append((reel["reel_id"], slot["id"]))
+            continue
         resolved.append({
             "reel_id": reel["reel_id"],
             "cut_id": slot["id"],                        # "<reel_id>-<nn>"
@@ -484,7 +493,7 @@ cut asset and the **reel id** for a track or caption asset.
   "total_cost_usd": 0.1,
   "metadata": {
     "pipeline": "reel-batch",
-    "corpus_dir": "projects/<id>/corpus",
+    "corpus_dir": "projects/_footage_index/<pool>_<digest>",   # from index.data["corpus_dir"]
     "cut_index": {
       "reel_02-01": {"asset_id": "asset_reel_02_01", "in_seconds": 4.20, "out_seconds": 6.14,
                      "provenance": "operator_footage", "identity_locked": true,
@@ -528,7 +537,7 @@ cutaway.
 **About `path`.** It is project-relative for everything this pipeline wrote — cutaways,
 normalised beds, caption files. For an identity-locked pool row it is the **absolute** source
 path, because the pool lives outside the project and `footage_library` never copies it
-(`tools/video/footage_library.py:349-352`), even though the schema's own description reads
+(`tools/video/footage_library.py:442-445`), even though the schema's own description reads
 "Relative path within the pipeline project directory"
 (`schemas/artifacts/asset_manifest.schema.json:21`; nothing validates the shape). Say so in
 that asset's `generation_summary`, as above, so a reader is not left to guess which rule

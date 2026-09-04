@@ -104,7 +104,7 @@ further pipeline work in the same response is a gate violation
 ### Gate 1 — `idea`
 
 The pool is *measured*, not assumed. `footage_library` returns `usable_segments`,
-`max_reels` and `spare_segments` (`tools/video/footage_library.py:402-411`), and the reel
+`max_reels` and `spare_segments` (`tools/video/footage_library.py:476-477`, `:507`), and the reel
 count has to be plannable against them. It also returns the `source_media_review` payload
 (`:416`) and stamps `identity_locked: True` on the whole pool (`:412`).
 

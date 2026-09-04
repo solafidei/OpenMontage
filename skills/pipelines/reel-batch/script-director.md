@@ -57,9 +57,9 @@ window works:
   onwards. `path` is what you hand `transcriber` and `beat_grid`. If the list is absent or
   empty, stop and ask; do not go looking for audio files on disk.
 - `brief["metadata"]["usable_segments"]` and `["max_reels"]` — the pool measurement
-  `footage_library` returned (`tools/video/footage_library.py:179`, `:186`), under exactly
+  `footage_library` returned (`tools/video/footage_library.py:214`, `:223`), under exactly
   those names. `max_reels` is the reel ceiling the indexed pool supports.
-- `brief["metadata"]["cuts_per_reel"]` (`:185`) — the cut count each reel is planned for,
+- `brief["metadata"]["cuts_per_reel"]` (`:222`) — the cut count each reel is planned for,
   and therefore the number of holds its snap grid is trying to supply.
 
 **One track per reel, never shared** (`executive-producer.md` → Definition Of Done). Fewer
@@ -413,9 +413,9 @@ to snap cuts without re-analysing alongside it.
   downstream stops it; the renderer treats confidence as informational only.
 - **Re-running `scene_detect` over the pool.** `footage_library` already ran it at `idea`
   and cached the boundaries under `<corpus_dir>/scene_cache/`
-  (`tools/video/footage_library.py:463-478`) — `corpus_dir` is a required caller-supplied
-  input (`:128`), the value handed to `footage_library` at `idea`, which is
-  `projects/<id>/corpus` in this pipeline. Use `scene_detect` here only when a "track"
+  (`tools/video/footage_library.py`) — read the resolved path from
+  `index.data["corpus_dir"]` (it defaults to `projects/_footage_index/<pool>_<digest>`
+  and is NOT under the project). Use `scene_detect` here only when a "track"
   arrived as a video file and you need its own shot boundaries.
 
 ## Checkpoint

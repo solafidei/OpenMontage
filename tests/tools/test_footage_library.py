@@ -446,3 +446,116 @@ def test_a_genuinely_blurred_frame_still_fails_the_floor() -> None:
         f"a heavily blurred frame scored {_sharpness(blurred):.1f}, above the "
         f"{DEFAULT_SHARPNESS_FLOOR} floor — the gate stopped gating"
     )
+
+
+# ----------------------------------------------------------------------
+# Persistence across batches
+# ----------------------------------------------------------------------
+
+
+def _inputs(pool: Path, corpus_dir: Path, **overrides) -> dict:
+    inputs = {
+        "footage_dir": str(pool),
+        "corpus_dir": str(corpus_dir),
+        "max_segment_seconds": 3.0,
+        "cuts_per_reel": 2,
+    }
+    inputs.update(overrides)
+    return inputs
+
+
+def test_a_second_index_of_an_unchanged_pool_decodes_nothing(pool, tmp_path):
+    """The whole point: batch two must not re-measure batch one's footage.
+
+    Booby-trapping `_sample_segment_frames` polices the part a `Corpus.has`
+    check alone would miss. Admitted segments are short-circuited by the corpus
+    row, but EXCLUDED ones were never written anywhere, so without the
+    measurement sidecar every future batch re-decodes them forever — 23 of 56
+    segments on the first real pool.
+    """
+    corpus_dir = tmp_path / "corpus"
+    first = _index(pool, corpus_dir)
+    assert first.data["segments_added"] > 0
+    assert first.data["excluded_segments"] > 0
+
+    def _boom(*_a, **_k):
+        raise AssertionError("re-decoded a segment that was already measured")
+
+    with pytest.MonkeyPatch.context() as mp:
+        _stub_embedders(mp)
+        mp.setattr(footage_library, "_sample_segment_frames", _boom)
+        second = FootageLibrary().execute(_inputs(pool, corpus_dir))
+
+    assert second.success is True, second.error
+    assert second.data["segments_added"] == 0
+    assert second.data["segments_already_indexed"] == first.data["segments_added"]
+    assert second.data["segments_remeasure_skipped"] == first.data["excluded_segments"]
+    # The number the idea gate acts on must survive the round trip.
+    assert second.data["usable_segments"] == first.data["usable_segments"]
+    assert second.data["excluded_segments"] == first.data["excluded_segments"]
+
+
+def test_lowering_the_floor_readmits_what_the_cache_already_measured(pool, tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    first = _index(pool, corpus_dir)
+    assert first.data["excluded_segments"] > 0
+
+    second = _index(pool, corpus_dir, sharpness_floor=0.0)
+
+    assert second.success is True, second.error
+    assert second.data["segments_added"] == first.data["excluded_segments"]
+    assert second.data["excluded_segments"] == 0
+
+
+def test_raising_the_floor_is_refused_not_silently_ignored(pool, tmp_path):
+    """`sharpness` is written here and read nowhere, so an admitted row is admitted.
+
+    The corpus is append-only, so a raised floor cannot evict what a lower one
+    let in. Refusing is the only honest answer — proceeding would report a
+    stricter floor while leaving every row under it selectable.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _index(pool, corpus_dir)
+
+    raised = _index(pool, corpus_dir, sharpness_floor=1_000_000.0)
+
+    assert raised.success is False
+    assert "append-only" in raised.error
+    assert "1000000" in raised.error.replace(",", "").replace(".0", "")
+
+
+def test_rechunking_an_existing_index_is_refused(pool, tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    _index(pool, corpus_dir)
+
+    rechunked = _index(pool, corpus_dir, max_segment_seconds=2.0)
+
+    assert rechunked.success is False
+    assert "segmentation" in rechunked.error
+    assert "max_segment_seconds" in rechunked.error
+
+
+def test_a_corrupt_measurement_file_costs_time_not_correctness(pool, tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    first = _index(pool, corpus_dir)
+    (corpus_dir / "measurements.json").write_text("{not json", encoding="utf-8")
+
+    second = _index(pool, corpus_dir)
+
+    assert second.success is True, second.error
+    assert second.data["usable_segments"] == first.data["usable_segments"]
+    assert second.data["excluded_segments"] == first.data["excluded_segments"]
+
+
+def test_the_default_corpus_dir_is_keyed_to_the_pool_not_the_batch(tmp_path):
+    """Two batches over one pool must land on one index. That is the fix."""
+    pool = tmp_path / "gym-footage" / "raw"
+    pool.mkdir(parents=True)
+
+    week36 = footage_library._default_corpus_dir(pool)
+    week37 = footage_library._default_corpus_dir(Path(str(pool) + "/."))
+
+    assert week36 == week37
+    assert week36 != footage_library._default_corpus_dir(tmp_path)
+    # Outside the pool: the operator's footage directory stays read-only.
+    assert pool.resolve() not in week36.parents

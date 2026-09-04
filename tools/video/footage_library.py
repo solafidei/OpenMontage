@@ -36,10 +36,36 @@ result reports `usable_segments`, `max_reels`, and every exclusion with its
 reason. Re-indexing the same directory is idempotent: segment clip_ids are
 derived from (path, in-point, out-point), so a second run adds nothing and
 reports the same totals.
+
+The index outlives the batch
+---------------------------
+`corpus_dir` defaults to `projects/_footage_index/<pool>_<digest>` — keyed to the
+pool, not to the project. A batch-scoped corpus is deleted with the batch, so
+every sitting re-ran scene detection, frame sampling, sharpness and CLIP over
+footage that had not changed since the last one.
+
+Two stores make that work, and they are not the same thing:
+
+- `Corpus` holds the segments that PASSED. `Corpus.has` short-circuits those.
+- `measurements.json` holds the sharpness of every segment ever measured here,
+  **including the ones that were excluded**. Without it the excluded share of a
+  pool is re-decoded forever, because a rejection was never written anywhere —
+  23 of 56 segments on the first real pool, i.e. 41% of the work a persistent
+  corpus alone would still repeat.
+
+`Corpus` is append-only by design, which bounds what a stored index can absorb.
+Re-chunking (`min`/`max_segment_seconds`, `frames_per_segment`) would leave the
+old segmentation's rows overlapping the new one's, and RAISING `sharpness_floor`
+cannot evict rows the old floor admitted — `sharpness` is written here and read
+nowhere else, so the floor is enforced solely by declining to write the row.
+Both are refused with the remedy named (`_index_conflict`), never absorbed
+silently. Lowering the floor is free: the excluded segments are re-decided from
+their cached measurements, which is the reason for keeping them.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -73,6 +99,10 @@ DEFAULT_FRAMES_PER_SEGMENT = 3
 # Variance-of-Laplacian on an 8-bit grey frame. Handheld gym footage sits well
 # above this; motion-blurred and out-of-focus frames sit below it.
 DEFAULT_SHARPNESS_FLOOR = 60.0
+# Segmentation inputs that change which (file, in, out) triples exist. A stored
+# index built under different values describes different segments, and the
+# corpus cannot be re-chunked in place (see `_index_conflict`).
+SEGMENTATION_FIELDS = ("min_segment_seconds", "max_segment_seconds", "frames_per_segment")
 
 
 class FootageLibrary(BaseTool):
@@ -125,7 +155,7 @@ class FootageLibrary(BaseTool):
 
     input_schema = {
         "type": "object",
-        "required": ["footage_dir", "corpus_dir"],
+        "required": ["footage_dir"],
         "properties": {
             "footage_dir": {
                 "type": "string",
@@ -133,7 +163,12 @@ class FootageLibrary(BaseTool):
             },
             "corpus_dir": {
                 "type": "string",
-                "description": "Project-local corpus directory, e.g. projects/foo/corpus",
+                "description": (
+                    "Where the index lives. Defaults to a stable path derived from "
+                    "footage_dir (projects/_footage_index/<pool>_<digest>) so batches "
+                    "share one index instead of each rebuilding its own. Pass a "
+                    "project-local path only to deliberately index from scratch."
+                ),
             },
             "min_segment_seconds": {
                 "type": "number",
@@ -179,6 +214,8 @@ class FootageLibrary(BaseTool):
             "usable_segments": {"type": "integer"},
             "segments_added": {"type": "integer"},
             "segments_already_indexed": {"type": "integer"},
+            "segments_remeasure_skipped": {"type": "integer"},
+            "dead_source_rows": {"type": "integer"},
             "excluded_segments": {"type": "integer"},
             "excluded_by_reason": {"type": "object"},
             "exclusions": {"type": "array", "items": {"type": "object"}},
@@ -197,6 +234,8 @@ class FootageLibrary(BaseTool):
     idempotency_key_fields = ["footage_dir", "corpus_dir"]
     side_effects = [
         "writes corpus rows, embeddings and segment thumbnails under corpus_dir",
+        "writes measurements.json under corpus_dir — the sharpness of every segment "
+        "it measured, including the ones it excluded",
     ]
     user_visible_verification = [
         "Confirm the usable-segment count matches the pool you intended to index",
@@ -210,7 +249,12 @@ class FootageLibrary(BaseTool):
         start = time.time()
 
         footage_dir = Path(inputs["footage_dir"]).expanduser()
-        corpus_dir = Path(inputs["corpus_dir"]).expanduser()
+        supplied_corpus = inputs.get("corpus_dir")
+        corpus_dir = (
+            Path(supplied_corpus).expanduser()
+            if supplied_corpus
+            else _default_corpus_dir(footage_dir)
+        )
         min_seconds = float(inputs.get("min_segment_seconds", DEFAULT_MIN_SEGMENT_SECONDS))
         max_seconds = float(inputs.get("max_segment_seconds", DEFAULT_MAX_SEGMENT_SECONDS))
         floor = float(inputs.get("sharpness_floor", DEFAULT_SHARPNESS_FLOOR))
@@ -237,6 +281,27 @@ class FootageLibrary(BaseTool):
                 data={"footage_dir": str(footage_dir), "files_scanned": 0, "usable_segments": 0},
             )
 
+        # Ahead of the pool probe on purpose: a stored index that cannot answer
+        # this request should refuse before ffprobe walks 12 GB of footage.
+        corp = Corpus(corpus_dir)
+        corp.load()
+
+        measured, recorded = _load_measurements(corpus_dir)
+        params = {
+            "min_segment_seconds": min_seconds,
+            "max_segment_seconds": max_seconds,
+            "frames_per_segment": frames_per_segment,
+            "sharpness_floor": floor,
+        }
+        conflict = _index_conflict(corp, recorded, params)
+        if conflict:
+            return ToolResult(
+                success=False,
+                error=conflict,
+                data={"corpus_dir": str(corpus_dir), "footage_dir": str(footage_dir)},
+            )
+
+        corp.ensure_dirs()
         # The governance gate of record. Transcription is off: a footage pool is
         # indexed for pictures, and the captions come from the audio track.
         review = review_source_media(
@@ -249,11 +314,17 @@ class FootageLibrary(BaseTool):
             },
         )
 
-        corp = Corpus(corpus_dir)
-        corp.ensure_dirs()
-        corp.load()
+        # Rows whose source file is gone. They cannot inflate `usable` — that
+        # counts only segments re-derived from files found on this scan — so
+        # this is a report, not a repair.
+        dead_source_rows = sum(
+            1
+            for r in corp.records
+            if r.source == "footage_library" and r.local_path and not Path(r.local_path).exists()
+        )
 
         files_indexed = 0
+        remeasure_skipped = 0
         files_failed: list[dict[str, Any]] = []
         segments_planned = 0
         added = 0
@@ -291,6 +362,27 @@ class FootageLibrary(BaseTool):
                     reused += 1
                     continue
 
+                # Measured on an earlier batch and rejected then. Variance of the
+                # Laplacian on fixed frames of an unchanged file is deterministic,
+                # so re-deciding costs a dict lookup where re-measuring costs a
+                # decode, a resize and three Laplacians. Without this the excluded
+                # share of the pool — 23 of 56 segments on the first real run — is
+                # the one part a persistent index never saves.
+                cached = measured.get(clip_id)
+                if cached is not None and cached < floor:
+                    exclusions.append(
+                        {
+                            "source": str(path),
+                            "start_seconds": seg_start,
+                            "end_seconds": seg_end,
+                            "reason": "below_sharpness_floor",
+                            "sharpness": cached,
+                            "from_cache": True,
+                        }
+                    )
+                    remeasure_skipped += 1
+                    continue
+
                 thumb_rel = Path("thumbnails") / clip_id
                 frames = _sample_segment_frames(
                     path, seg_start, seg_end, frames_per_segment, corpus_dir / thumb_rel
@@ -308,6 +400,7 @@ class FootageLibrary(BaseTool):
                     continue
 
                 sharpness = round(float(np.mean([_sharpness(g) for g in greys])), 2)
+                measured[clip_id] = sharpness
                 if sharpness < floor:
                     exclusions.append(
                         {
@@ -378,6 +471,7 @@ class FootageLibrary(BaseTool):
             files_indexed += 1
 
         corp.save()
+        _save_measurements(corpus_dir, measured, params)
 
         usable = added + reused
         max_reels = usable // cuts_per_reel
@@ -402,6 +496,8 @@ class FootageLibrary(BaseTool):
             "usable_segments": usable,
             "segments_added": added,
             "segments_already_indexed": reused,
+            "segments_remeasure_skipped": remeasure_skipped,
+            "dead_source_rows": dead_source_rows,
             "excluded_segments": len(exclusions),
             "excluded_by_reason": excluded_by_reason,
             "exclusions": exclusions,
@@ -615,6 +711,110 @@ def _embed_text(text: str) -> np.ndarray:
     from lib.clip_embedder import embed_texts
 
     return embed_texts([text])[0]
+
+
+def _default_corpus_dir(footage_dir: Path) -> Path:
+    """Where a pool's index lives when the caller does not say.
+
+    Keyed to the pool, not to the batch. A batch-scoped corpus is thrown away
+    with the batch, so every run re-runs scene detection, frame sampling,
+    sharpness and CLIP over footage that has not changed since last time. The
+    digest is taken from the resolved path so two spellings of the same pool
+    share one index; the slug is only there to make the directory readable.
+
+    Outside the pool on purpose — the operator's footage directory stays
+    read-only — and under `projects/` so it is gitignored like every other
+    generated artifact.
+    """
+    resolved = footage_dir.expanduser().resolve()
+    slug = re.sub(r"[^a-z0-9]+", "-", resolved.name.lower()).strip("-") or "pool"
+    return (Path("projects") / "_footage_index" / f"{slug}_{_path_digest(resolved)}").resolve()
+
+
+def _measurements_path(corpus_dir: Path) -> Path:
+    return corpus_dir / "measurements.json"
+
+
+def _load_measurements(corpus_dir: Path) -> tuple[dict[str, float], dict[str, Any]]:
+    """Sharpness of every segment ever measured here, plus the params it was measured under.
+
+    Unreadable or corrupt reads as absent. That direction is deliberate: a
+    cache miss costs time, whereas trusting a half-written file costs a wrong
+    admission decision on footage nobody looked at again.
+    """
+    path = _measurements_path(corpus_dir)
+    if not path.is_file():
+        return {}, {}
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, {}
+    if not isinstance(blob, dict):
+        return {}, {}
+    raw = blob.get("sharpness")
+    params = blob.get("params")
+    measured = {
+        str(k): float(v)
+        for k, v in (raw.items() if isinstance(raw, dict) else [])
+        if isinstance(v, (int, float)) and math.isfinite(float(v))
+    }
+    return measured, params if isinstance(params, dict) else {}
+
+
+def _save_measurements(
+    corpus_dir: Path, measured: dict[str, float], params: dict[str, Any]
+) -> None:
+    path = _measurements_path(corpus_dir)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"params": params, "sharpness": measured}, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _index_conflict(
+    corp: Corpus, recorded: dict[str, Any], params: dict[str, Any]
+) -> Optional[str]:
+    """Why a stored index cannot answer this request — or None if it can.
+
+    Both cases are refusals rather than repairs, because `Corpus` is append-only
+    by design (`lib/corpus.py:230-233`): a row cannot be taken back out without
+    breaking the row-to-embedding alignment.
+
+    - **Re-chunked.** Different segmentation means different (file, in, out)
+      triples, so the old chunking's rows stay and the new one's are added
+      beside them. Two overlapping segments of the same footage in one corpus
+      defeats the no-reuse guarantee they exist to support.
+    - **Raised floor.** `sharpness` is written here and read nowhere else, so
+      the floor is enforced only by declining to write the row. Rows admitted
+      under a lower floor are already in, and nothing downstream re-checks them.
+
+    Lowering the floor is not a conflict: no admitted row becomes invalid, and
+    the segments excluded last time are re-decided from their cached
+    measurements — which is the whole point of keeping them.
+    """
+    if not recorded:
+        return None
+    changed = [f for f in SEGMENTATION_FIELDS if f in recorded and recorded[f] != params[f]]
+    if changed:
+        detail = ", ".join(f"{f}: {recorded[f]} -> {params[f]}" for f in changed)
+        return (
+            f"Stored index at this corpus_dir was built with different segmentation ({detail}). "
+            "Segment boundaries would change and the corpus is append-only, so both chunkings "
+            "would coexist as overlapping rows. Delete the corpus directory to rebuild it, or "
+            "pass a different corpus_dir."
+        )
+    floor = params["sharpness_floor"]
+    stale = sum(1 for r in corp.records if r.sharpness and r.sharpness < floor)
+    if stale:
+        return (
+            f"{stale} indexed row(s) were admitted under sharpness_floor "
+            f"{recorded.get('sharpness_floor')} and fall below the requested {floor}. The corpus "
+            "is append-only and nothing downstream re-checks sharpness, so raising the floor "
+            "would leave them selectable. Delete the corpus directory to rebuild it."
+        )
+    return None
 
 
 def _relative_id(path: Path, root: Path) -> str:
