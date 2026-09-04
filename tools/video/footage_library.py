@@ -44,14 +44,25 @@ pool, not to the project. A batch-scoped corpus is deleted with the batch, so
 every sitting re-ran scene detection, frame sampling, sharpness and CLIP over
 footage that had not changed since the last one.
 
-Two stores make that work, and they are not the same thing:
+Three stores make that work, and they are not the same thing:
 
 - `Corpus` holds the segments that PASSED. `Corpus.has` short-circuits those.
 - `measurements.json` holds the sharpness of every segment ever measured here,
   **including the ones that were excluded**. Without it the excluded share of a
   pool is re-decoded forever, because a rejection was never written anywhere —
-  23 of 56 segments on the first real pool, i.e. 41% of the work a persistent
-  corpus alone would still repeat.
+  23 of 56 segments on the first real pool.
+- `scene_cache/` holds shot boundaries per (file, size, mtime). It existed and
+  was **write-only** — `SceneDetect` takes `output_path` to write to and nobody
+  read it back — so every index re-detected every file. See `_scene_boundaries`.
+
+Measured on the operator's own 67-file pool: **1171.8s cold, 75.1s warm** (94%).
+Reading the scene cache is most of that — before it, a fully warm run was 539.8s.
+
+What remains is `review_source_media` re-probing every file, which is NOT
+cached. That is the floor this design leaves in place, and on purpose: it is the
+governance gate of record, and `lib/source_media_review.py` holds that a file
+must never be reported as reviewed unless a real probe ran. Caching it is a
+policy decision for the operator, not an optimisation to take quietly.
 
 `Corpus` is append-only by design, which bounds what a stored index can absorb.
 Re-chunking (`min`/`max_segment_seconds`, `frames_per_segment`) would leave the
@@ -557,9 +568,35 @@ class FootageLibrary(BaseTool):
 
 
 def _scene_boundaries(path: Path, duration: float, corpus_dir: Path) -> list[dict[str, float]]:
-    """Shot boundaries for one file, falling back to the whole file."""
+    """Shot boundaries for one file, falling back to the whole file.
+
+    `scene_cache/` was write-only: `SceneDetect` takes `output_path` to write
+    its result, and nothing read the file back, so every index re-detected
+    every file. Measured on the operator's 67-file pool, that was 387s of a
+    539.8s fully-warm run — more than the pool probe and the corpus put
+    together. The directory has been called a cache since it was written; this
+    is the read half.
+
+    Validated on (size, mtime) rather than mtime alone, because a file restored
+    from a backup keeps its old timestamp and would otherwise read as unchanged.
+    A false miss only costs a re-detect, so anything unparseable re-detects.
+    """
     scene_json = corpus_dir / "scene_cache" / f"{path.stem}_{_path_digest(path)}.scenes.json"
     scene_json.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        stat = path.stat()
+        fingerprint = {"source_size": stat.st_size, "source_mtime_ns": stat.st_mtime_ns}
+    except OSError:
+        fingerprint = {}
+
+    if fingerprint and scene_json.is_file():
+        try:
+            blob = json.loads(scene_json.read_text(encoding="utf-8"))
+            if all(blob.get(k) == v for k, v in fingerprint.items()) and blob.get("scenes"):
+                return blob["scenes"]
+        except (OSError, ValueError, TypeError):
+            pass
+
     try:
         result = SceneDetect().execute(
             {
@@ -571,6 +608,16 @@ def _scene_boundaries(path: Path, duration: float, corpus_dir: Path) -> list[dic
         scenes = result.data.get("scenes") or [] if result.success else []
     except Exception:
         scenes = []
+
+    # SceneDetect writes {"scenes": [...]}; stamp the fingerprint beside it so
+    # the next run can tell whether the file it describes is still that file.
+    if scenes and fingerprint:
+        try:
+            scene_json.write_text(
+                json.dumps({**fingerprint, "scenes": scenes}), encoding="utf-8"
+            )
+        except OSError:
+            pass
     return scenes or [{"start_seconds": 0.0, "end_seconds": duration}]
 
 

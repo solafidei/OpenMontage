@@ -108,8 +108,8 @@ measured** — the shortfall was measured at gate 1 as
 gate 2 as `scene_plan.metadata.shortfall`. The number you fire is
 `len(scene_plan["metadata"]["shortfall"])` — never a number you derive here.
 `usable_segments // cuts_per_reel` is a different quantity: it is the pool's *capacity*,
-which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:476-477`,
-surfaced at `:506`). Reading capacity as shortfall fires a cutaway for every reel the pool
+which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:487-488`,
+surfaced at `:517`). Reading capacity as shortfall fires a cutaway for every reel the pool
 could have carried — unapproved spend, and it fails this file's own quality gate.
 **Provenance is declared, never inferred** — a row is identity-locked because
 `footage_library` wrote it that way at ingest (`:371`, `:412`), and nothing downstream
@@ -167,7 +167,7 @@ for reel in scene_plan["metadata"]["reels"]:
         # overruns its own budget and drifts off every beat after the first cut.
         start, end = slot["in_seconds"], slot["out_seconds"]
         # local_path is ABSOLUTE for operator rows — the pool lives outside the corpus
-        # and is never copied (tools/video/footage_library.py:442-445); the join still
+        # and is never copied (tools/video/footage_library.py:453-456); the join still
         # resolves, because an absolute right-hand side wins.
         path = (corpus.corpus_dir / rec.local_path).as_posix()
         # The index now outlives the batch, so it can outlive the footage too.
@@ -537,7 +537,7 @@ cutaway.
 **About `path`.** It is project-relative for everything this pipeline wrote — cutaways,
 normalised beds, caption files. For an identity-locked pool row it is the **absolute** source
 path, because the pool lives outside the project and `footage_library` never copies it
-(`tools/video/footage_library.py:442-445`), even though the schema's own description reads
+(`tools/video/footage_library.py:453-456`), even though the schema's own description reads
 "Relative path within the pipeline project directory"
 (`schemas/artifacts/asset_manifest.schema.json:21`; nothing validates the shape). Say so in
 that asset's `generation_summary`, as above, so a reader is not left to guess which rule

@@ -26,7 +26,7 @@ number. A brief written before the pool is indexed is a guess.
 
 One call probes the pool through the governance gate, splits every file into cut-sized
 segments, drops the blurry ones with a reason, and writes one corpus row per segment with
-`identity_locked=True` (`tools/video/footage_library.py:436-468`).
+`identity_locked=True` (`tools/video/footage_library.py:447-479`).
 
 ```python
 from tools.video.footage_library import FootageLibrary
@@ -69,11 +69,19 @@ re-decided from their cached measurements. To rebuild anyway, delete the index d
 `dead_source_rows` counts rows whose source file you have since deleted — they cannot
 inflate `usable_segments`, but a growing count means the index is worth rebuilding.
 
+**A warm index is not a free index.** Measured on a 67-file pool: **1171.8s cold, 75.1s
+warm**. What a warm run still pays is `review_source_media` re-probing every file,
+uncached on purpose — it is the governance gate of record, and `lib/source_media_review.py`
+holds that a file must never be reported as reviewed unless a real probe ran, so a cache
+there is a policy change to bring to the operator, not a quiet optimisation. Quote the
+real wait when you tell them how long indexing will take, and remember it scales with how
+much they have shot since: a batch that adds 59 files pays close to the cold price.
+
 **Two failures look alike and are not.** Read `index.error` before you speak:
 `segments_unembeddable > 0` with `usable_segments == 0` is the **CLIP stack being down**,
-not a thin pool (`footage_library.py:515-531`) — never send the operator back to the gym
+not a thin pool (`footage_library.py:526-542`) — never send the operator back to the gym
 over that one; `usable_segments == 0` with exclusions is a genuinely unusable pool
-(`:533-545`). Either way, stop and escalate per `AGENT_GUIDE.md` → "Escalate Blockers
+(`:544-556`). Either way, stop and escalate per `AGENT_GUIDE.md` → "Escalate Blockers
 Explicitly". Never plan reels against a pool that failed to measure.
 
 ### 2. The Valve — Measure The Pool Against The Batch (spec R8)
@@ -99,7 +107,7 @@ shortfall_reel_ids = planned_reel_ids[:cutaway_count]  # one AI flash a reel, so
 ```
 
 `max_reels` and `spare_segments` are `footage_library`'s own names, read straight off
-`pool` (`tools/video/footage_library.py:496`, `:506`) — do not recompute them under a local
+`pool` (`tools/video/footage_library.py:507`, `:517`) — do not recompute them under a local
 alias. `planned_reel_ids` is minted **here and nowhere else**: it goes onto the brief as
 `metadata.reel_ids`, and every later stage takes its reel ids from there.
 
@@ -194,7 +202,7 @@ Wait for explicit approval before advancing, and re-log with the **same `categor
 ### 4. Arm The Identity Lock
 
 `footage_library` already set `identity_locked=True` on every row it wrote
-(`footage_library.py:462-464`); `pool["identity_locked"]` comes back `True`. Record it on
+(`footage_library.py:473-475`); `pool["identity_locked"]` comes back `True`. Record it on
 the brief and say plainly what it forbids — the operator hears this once, in words,
 rather than discovering it as a raise at compose:
 
@@ -284,7 +292,7 @@ These keys exist only because a later stage reads them by name:
   material, and edit-director requires the field non-empty.
 - **`max_reels` / `spare_segments`** — `footage_library`'s own names and its own numbers,
   copied off `pool`. The tool defines them as `usable // cuts_per_reel` and
-  `usable - max_reels * cuts_per_reel` (`tools/video/footage_library.py:477`, `:507`), so at
+  `usable - max_reels * cuts_per_reel` (`tools/video/footage_library.py:488`, `:518`), so at
   31 usable segments and 5 cuts a reel that is `max_reels = 6` and
   `spare_segments = 31 - 6 x 5 = 1` — one spare, **not** the six that `usable - reels x cuts`
   would give. Never recompute either against the number of reels planned, and never a

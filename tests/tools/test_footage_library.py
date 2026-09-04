@@ -559,3 +559,57 @@ def test_the_default_corpus_dir_is_keyed_to_the_pool_not_the_batch(tmp_path):
     assert week36 != footage_library._default_corpus_dir(tmp_path)
     # Outside the pool: the operator's footage directory stays read-only.
     assert pool.resolve() not in week36.parents
+
+
+def test_a_second_index_does_not_re_detect_scenes(pool, tmp_path):
+    """`scene_cache/` was named a cache and never read back.
+
+    `SceneDetect` takes `output_path` to WRITE to, so every index re-detected
+    every file. On the operator's 67-file pool that was 387s of a 539.8s
+    fully-warm run — the single largest remaining cost, and invisible because
+    the directory was already called `scene_cache`.
+    """
+    corpus_dir = tmp_path / "corpus"
+    first = _index(pool, corpus_dir)
+    real = footage_library.SceneDetect
+    seen: list[str] = []
+
+    class _Recording:
+        def execute(self, inputs):
+            seen.append(inputs["input_path"])
+            return real().execute(inputs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        _stub_embedders(mp)
+        mp.setattr(footage_library, "SceneDetect", _Recording)
+        second = FootageLibrary().execute(_inputs(pool, corpus_dir))
+
+    assert second.success is True, second.error
+    assert seen == [], f"re-detected scenes for unchanged files: {seen}"
+    assert second.data["usable_segments"] == first.data["usable_segments"]
+
+
+def test_replacing_a_file_re_detects_its_scenes(tmp_path):
+    """A cache keyed on the path must notice the path now holds different footage."""
+    small = tmp_path / "pool"
+    small.mkdir()
+    clip = small / "set.mp4"
+    _make_clip(clip, _SHARP, 5)
+    corpus_dir = tmp_path / "corpus"
+    _index(small, corpus_dir)
+
+    _make_clip(clip, _SHARP, 8)          # same path, different footage
+    real = footage_library.SceneDetect
+    seen: list[str] = []
+
+    class _Recording:
+        def execute(self, inputs):
+            seen.append(inputs["input_path"])
+            return real().execute(inputs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        _stub_embedders(mp)
+        mp.setattr(footage_library, "SceneDetect", _Recording)
+        FootageLibrary().execute(_inputs(small, corpus_dir))
+
+    assert seen == [str(clip)], "a replaced file must not reuse the old boundaries"

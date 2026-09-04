@@ -57,9 +57,9 @@ window works:
   onwards. `path` is what you hand `transcriber` and `beat_grid`. If the list is absent or
   empty, stop and ask; do not go looking for audio files on disk.
 - `brief["metadata"]["usable_segments"]` and `["max_reels"]` — the pool measurement
-  `footage_library` returned (`tools/video/footage_library.py:214`, `:223`), under exactly
+  `footage_library` returned (`tools/video/footage_library.py:225`, `:234`), under exactly
   those names. `max_reels` is the reel ceiling the indexed pool supports.
-- `brief["metadata"]["cuts_per_reel"]` (`:222`) — the cut count each reel is planned for,
+- `brief["metadata"]["cuts_per_reel"]` (`:233`) — the cut count each reel is planned for,
   and therefore the number of holds its snap grid is trying to supply.
 
 **One track per reel, never shared** (`executive-producer.md` → Definition Of Done). Fewer
