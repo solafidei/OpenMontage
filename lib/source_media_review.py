@@ -41,48 +41,53 @@ def detect_media_type(path: Path) -> Optional[str]:
 def _probe_video(
     path: Path, tool_registry: Any, frames_dir: Optional[Path] = None
 ) -> dict[str, Any]:
-    """Probe a video file using audio_probe (ffprobe wrapper) and frame_sampler."""
+    """Probe a video file using ffprobe (both streams) and frame_sampler."""
     result: dict[str, Any] = {"technical_probe": {}, "representative_frames": [], "quality_risks": []}
 
-    # Technical probe via audio_probe or ffprobe
+    # Technical probe via ffprobe. Not audio_probe: it runs this same ffprobe
+    # command but keeps only the audio stream, so its payload has no
+    # `resolution`, `fps` or video `codec` at all — the keys the summary, the
+    # usability rules and footage_library all read. Probing here reads both
+    # streams in the one subprocess a probe already costs.
     try:
-        audio_probe = tool_registry.get("audio_probe")
-        if audio_probe:
-            probe_result = audio_probe.execute({"input_path": str(path)})
-            if probe_result.success:
-                result["technical_probe"] = probe_result.data
+        import subprocess
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", "-show_streams", str(path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            probe_data = json.loads(proc.stdout)
+            fmt = probe_data.get("format", {})
+            streams = probe_data.get("streams", [])
+            video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+            audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), {})
+            # Display orientation, not storage. Phone footage stores landscape
+            # plus a rotation display matrix, and every decoder in the repo
+            # applies it — so a stored 1920x1080 with rotation -90 must be
+            # reported 1080x1920 or a vertical pipeline plans against a
+            # landscape source that never existed.
+            vw, vh = video_stream.get("width"), video_stream.get("height")
+            rotation = 0
+            for side_data in video_stream.get("side_data_list") or []:
+                if "rotation" in side_data:
+                    rotation = int(side_data["rotation"])
+            if vw and vh and abs(rotation) % 180 == 90:
+                vw, vh = vh, vw
+            result["technical_probe"] = {
+                "duration_seconds": float(fmt.get("duration", 0)),
+                "resolution": f"{vw or '?'}x{vh or '?'}",
+                "fps": _parse_fps(video_stream.get("r_frame_rate", "0/1")),
+                "codec": video_stream.get("codec_name", "unknown"),
+                "audio_codec": audio_stream.get("codec_name", ""),
+                "sample_rate": int(audio_stream.get("sample_rate", 0)) if audio_stream else 0,
+                "channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
+                "file_size_bytes": int(fmt.get("size", 0)),
+                "bitrate_kbps": round(int(fmt.get("bit_rate", 0)) / 1000, 1),
+            }
     except Exception as e:
-        logger.warning("audio_probe failed for %s: %s", path, e)
-
-    # If audio_probe didn't work, try ffprobe directly
-    if not result["technical_probe"]:
-        try:
-            import subprocess
-            cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", "-show_streams", str(path),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if proc.returncode == 0:
-                probe_data = json.loads(proc.stdout)
-                fmt = probe_data.get("format", {})
-                streams = probe_data.get("streams", [])
-                video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-                audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), {})
-                result["technical_probe"] = {
-                    "duration_seconds": float(fmt.get("duration", 0)),
-                    "resolution": f"{video_stream.get('width', '?')}x{video_stream.get('height', '?')}",
-                    "fps": _parse_fps(video_stream.get("r_frame_rate", "0/1")),
-                    "codec": video_stream.get("codec_name", "unknown"),
-                    "audio_codec": audio_stream.get("codec_name", ""),
-                    "sample_rate": int(audio_stream.get("sample_rate", 0)) if audio_stream else 0,
-                    "channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
-                    "file_size_bytes": int(fmt.get("size", 0)),
-                    "bitrate_kbps": round(int(fmt.get("bit_rate", 0)) / 1000, 1),
-                }
-        except Exception as e:
-            logger.warning("ffprobe failed for %s: %s", path, e)
-            result["quality_risks"].append(f"Could not probe file: {e}")
+        logger.warning("ffprobe failed for %s: %s", path, e)
+        result["quality_risks"].append(f"Could not probe file: {e}")
 
     # Sample frames
     try:
@@ -137,7 +142,14 @@ def _probe_audio(path: Path, tool_registry: Any) -> dict[str, Any]:
         if audio_probe:
             probe_result = audio_probe.execute({"input_path": str(path)})
             if probe_result.success:
-                result["technical_probe"] = probe_result.data
+                probe = dict(probe_result.data)
+                # audio_probe nests the stream fields under `audio`; the readers
+                # below expect them flat and schema-named, so lift them out.
+                stream = probe.get("audio") or {}
+                probe["audio_codec"] = stream.get("codec") or "unknown"
+                probe["sample_rate"] = int(stream.get("sample_rate") or 0)
+                probe["channels"] = int(stream.get("channels") or 0)
+                result["technical_probe"] = probe
     except Exception as e:
         logger.warning("audio_probe failed for %s: %s", path, e)
 

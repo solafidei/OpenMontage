@@ -460,9 +460,10 @@ class FootageLibrary(BaseTool):
                         creator="operator",
                         license="operator_owned",
                         duration=round(duration, 3),
-                        # audio_probe wins the probe race on some files and
-                        # reports no resolution, so fall back to the frame we
-                        # already decoded rather than writing a 0x0 row.
+                        # The probe reports DISPLAY resolution (rotation
+                        # applied), so these agree with the decoded frame; if
+                        # it ever fails, fall back to the frame we already
+                        # decoded rather than writing a 0x0 row.
                         width=_dimension(entry, 0) or int(greys[0].shape[1]),
                         height=_dimension(entry, 1) or int(greys[0].shape[0]),
                         motion_score=_motion_score(greys),
