@@ -67,6 +67,7 @@ export interface TalkingHeadOverlay {
   color?: string;
   accentColor?: string;
   fontSize?: number;
+  staggerFrames?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +225,14 @@ const OverlayContent: React.FC<{ overlay: TalkingHeadOverlay }> = ({
     );
   }
   if (overlay.type === "hero_title" && overlay.text) {
-    return <HeroTitle title={overlay.text} subtitle={overlay.subtitle} />;
+    return (
+      <HeroTitle
+        title={overlay.text}
+        subtitle={overlay.subtitle}
+        fontSize={overlay.fontSize}
+        staggerFrames={overlay.staggerFrames}
+      />
+    );
   }
   if (overlay.type === "section_title" && overlay.text) {
     return (

@@ -9,6 +9,20 @@ import {
 type HeroTitleProps = {
   title: string;
   subtitle?: string;
+  /**
+   * Title face in px. Defaults to 72, which fits roughly 19 characters per
+   * line in the 1080-wide reel frame — size it down for longer titles, or
+   * they are clipped at the box edge with no warning.
+   */
+  fontSize?: number;
+  /**
+   * Frames of delay between consecutive characters. Each character's opacity
+   * IS its spring value, so the last one starts at `title.length * this` and
+   * needs ~20 more frames to settle: past ~45 characters a title has not
+   * finished animating when a 2.5s overlay ends. Lower this for a long title
+   * in a short window.
+   */
+  staggerFrames?: number;
   /** Color of the leading accent characters and the underline. */
   accentColor?: string;
   /** Color of the remaining title characters. Pass the theme's textColor. */
@@ -29,6 +43,8 @@ const DEFAULT_SCRIM =
 export const HeroTitle: React.FC<HeroTitleProps> = ({
   title,
   subtitle,
+  fontSize = 72,
+  staggerFrames = 1.2,
   accentColor = "#22D3EE",
   textColor = "#F8FAFC",
   subtitleColor = "#A78BFA",
@@ -63,7 +79,7 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({
         {/* Main title with per-character spring */}
         <div
           style={{
-            fontSize: 72,
+            fontSize,
             fontWeight: 800,
             fontFamily: "Space Grotesk, Inter, system-ui, sans-serif",
             lineHeight: 1.2,
@@ -77,7 +93,7 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({
             <span key={w} style={{ display: "inline-flex", whiteSpace: "pre" }}>
               {word.chars.map((char, c) => {
                 const i = word.offset + c;
-                const delay = i * 1.2;
+                const delay = i * staggerFrames;
                 const charSpring = spring({
                   frame: frame - delay,
                   fps,
