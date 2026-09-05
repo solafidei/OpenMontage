@@ -81,24 +81,37 @@ track, work = "projects/<id>/audio/push_day.mp3", "projects/<id>/analysis"
 
 tx = Transcriber().execute({
     "input_path": track,
-    "model_size": "small",   # the tool default is "base" (transcriber.py:59-63); reel
-                             # speech sits under music, so start one step above it
+    "model_size": "medium",  # the tool default is "base" (transcriber.py:59-63); reel
+                             # words sit under music, so start two steps above it
+    "vad_filter": False,     # NOT the tool default (transcriber.py:65-67) — see below
     "output_dir": work,
 })
 assert tx.success, tx.error
-transcript_path = tx.artifacts[0]        # <stem>_transcript.json (transcriber.py:232, :238)
+transcript_path = tx.artifacts[0]        # <stem>_transcript.json (transcriber.py:264, :270)
 ```
 
-What comes back (`transcriber.py:220-229`): `segments`, `word_timestamps`, `language`,
+What comes back (`transcriber.py:252-261`): `segments`, `word_timestamps`, `language`,
 `duration_seconds`, plus `model_size` / `device` / `compute_type` / `gpu_fallback_reason`.
 Every word entry is `{"word", "start", "end", "probability"}`, probability rounded to three
-places (`:184-192`) — exactly the shape `remotion_caption_burn` consumes at `compose`
+places (`:216-221`) — exactly the shape `remotion_caption_burn` consumes at `compose`
 (`tools/video/remotion_caption_burn.py:222-245`). **Do not reshape it.**
 
-`word_timestamps=True` and `vad_filter=True` are both forced (`transcriber.py:165-166`), so
-a line under a loud bed can be dropped by the VAD before the model sees it. A track
-returning far fewer words than you can hear is a VAD casualty, not a silent track — re-run
-larger before concluding it has no usable speech.
+`word_timestamps=True` is the only kwarg this tool forces (`transcriber.py:197`).
+`vad_filter` is an ordinary input — default `True` (`transcriber.py:65-67`), read at `:137`,
+handed straight to `model.transcribe` at `:198`. **Reel-batch passes `False`, always.** The
+schema says why in its own description (`:68-74`): the VAD scores sung vocals under a music
+bed as non-speech and discards nearly all of them, and in this pipeline the captions *are*
+the track's words. Measured on two operator tracks: `"small"` with the VAD on returned 10
+and 11 words; `"medium"` with `vad_filter: False` returned 282 and 319 on the same audio.
+A track returning a handful of words is a VAD casualty, not a silent track.
+
+VAD off has a real cost — budget for it rather than trusting the extra words. With nothing
+dropping non-speech, the model transcribes the instrumental passages too, and hallucinates
+over them: one track opened with eight repetitions of `"RUMBLING"` before the first sung
+line. So read the transcript as *words plus noise*. Hooks and caption lines come from
+high-`probability` words inside a genuine vocal line (step 5, and the confidence gate in
+step 7); a run of repeated words over an intro with no vocal is transcription noise and
+never a hook, however well it reads.
 
 ### 2. Beat-Grid The Track With The Transcript In Hand
 
@@ -171,6 +184,26 @@ What a contaminated track means for cutting:
   here. **A flash or whip hung on a "roll" that is really a fast line of speech fires on
   nothing an audience can hear.** No cleaner grid is available: no stem separation exists,
   and re-running `beat_grid` measures the same track again.
+**The verdict is computed from unfiltered words, hallucinations included.** `beat_grid`
+never looks at `probability` — `_load_words` keeps every entry with a numeric `start` and
+`end` (`tools/analysis/beat_grid.py:463-467`) and nothing downstream of it filters on
+confidence. So with `vad_filter=False`, the noise the model invents over instrumental
+passages is counted as speech seconds and lands in `speech_coverage_pct`,
+`enrichment_over_coverage`, `roll_seconds_in_speech` and `rolls_majority_speech` — the four
+numbers the ladder above branches on. The confidence gate in step 7 protects the *caption*;
+it runs later and it does not protect *this*.
+
+Measured on the week-37 batch, the share of transcribed word-seconds carrying
+`probability < 0.6` was 7.3% / 27.4% / 23.8% / 9.2% / 13.2% across the five tracks. All five
+ruled `bar`, and all five did so on the second clause — `roll_in_speech` at 0.82-1.00
+against a `< 0.5` threshold. On a vocal track that clause is close to unsatisfiable by
+construction: coverage of 68-86% means almost any fill lands inside speech whether or not
+the grid is contaminated, so the `beat` branch is nearly unreachable for exactly the tracks
+this pipeline requires. Read a `bar` ruling as "not disproven" rather than "measured
+contaminated", and when the reel count depends on it, report the enrichment figure
+(1.04-1.22 here, i.e. barely above chance) beside the verdict so the operator can see how
+thin the evidence is.
+
 - Under any policy, `roll_lost_to_devoice > 0.5` means the fills are syllables — record it
   so `edit` does not hang a speed ramp on them. And a word with high `probability` but a
   `peak_rms` at the floor is **mis-timed**: its caption drifts off the mouth even though
@@ -293,9 +326,9 @@ nothing downstream hides a weak word. **The gate is here or nowhere.**
 For every word in a selected caption line with `probability < 0.6`, work the ladder in
 order and stop at the first rung that resolves it:
 
-1. **Re-transcribe the track** at a larger `model_size` (`"medium"`, then `"large-v3"` —
-   `transcriber.py:59-63`). `model_size` is part of the idempotency key (`:90`), so this is
-   a genuinely new run rather than a cache hit.
+1. **Re-transcribe the track** at a larger `model_size` (`"large-v3"`, above the `"medium"`
+   this stage starts at — `transcriber.py:59-63`). `model_size` is part of the idempotency
+   key (`:101`), so this is a genuinely new run rather than a cache hit.
 2. **Ask the operator what the line says** and record the fix as a `corrections` entry —
    `{wrong: right}`, matched case-insensitively with trailing punctuation preserved
    (`remotion_caption_burn.py:148-155`, `:226-234`); carry it in the script so `compose`
