@@ -10,6 +10,13 @@
     "budget_total_usd": { "type": "number", "minimum": 0 },
     "budget_reserved_usd": { "type": "number", "minimum": 0 },
     "budget_spent_usd": { "type": "number", "minimum": 0 },
+    "mode": { "type": "string", "enum": ["observe", "warn", "cap"] },
+    "reserve_pct": { "type": "number", "minimum": 0 },
+    "single_action_approval_usd": { "type": "number", "minimum": 0 },
+    "approved_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "entries": {
       "type": "array",
       "items": {
@@ -24,7 +31,10 @@
           "reserved_usd": { "type": "number", "minimum": 0 },
           "actual_usd": { "type": "number", "minimum": 0 },
           "timestamp": { "type": "string", "format": "date-time" },
-          "details": { "type": "string" }
+          "details": { "type": "string" },
+          "budget_warning": { "type": "boolean" },
+          "budget_warning_message": { "type": "string" },
+          "user_approved": { "type": "boolean" }
         },
         "additionalProperties": false
       }

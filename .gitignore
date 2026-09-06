@@ -28,6 +28,12 @@ tests/qa/output/
 # Project workspaces (generated assets, renders — all regenerable)
 projects/
 
+# Repo-root render scratch (demo scripts write here; regenerable)
+renders/
+
+# Generated style playbooks (output of lib/playbook_generator.save_playbook())
+styles/custom/
+
 # Corpus directories (downloaded stock clips, thumbnails, embeddings —
 # regenerable from source APIs via corpus_builder). Explicit rule even
 # though most corpora live under projects/ since agents sometimes
@@ -104,3 +110,7 @@ venv/
 
 # Local Wan / diffusers GPU environment
 .venv-wan/
+
+# tokensave code-graph index (local, rebuildable)
+.tokensave/
+.claude/worktrees/

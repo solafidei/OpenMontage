@@ -62,8 +62,19 @@ class Transcriber(BaseTool):
                 "default": "base",
             },
             "language": {"type": "string", "description": "ISO 639-1 language code, or null for auto-detect"},
+            "vad_filter": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Drop non-speech before transcribing. True is right for speech "
+                    "recordings. Set False for SUNG vocals under a music bed — the "
+                    "VAD scores them as non-speech and discards nearly all of them, "
+                    "which is fatal for reel-batch, whose captions come from a "
+                    "track's own words."
+                ),
+            },
             "diarize": {"type": "boolean", "default": False},
-            "output_dir": {"type": "string", "description": "Directory for output files"},
+            "output_dir": {"type": "string", "description": "Directory for output files (default: projects/_analysis/transcriber_<stem>, never beside the source media)"},
         },
     }
 
@@ -87,7 +98,7 @@ class Transcriber(BaseTool):
 
     retry_policy = RetryPolicy(max_retries=1, retryable_errors=["MemoryError"])
     resume_support = ResumeSupport.FROM_START
-    idempotency_key_fields = ["input_path", "model_size", "language"]
+    idempotency_key_fields = ["input_path", "model_size", "language", "vad_filter"]
     side_effects = ["writes transcript JSON to output_dir"]
     fallback = None
     user_visible_verification = [
@@ -118,7 +129,28 @@ class Transcriber(BaseTool):
         model_size = inputs.get("model_size", "base")
         language = inputs.get("language")
         diarize = inputs.get("diarize", False)
-        output_dir = Path(inputs.get("output_dir", input_path.parent))
+        # Default True keeps every existing caller's behaviour. It is an input at
+        # all because reel-batch transcribes MUSIC: measured on a 186s track with
+        # continuous vocals, vad_filter=True returned 10 words at large-v3 with the
+        # language forced, and the ones it did return were correct — so the model
+        # can hear the vocal fine, the VAD is simply throwing it away as non-speech.
+        vad_filter = bool(inputs.get("vad_filter", True))
+        # Never default beside the operator's source media: transcribing a clip
+        # in a footage pool would drop <stem>_transcript.json into the folder the
+        # operator curates. Same defect and same remedy as beat_grid (#51); the
+        # unowned-analysis workspace is video_analyzer.py's convention, and the
+        # tool is not told a project id. Keyed by stem, not a timestamp, so a
+        # re-run of the same file lands on the same transcript rather than
+        # accumulating a directory per run. Every pipeline caller passes an
+        # explicit output_dir, so this only catches ad-hoc runs.
+        # .resolve(): the returned artifact path outlives this call — beat_grid
+        # consumes it as `transcript_path`, and a later stage running from a
+        # different cwd cannot open a relative one.
+        output_dir = (
+            Path(inputs["output_dir"])
+            if inputs.get("output_dir")
+            else Path("projects") / "_analysis" / f"transcriber_{input_path.stem}"
+        ).resolve()
 
         if not input_path.exists():
             return ToolResult(success=False, error=f"Input file not found: {input_path}")
@@ -163,7 +195,7 @@ class Transcriber(BaseTool):
                 str(input_path),
                 language=language,
                 word_timestamps=True,
-                vad_filter=True,
+                vad_filter=vad_filter,
             )
 
             parsed_segments = []

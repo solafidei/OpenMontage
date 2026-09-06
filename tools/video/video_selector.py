@@ -7,14 +7,29 @@ the tool file in tools/video/; no changes to this selector are needed.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
 
+logger = logging.getLogger(__name__)
+
+
+class ProviderPinUnresolvedError(ValueError):
+    """An ``allowed_providers`` pin matched no live video provider.
+
+    Raised by :meth:`VideoSelector.estimate_cost` instead of returning $0.00.
+    A zero estimate is exempt from BOTH cost_tracker approval guards
+    (``estimated > single_action_approval_usd`` and
+    ``require_approval_for_new_paid_tool and estimated > 0``), so a mistyped or
+    unavailable pin used to seed an unguarded line item that only blew up later
+    in ``execute()``.
+    """
+
 
 class VideoSelector(BaseTool):
     name = "video_selector"
-    version = "0.3.1"
+    version = "0.4.0"
     tier = ToolTier.GENERATE
     capability = "video_generation"
     provider = "selector"
@@ -27,6 +42,17 @@ class VideoSelector(BaseTool):
     MOTION_REQUIRED_OPERATIONS = frozenset({"image_to_video", "reference_to_video", "video_edit"})
     # Default score gap for the preferred_provider override (see input_schema).
     PREFERRED_PROVIDER_GAP = 0.15
+    # Smallest price difference between quote and execution worth a warning. The
+    # ledger holds the quoted figure, so any real change to the money is worth
+    # naming; this only absorbs float representation noise.
+    PRICE_EPSILON_USD = 1e-6
+    # Routing slice, provider and price of the most recent estimate_cost call on
+    # this instance. Set by estimate_cost, read by execute to detect an
+    # estimate/execute divergence. It is NOT consumed by an execute: one quote
+    # legitimately answers for a whole batch (reel-batch prices one cutaway and
+    # generates five), and clearing it on the first execute left clips 2..N of a
+    # 76x over-spend unwarned. A new estimate_cost supersedes it.
+    _last_estimate: dict[str, object] | None = None
 
     capabilities = [
         "text_to_video", "image_to_video", "reference_to_video", "video_edit", "stock_video",
@@ -292,11 +318,169 @@ class VideoSelector(BaseTool):
         return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, object]) -> float:
-        candidates = self._filter_candidates(inputs, self._providers())
-        if not candidates:
+        """Price ONE call through the provider this brief would actually route to.
+
+        Pass the SAME inputs dict to :meth:`execute`. The provider and price
+        quoted here are remembered, and ``execute`` stamps ``estimate_divergence``
+        on its result when it ends up on a different provider or at a different
+        price — pricing with ``allowed_providers=["kling"]`` ($0.10) and then
+        executing unpinned (seedance, $1.52) is a 15x under-price that slips both
+        approval guards, and it must not stay silent.
+
+        The comparison is on the OUTCOME, not on the inputs, because the inputs
+        arm is unfixable by enumeration: every field this selector forwards can
+        reach a provider's own ``estimate_cost`` (measured across tools/video:
+        duration, resolution, model_variant, model, operation, mode, api_family,
+        sound, multi_prompt, reference_image_urls, reference_video_url(s), plus
+        model_version / backend / generate_audio / quality / frames /
+        model_family / provider_variant, which this schema does not even
+        declare), and the ranking that picks the provider also reads the prompt.
+        A whitelist of "routing fields" is therefore always one field short of
+        the next silent reroute; the quoted provider and the quoted dollars are
+        not.
+
+        Raises :class:`ProviderPinUnresolvedError` when an ``allowed_providers``
+        pin resolves to no live provider, rather than returning an unguardable $0.00.
+        """
+        providers = self._providers()
+        candidates = self._filter_candidates(inputs, providers)
+        tool = None
+        if candidates:
+            tool, _ = self._select_best_tool(
+                inputs, candidates, self._prepare_task_context(inputs)
+            )
+        if tool is None:
+            # 'rank' is a free, read-only query — it priced at $0.00 before this
+            # hardening and must keep doing so. The guard exists to stop an
+            # unresolvable pin seeding an unguarded PAID line item; refusing a
+            # ranking request would be a behaviour regression for callers that
+            # only ever wanted the shortlist.
+            if inputs.get("allowed_providers") and inputs.get("operation") != "rank":
+                raise ProviderPinUnresolvedError(
+                    f"allowed_providers={list(inputs['allowed_providers'])} matches no "
+                    f"available video provider for operation "
+                    f"{inputs.get('operation', 'text_to_video')!r} "
+                    f"(live providers: {sorted({t.provider for t in providers})}). "
+                    "Fix the pin — a $0.00 estimate would bypass both approval guards."
+                )
             return 0.0
-        tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_cost(inputs) if tool else 0.0
+        cost = tool.estimate_cost(inputs)
+        self._last_estimate = {
+            "routing": self._routing_slice(inputs),
+            "provider": tool.provider,
+            "estimated_usd": cost,
+            "executions": 0,
+        }
+        return cost
+
+    @staticmethod
+    def _routing_slice(inputs: dict[str, object]) -> dict[str, object]:
+        """The declared inputs that steer routing or pricing — DIAGNOSTIC ONLY.
+
+        Reported on both sides of a divergence so an operator can see which field
+        moved the money; it is not what decides that a divergence happened (see
+        :meth:`_estimate_divergence`), because no such list can be complete.
+
+        ``allowed_providers`` is de-duplicated as well as sorted: ``["kling",
+        "kling"]`` and ``["kling"]`` pin the same one provider at the same price,
+        and reporting them as different routes made the guard cry wolf over a
+        call that had routed and priced identically.
+
+        Omitted on purpose: ``prompt`` (feeds the scorer, so it CAN change the
+        provider, but it legitimately differs on every clip of a batch — its
+        effect shows up as a different executed provider); ``target_operation``
+        (only read in the free ``rank`` mode, which never bills).
+        """
+        return {
+            "allowed_providers": sorted({str(p) for p in (inputs.get("allowed_providers") or [])}),
+            "preferred_provider": str(inputs.get("preferred_provider", "auto")),
+            # Decides whether the preference wins at all: quoting with gap=0.5
+            # and executing with gap=0.0 reroutes kling -> seedance on inputs
+            # that are otherwise byte-identical.
+            "preferred_provider_gap": str(inputs.get("preferred_provider_gap", "")),
+            "operation": str(inputs.get("operation", "text_to_video")),
+            "model": str(inputs.get("model", "")),
+            "duration": str(inputs.get("duration", "")),
+            # Measured (ast scan of every estimate_cost under tools/video) to
+            # change the price on at least one live provider.
+            "model_variant": str(inputs.get("model_variant", "")),
+            "resolution": str(inputs.get("resolution", "")),
+            "mode": str(inputs.get("mode", "")),
+            "api_family": str(inputs.get("api_family", "")),
+            "sound": str(inputs.get("sound", "")),
+            # Diverts routing to a custom-workflow provider; the graph itself is
+            # too big to carry here, its presence is the routing fact.
+            "custom_workflow": bool(inputs.get("workflow_json") or inputs.get("workflow_path")),
+        }
+
+    def _estimate_divergence(
+        self, inputs: dict[str, object], tool: BaseTool, executed_usd: float | None
+    ) -> dict[str, object] | None:
+        """Compare what this execution ACTUALLY costs against what was quoted.
+
+        Returns None when no estimate was taken on this selector, or when the
+        execution landed on the quoted provider at the quoted price.
+
+        Comparing the inputs instead was silent on a divergence the inputs
+        cannot show: hand the same dict to both calls and let kling go
+        UNAVAILABLE in between, and the money quietly moves to seedance at 15x.
+        ``prior['provider']`` was already recorded for this and sat unused.
+
+        The quote is NOT cleared here. One estimate can legitimately answer for a
+        whole batch, and consuming it on the first execute meant five unpinned
+        clips against one $0.10 quote flagged [True, False, False, False, False].
+        That also removes the reason to care whether the execute succeeded: a
+        failed call no longer strands a baseline for an unrelated later one.
+        """
+        prior = self._last_estimate
+        if not prior:
+            return None
+        prior["executions"] = int(prior.get("executions", 0)) + 1
+        if tool.provider == prior["provider"] and not self._price_diverged(
+            prior["estimated_usd"], executed_usd
+        ):
+            return None
+        return {
+            "estimated_routing": prior["routing"],
+            "executed_routing": self._routing_slice(inputs),
+            "estimated_provider": prior["provider"],
+            "executed_provider": tool.provider,
+            "estimated_usd": prior["estimated_usd"],
+            "executed_estimate_usd": executed_usd,
+            # Which call against this one quote this is: a director that priced
+            # once and generated five sees 1..5 here, not five separate quotes.
+            "executions_against_estimate": prior["executions"],
+        }
+
+    @classmethod
+    def _price_diverged(cls, quoted: object, executed: object) -> bool:
+        """Whether the executed price is a different figure from the quoted one."""
+        if isinstance(quoted, (int, float)) and isinstance(executed, (int, float)):
+            return abs(float(quoted) - float(executed)) > cls.PRICE_EPSILON_USD
+        # One side declined to price (None): only equal figures are non-divergent.
+        return quoted != executed
+
+    @staticmethod
+    def _format_usd(value: object) -> str:
+        """Render a price for the warning, tolerating a provider that won't price.
+
+        Interpolating a None through ``$%.4f`` raised TypeError inside logging,
+        which swallowed the record — the warning channel this guard exists for
+        went silent on exactly the call it was meant to shout about — and under
+        a raising handler (pytest's caplog) it escaped ``execute()`` and turned
+        an already-successful paid call into an exception.
+        """
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"${value:.4f}"
+        return f"${value} (provider declined to price)"
+
+    @staticmethod
+    def _safe_estimate(tool: BaseTool, inputs: dict[str, object]) -> float | None:
+        """A provider's own price for these inputs, or None if it declines to price them."""
+        try:
+            return tool.estimate_cost(inputs)
+        except Exception:
+            return None
 
     def estimate_runtime(self, inputs: dict[str, object]) -> float:
         candidates = self._providers()
@@ -329,7 +513,11 @@ class VideoSelector(BaseTool):
         task_context = self._prepare_task_context(inputs)
         tool, score = self._select_best_tool(inputs, candidates, task_context)
         if tool is None:
-            return ToolResult(success=False, error="No video generation provider available.")
+            pinned = list(inputs.get("allowed_providers") or [])
+            detail = f" for allowed_providers={pinned}" if pinned else ""
+            return ToolResult(
+                success=False, error=f"No video generation provider available{detail}."
+            )
 
         # Adapt input keys: stock tools use 'query' while generators use 'prompt'
         adapted = dict(inputs)
@@ -351,6 +539,44 @@ class VideoSelector(BaseTool):
 
         result = tool.execute(adapted)
         if result.success:
+            # Estimate integrity: record what this call actually priced at, and flag
+            # it when that provider or that price is not what estimate_cost quoted
+            # (a pinned gate + an unpinned execution is a silent under-price).
+            executed_usd = self._safe_estimate(tool, inputs)
+            result.data["executed_estimate_usd"] = executed_usd
+            divergence = self._estimate_divergence(inputs, tool, executed_usd)
+            if divergence:
+                # Deliberately NOT written to cost_log.json, and that is a limit, not
+                # an oversight. Ledger entries are minted by the stage director
+                # (estimate -> reserve -> reconcile, skills/meta/checkpoint-protocol.md
+                # -> Cost Ledger Governance); no entry id, project id or tracker handle
+                # reaches a tool's execute(), and CostTracker exposes no mutator that
+                # attaches a free-form field to an existing entry, so a tool cannot
+                # write ONTO the entry that priced this call without a cost_tracker
+                # schema change. Minting its own entry instead would be worse than
+                # silence: nothing reconciles it, so it strands in
+                # non_terminal_entries() and fails the compose gate's "every entry
+                # terminal" criterion.
+                # So it surfaces where a tool legitimately can: on the result, for the
+                # director that holds BOTH the entry id and this payload and is the
+                # only layer able to book it, and as a run-log warning — the channel
+                # cost_tracker itself uses for a forced overwrite of a settled record,
+                # so an operator reading the log sees the under-price even when nobody
+                # inspects result.data. Operator: cost_log.json still carries the
+                # QUOTED figure for this line; reconcile it against executed_provider /
+                # executed_estimate_usd below, not the quote.
+                logger.warning(
+                    "video_selector estimate/execute divergence: priced %s at %s, "
+                    "executed %s at %s (call %s against that quote). The cost ledger "
+                    "holds the QUOTED figure — reconcile this line against the "
+                    "executed route.",
+                    divergence["estimated_provider"],
+                    self._format_usd(divergence["estimated_usd"]),
+                    divergence["executed_provider"],
+                    self._format_usd(divergence["executed_estimate_usd"]),
+                    divergence["executions_against_estimate"],
+                )
+                result.data["estimate_divergence"] = divergence
             result.data.setdefault("selected_tool", tool.name)
             result.data["selected_provider"] = tool.provider
             result.data["selection_reason"] = score.explain() if score else f"Selected {tool.provider} ({tool.name})"

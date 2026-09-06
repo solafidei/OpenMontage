@@ -30,6 +30,7 @@ orchestration:
   mode: executive-producer
   skill: pipelines/talking-head/executive-producer
   budget_default_usd: 0.50
+  budget_per_output_minute_usd: 0.05
   max_revisions_per_stage: 3
   max_send_backs: 3
 
@@ -132,6 +133,7 @@ stages:
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
 
   - name: edit
     skill: pipelines/talking-head/edit-director
@@ -209,6 +211,7 @@ stages:
     success_criteria:
       - Schema-valid render_report artifact
       - Output video file exists and is playable
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent
 
   - name: publish
     skill: pipelines/talking-head/publish-director

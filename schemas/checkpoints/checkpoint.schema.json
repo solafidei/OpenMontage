@@ -33,11 +33,14 @@
     },
     "cost_snapshot": {
       "type": "object",
+      "description": "Ledger-derived snapshot from CostTracker.cost_snapshot() — the canonical keys only.",
       "properties": {
         "total_spent_usd": { "type": "number" },
         "total_reserved_usd": { "type": "number" },
-        "budget_remaining_usd": { "type": "number" }
-      }
+        "budget_remaining_usd": { "type": "number" },
+        "budget_total_usd": { "type": "number" }
+      },
+      "additionalProperties": false
     },
     "error": { "type": "string" },
     "metadata": { "type": "object" }

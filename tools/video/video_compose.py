@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
+from lib import polish_filters
 from tools.base_tool import (
     BaseTool,
     Determinism,
@@ -53,6 +54,28 @@ from tools.base_tool import (
     ToolStability,
     ToolTier,
 )
+
+
+# Integrated-loudness floor for delivery. Well below any broadcast target
+# (-16..-23 LUFS) so it only trips on genuinely under-level programme audio.
+LUFS_DELIVERY_FLOOR = -40.0
+
+# Digital-silence floor. Below this the mix provably carries no audible
+# programme audio; between this and the -40 dB narration heuristic, volume
+# alone cannot distinguish quiet narration from a bed — indeterminate.
+SILENCE_FLOOR_DB = -60.0
+
+
+# The producing tool corroborates a cut's declared `provenance`. `footage_library`
+# is the only ingest that stamps `ClipRecord.identity_locked=True` (the operator's
+# own pool); `cutaway_gen` is the only producer of generated frames, and stamps
+# `provenance: "ai_generated"` on what it returns. Anything else — stock, a
+# hand-placed file — declares its own provenance with nothing to check it against,
+# which is why this map is consulted rather than required.
+PROVENANCE_BY_SOURCE_TOOL = {
+    "footage_library": "operator_footage",
+    "cutaway_gen": "ai_generated",
+}
 
 
 class VideoCompose(BaseTool):
@@ -175,6 +198,14 @@ class VideoCompose(BaseTool):
                 },
             },
             "audio_path": {"type": "string", "description": "Mixed audio to mux into output"},
+            "audio_start_seconds": {
+                "type": "number",
+                "description": (
+                    "In-point into audio_path, seconds. The bed is muxed from here "
+                    "rather than from t=0 — a batch that cuts each reel to its own "
+                    "window of one long track needs the bed to start at that window."
+                ),
+            },
             "profile": {
                 "type": "string",
                 "description": (
@@ -189,6 +220,25 @@ class VideoCompose(BaseTool):
                 "properties": {
                     "subtitle_burn": {"type": "boolean", "default": True},
                     "two_pass_encode": {"type": "boolean", "default": False},
+                },
+            },
+            "batch_look": {
+                "type": "object",
+                "description": (
+                    "Batch-wide picture look applied in the per-cut encode. One "
+                    "setting shared by every reel of a sitting so they grade "
+                    "identically. Names resolve against face_enhance.PRESETS and "
+                    "color_grade.PROFILES; an operator_footage cut accepts "
+                    "face_enhance presets only. OVERRIDE ONLY: the batch spine "
+                    "carries the look (edit_decisions.batch_look, or "
+                    "edit_decisions.metadata.batch_look) per spec §4.2, and that "
+                    "is the copy the board and the audit trail can see. Pass it "
+                    "here only for a one-off re-render at a different grade."
+                ),
+                "properties": {
+                    "grade": {"type": "string"},
+                    "grain": {"type": "integer", "minimum": 0},
+                    "sharpen": {"type": "string"},
                 },
             },
             "codec": {"type": "string", "default": "libx264"},
@@ -340,6 +390,25 @@ class VideoCompose(BaseTool):
 
         try:
             if operation == "compose":
+                # The identity gate's SECOND door. `_pre_compose_validation`
+                # is reached from `_render` only, so the same artifact that
+                # `render` refused — a relabelled operator clip, an unsafe look
+                # on a locked face, a polish block under a non-ffmpeg runtime —
+                # rendered here with no gate and no warning.
+                #
+                # Asked HERE and not inside `_compose`, because `_render`
+                # reaches `_compose` (directly and via `_render_via_ffmpeg`)
+                # having already validated: putting it there would ask the same
+                # question twice on every render. One door, one gate, each.
+                edit_decisions = inputs.get("edit_decisions")
+                if edit_decisions:
+                    gate = self._identity_blocks(
+                        edit_decisions,
+                        asset_manifest=inputs.get("asset_manifest"),
+                        batch_look=self._resolve_batch_look(inputs, edit_decisions),
+                    )
+                    if gate:
+                        return self._validation_failure(gate)
                 result = self._compose(inputs)
             elif operation == "render":
                 result = self._render(inputs)
@@ -367,30 +436,68 @@ class VideoCompose(BaseTool):
         return path.suffix.lower() in VideoCompose._IMAGE_EXTENSIONS
 
     @staticmethod
-    def _has_audio_stream(path: Path) -> bool:
-        """Return True iff ffprobe reports at least one audio stream.
+    def _probe_source(path: Path) -> tuple[bool, tuple[int, int] | None]:
+        """Both questions the per-cut encode asks of a source, in ONE ffprobe.
 
-        Many stock video clips (especially from Pexels) ship with no audio
-        stream at all. If we blindly tell ffmpeg to transcode the 0:a stream
-        on such a file it errors out. This helper lets the segment builder
-        branch on stream presence so it can synthesize a silent track when
-        needed, keeping the concat segment layout consistent.
+        1. Is there an audio stream? Many stock clips (especially from Pexels)
+           ship with none; telling ffmpeg to transcode 0:a on such a file
+           errors out, so the segment builder synthesizes silence instead and
+           the concat segment layout stays consistent.
+        2. What is the video's DISPLAY size? `polish_filters.scale_headroom`
+           must never build a canvas bigger than the source can fill. This used
+           to be unavailable, so the headroom was applied blind and a source
+           smaller than headroom x target paid for an interpolated intermediate
+           it could not fill.
+
+        Display, not coded, size: a phone clip carries `rotation: -90` and a
+        coded 3840x2160 arrives at the filter graph as 2160x3840 (ffmpeg
+        autorotates). Capping on the coded size would cap a portrait reel on
+        the wrong ratio.
+
+        Returns `(False, None)` on any probe failure — the caller then behaves
+        exactly as it did before this existed: synthesize silence, and keep the
+        punch-in's own headroom.
         """
-        try:
-            out = subprocess.check_output(
-                [
-                    "ffprobe", "-v", "error",
-                    "-select_streams", "a",
-                    "-show_entries", "stream=codec_type",
-                    "-of", "default=nw=1:nk=1",
-                    str(path),
-                ],
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            return "audio" in out
-        except Exception:
-            return False
+        # The `stream_side_data` section is the newer of the two selectors; an
+        # ffprobe that rejects it must still answer the audio question, because
+        # getting THAT wrong makes ffmpeg fail the encode outright while a
+        # missing source size only costs the headroom cap.
+        streams: list[dict] = []
+        for entries in (
+            "stream=codec_type,width,height:stream_side_data=rotation",
+            "stream=codec_type,width,height",
+        ):
+            try:
+                out = subprocess.check_output(
+                    ["ffprobe", "-v", "error",
+                     "-show_entries", entries, "-of", "json", str(path)],
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                streams = json.loads(out).get("streams", [])
+                break
+            except Exception:
+                continue
+        if not streams:
+            return False, None
+
+        has_audio = any(s.get("codec_type") == "audio" for s in streams)
+        dimensions: tuple[int, int] | None = None
+        for stream in streams:
+            if stream.get("codec_type") != "video":
+                continue
+            width, height = stream.get("width"), stream.get("height")
+            if not width or not height:
+                continue
+            rotation = 0.0
+            for side_data in stream.get("side_data_list") or []:
+                if side_data.get("rotation") is not None:
+                    rotation = float(side_data["rotation"])
+            if round(abs(rotation)) % 180 == 90:
+                width, height = height, width
+            dimensions = (int(width), int(height))
+            break
+        return has_audio, dimensions
 
     def _mux_external_audio(self, video_path: Path, audio_path: str | Path) -> ToolResult:
         """Atomically replace a rendered video's audio with the approved mix."""
@@ -454,6 +561,13 @@ class VideoCompose(BaseTool):
         crf = inputs.get("crf", 23)
         preset = inputs.get("preset", "medium")
         profile_name = inputs.get("profile")
+        # One look for the whole sitting, read off the batch spine (spec §4.2)
+        # with the tool input as an explicit override. The look arrived as a
+        # tool input only, which means it was never in the artifact: the board
+        # and the audit trail could not see what grade a batch was rendered
+        # with. The spine is where compose-director already materialises the
+        # shared vocabulary from, so that is where it is read.
+        batch_look = self._resolve_batch_look(inputs, edit_decisions)
 
         # Resolve target resolution + fit mode. Priority: explicit `profile`
         # arg > edit_decisions.metadata.compose_target > default (landscape HD).
@@ -463,6 +577,7 @@ class VideoCompose(BaseTool):
         # fit="cover" scales-to-fill and centre-crops (better for vertical social).
         resolution = "1920x1080"
         fit_mode = "pad"
+        fit_was_explicit = False
         compose_target = (edit_decisions.get("metadata") or {}).get("compose_target")
         if isinstance(compose_target, dict):
             try:
@@ -471,11 +586,18 @@ class VideoCompose(BaseTool):
                 pass
             if compose_target.get("fit") in ("pad", "cover"):
                 fit_mode = compose_target["fit"]
+                fit_was_explicit = True
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
                 p = get_profile(profile_name)
                 resolution = f"{p.width}x{p.height}"
+                # A portrait profile (reels/shorts/tiktok) means social vertical:
+                # fill the frame. Keeping the `pad` default here letterboxed
+                # landscape source into a black-bar sandwich — never what a
+                # 9:16 target wants. An explicit compose_target.fit still wins.
+                if not fit_was_explicit and p.height > p.width:
+                    fit_mode = "cover"
             except (ImportError, ValueError):
                 pass
         try:
@@ -558,25 +680,93 @@ class VideoCompose(BaseTool):
                     # pix_fmt / sar across ALL segments — otherwise it throws
                     # "Non-monotonous DTS" or silently produces corrupt output.
                     #
+                    # One probe per cut, hoisted above the filter build. It
+                    # answers the audio-stream question the encode has always
+                    # asked AND the source-size question the headroom needs;
+                    # asking it here rather than twice keeps the per-cut probe
+                    # count at the one it has always been.
+                    has_audio, source_dimensions = self._probe_source(source)
+
                     # Target is target_w x target_h @ 30fps, yuv420p, sar=1
                     # (default 1920x1080; overridable via `profile` or
                     # edit_decisions.metadata.compose_target — see above).
                     # fit="pad" letterboxes to preserve all content; fit="cover"
                     # scales-to-fill then centre-crops (no bars, for vertical social).
+                    #
+                    # The geometry stage builds to the cut's punch-in HEADROOM,
+                    # not to the output size. `punch_in`'s zoompan crops a
+                    # region of its input and blows it back up to the output
+                    # size; downscaled to 1080x1920 first, that crop magnifies
+                    # detail thrown away one filter earlier and every punch-in —
+                    # which lands on a beat hit, where the eye is — comes out
+                    # soft. Both fit branches scale to the same canvas, and
+                    # zoompan (which keeps s=<output size>) lands it back on
+                    # target. A cut with no punch-in gets headroom 1.0 and
+                    # renders byte-identically.
+                    #
+                    # The source's display size is passed in so the headroom is
+                    # capped by what the source can actually fill — it comes
+                    # from the ffprobe this loop already ran for audio-stream
+                    # presence, so it costs no extra probe.
+                    #
+                    # The headroom costs wall clock — the comment that used to
+                    # sit here claimed "1.82s -> 1.81s", i.e. free, and that
+                    # was false. Re-measured interleaved and paired through
+                    # this function (one discarded warm-up sweep, then 11
+                    # rounds of {headroom forced to 1.0, real headroom} back to
+                    # back), 2s z=1.6 cut of
+                    # projects/gym-footage/raw/IMG_1384.MOV at 1080x1920/cover:
+                    # median 1.730s -> 1.812s (1.05x, all 11 pairs slower) for
+                    # Laplacian variance of the final frame 74.3 -> 113.4
+                    # (1.53x). Zero extra ffprobe calls either way.
+                    #
+                    # Even dimensions are not cosmetic: libx264 + yuv420p
+                    # refuses an odd width or height outright.
+                    headroom = polish_filters.scale_headroom(
+                        cut,
+                        target=(target_w, target_h),
+                        source=source_dimensions,
+                        fit=fit_mode,
+                    )
+                    geom_w = int(round(target_w * headroom)) // 2 * 2
+                    geom_h = int(round(target_h * headroom)) // 2 * 2
                     if fit_mode == "cover":
                         geom = [
-                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase",
-                            f"crop={target_w}:{target_h}",
+                            f"scale={geom_w}:{geom_h}:force_original_aspect_ratio=increase",
+                            f"crop={geom_w}:{geom_h}",
                         ]
                     else:
                         geom = [
-                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
-                            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black",
+                            f"scale={geom_w}:{geom_h}:force_original_aspect_ratio=decrease",
+                            f"pad={geom_w}:{geom_h}:(ow-iw)/2:(oh-ih)/2:color=black",
                         ]
                     vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
                     af_parts: list[str] = []
-                    if speed != 1.0:
-                        vf_parts.append(f"setpts={1.0/speed}*PTS")
+                    # Picture-plane polish (reel-batch R6) splices in HERE, in the
+                    # per-cut encode — there is no single graph to hang it on.
+                    # polish_filters owns the whole video tail of the chain,
+                    # including the speed filter, because zoompan has to precede
+                    # setpts (it re-times its own output). Audio stays here:
+                    # a continuous ramp is not expressible in atempo, so it gets
+                    # the ramp's effective average and the segment's audio comes
+                    # out exactly as long as its picture for the concat-copy step.
+                    vf_parts.extend(
+                        polish_filters.cut_filters(
+                            cut, duration, target_w, target_h, look=batch_look
+                        )
+                    )
+                    ramp_to = (cut.get("polish") or {}).get("speed_ramp")
+                    # Same question `cut_filters` asked of the picture — a delta
+                    # that rounds away at the emitted precision is not a ramp.
+                    # Asking it differently here would put audio on the ramp
+                    # path while the picture took the constant one.
+                    if ramp_to is not None and polish_filters.is_ramp(speed, float(ramp_to)):
+                        af_parts.append(
+                            self._build_atempo(
+                                polish_filters.ramp_average_speed(speed, float(ramp_to))
+                            )
+                        )
+                    elif speed != 1.0:
                         af_parts.append(self._build_atempo(speed))
 
                     cmd.extend(["-filter:v", ",".join(vf_parts)])
@@ -594,10 +784,9 @@ class VideoCompose(BaseTool):
                     # Audio handling: some source clips have no audio stream
                     # (Pexels stock often ships silent). If we unconditionally
                     # ask ffmpeg to copy/encode the 0:a stream it errors out.
-                    # Probe for an audio stream first — if present, transcode
-                    # to AAC; if absent, synthesize a silent stereo track so
-                    # concat segments have a consistent stream layout.
-                    has_audio = self._has_audio_stream(source)
+                    # `_probe_source` above already answered this — if present,
+                    # transcode to AAC; if absent, synthesize a silent stereo
+                    # track so concat segments have a consistent stream layout.
                     if has_audio:
                         cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"])
                     else:
@@ -665,6 +854,12 @@ class VideoCompose(BaseTool):
             cmd = ["ffmpeg", "-y", "-i", str(final_input)]
 
             if audio_path and Path(audio_path).exists():
+                # -ss BEFORE -i seeks the input, so the bed starts at the reel's
+                # window instead of at t=0. Without it, every reel cut from one
+                # long track gets the same opening seconds of audio.
+                audio_start = float(inputs.get("audio_start_seconds") or 0.0)
+                if audio_start > 0:
+                    cmd.extend(["-ss", f"{audio_start:.3f}"])
                 cmd.extend(["-i", audio_path])
 
             # Determine if profile requires re-encoding (resize/fps change)
@@ -1372,6 +1567,53 @@ class VideoCompose(BaseTool):
 
         return theme if theme else None
 
+    @staticmethod
+    def _resolve_batch_look(
+        inputs: dict[str, Any], edit_decisions: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The batch look, tool input over batch spine (spec §4.2).
+
+        Precedence is `inputs["batch_look"]` > `edit_decisions.batch_look` >
+        `edit_decisions.metadata.batch_look`. The spine is the spec's home for
+        the shared grade and effect vocabulary and the only one of the three
+        that ends up in the artifact, so it is the default; the tool input
+        stays as the explicit per-call override — a one-off re-render at a
+        different grade without rewriting the batch's edit_decisions.
+
+        Two spellings on the spine, deliberately. The root `batch_look` is the
+        spec's, and the schema declares it (its root is
+        `additionalProperties: false`, so nothing else would validate).
+        `metadata.batch_look` is the older spelling, kept because it is where
+        the other compose knob already lives (`metadata.compose_target`) and
+        `tests/lib/test_reel_plan.py` materialises it per reel.
+
+        A look in any other shape is REFUSED, not skipped. This used to filter
+        with `isinstance(candidate, dict)`, so `batch_look: "bright_clean"` or
+        `[{"grade": "bright_clean"}]` on the spine resolved to None and the
+        batch rendered ungraded — and, worse, the operator_footage identity
+        gate runs *against* the resolved look, so dropping it silently skipped
+        the identity check with it. That is the silent-drop harm the polish
+        gate exists to prevent, arriving through the spine.
+        """
+        for source, candidate in (
+            ("batch_look tool input", inputs.get("batch_look")),
+            ("edit_decisions.batch_look", edit_decisions.get("batch_look")),
+            ("edit_decisions.metadata.batch_look",
+             (edit_decisions.get("metadata") or {}).get("batch_look")),
+        ):
+            if candidate is None:
+                continue
+            if not isinstance(candidate, dict):
+                raise polish_filters.PolishError(
+                    f"{source} must be a mapping of "
+                    f"{{grade, grain, sharpen}}, got {candidate!r}. A look in "
+                    f"another shape is refused rather than dropped: dropping it "
+                    f"would also skip the operator_footage identity gate, which "
+                    f"is asked against the resolved look."
+                )
+            return candidate
+        return None
+
     def _needs_remotion(self, cuts: list[dict]) -> bool:
         """Determine whether Remotion should handle this composition.
 
@@ -1412,11 +1654,160 @@ class VideoCompose(BaseTool):
         # overlays, and profile scaling for free.
         return True
 
+    def _identity_blocks(
+        self,
+        edit_decisions: dict[str, Any],
+        *,
+        asset_manifest: dict[str, Any] | None = None,
+        batch_look: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """The identity and runtime half of the pre-compose gate.
+
+        Split out of `_pre_compose_validation` because that function is called
+        from `_render` and from nowhere else, while `operation='compose'` is a
+        second, documented door into the same FFmpeg encode. The same artifact
+        that `render` refused for an identity violation composed happily
+        through `compose`: no gate, no warning, and checks 4 and 5 — the
+        operator-footage cross-check and the unsafe-look refusal — simply did
+        not run. These three checks are the ones that must hold wherever the
+        pixels are made. Checks 1-3 (delivery promise, slideshow risk,
+        renderer_family) are about the PLAN `render` is handed and stay with
+        it: `compose` is documented as the direct trim/concat entry and is
+        called with cut lists that were never a proposal.
+
+        Returns the blocking reasons, empty when there are none.
+        """
+        blocks: list[str] = []
+
+        # --- 4. Identity: declared provenance vs the tool that made the pixels ---
+        # `provenance` is a declaration, never inferred from the pixels (R5). The
+        # one corroborating signal that travels in-band is the producing tool:
+        # `footage_library` is the sole ingest that stamps identity_locked=True on
+        # a corpus row, and `cutaway_gen` is the sole producer of AI frames. A cut
+        # whose declaration contradicts its producer is the failure this gate
+        # exists for — an operator clip relabelled `ai_generated` is an operator
+        # clip with its identity protection switched off.
+        # Keyed by BOTH id and path, because `_render` resolves a cut's `source`
+        # either way (`if source_id in asset_lookup` — else it is opened as a
+        # path). Keyed on id alone, naming the operator's clip by its filename
+        # instead of its manifest id walked straight past this check while the
+        # corroborating row sat in the same manifest. `setdefault` so the first
+        # row wins: a duplicate id appended later must not shadow the original.
+        assets_by_ref: dict[str, dict] = {}
+        for asset in (asset_manifest or {}).get("assets", []):
+            for key in (asset.get("id"), asset.get("path")):
+                if key:
+                    assets_by_ref.setdefault(key, asset)
+
+        # What the manifest says each cut's pixels are, where it knows.
+        implied: dict[str, str] = {}
+        for cut in edit_decisions.get("cuts") or []:
+            asset = assets_by_ref.get(cut.get("source"))
+            if not asset:
+                continue
+            expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
+            if expected:
+                implied[cut.get("id")] = expected
+            declared = cut.get("provenance")
+            if expected and declared and declared != expected:
+                blocks.append(
+                    f"Identity violation on cut {cut.get('id')!r}: declared "
+                    f"provenance {declared!r} but its asset {asset.get('id')!r} was "
+                    f"produced by {asset.get('source_tool')!r}, which only makes "
+                    f"{expected!r}. provenance is declared at ingest and carried "
+                    f"forward — a disagreement here means it was rewritten "
+                    f"downstream (spec R5)."
+                )
+
+        # --- 5. Identity: the look applied to an operator_footage cut ---
+        # `look_filters` is the authority on what is identity-safe; calling it
+        # here asks the same question the ffmpeg encode would ask, early enough
+        # that the answer holds for every runtime.
+        if batch_look:
+            from lib.polish_filters import PolishError, look_filters
+
+            # One look for the whole batch, so it is one verdict per distinct
+            # provenance — not one line per cut. A hundred-cut batch used to
+            # emit a hundred identical lines.
+            #
+            # Unlocked first, which separates the two reasons `look_filters`
+            # raises: a name it cannot resolve is a typo in the look, and
+            # calling that an "identity violation" sent whoever hit it looking
+            # for a provenance bug that was not there.
+            try:
+                look_filters(batch_look, None)
+            except PolishError as e:
+                blocks.append(f"Invalid batch_look: {e}")
+            else:
+                by_provenance: dict[str | None, list[str]] = {}
+                for cut in edit_decisions.get("cuts") or []:
+                    # A cut that omits `provenance` falls back to what its
+                    # asset row implies. Omission was the softer hole: the
+                    # manifest said `footage_library` and the gate let a colour
+                    # grade through anyway, because the word was missing from
+                    # the cut. Where the manifest knows, silence is no waiver.
+                    provenance = cut.get("provenance") or implied.get(cut.get("id"))
+                    by_provenance.setdefault(provenance, []).append(cut.get("id"))
+
+                for provenance, cut_ids in by_provenance.items():
+                    try:
+                        look_filters(batch_look, provenance)
+                    except PolishError as e:
+                        shown = ", ".join(repr(c) for c in cut_ids[:3])
+                        more = f" (+{len(cut_ids) - 3} more)" if len(cut_ids) > 3 else ""
+                        blocks.append(
+                            f"Identity violation on {len(cut_ids)} "
+                            f"{provenance!r} cut(s) — {shown}{more}: {e}"
+                        )
+
+        # --- 6. Polish is FFmpeg's, and no other runtime reads it ---
+        # `polish` and the batch look are consumed in `_compose`'s per-cut
+        # encode and NOWHERE else (spec R6: the picture plane belongs to
+        # FFmpeg). Routed to Remotion or HyperFrames, a cut's punch-in, ramp,
+        # flash, whip and grade are simply not read — the render succeeds and
+        # the reel is quietly missing every accent it was cut for. Refuse
+        # rather than re-route: the runtime was locked at proposal and this
+        # repo does not silently downgrade, so the caller decides whether to
+        # drop the polish or to re-lock render_runtime='ffmpeg'.
+        #
+        # Check 5 gates the look on every route as defence in depth; this
+        # check is what stops a gated look from then being dropped on the
+        # floor. The rule, restated: `batch_look` and `polish` are read in
+        # `_compose` and nowhere else in this file, so on any other runtime
+        # "reaches the renderer" means "reaches it as nothing".
+        runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
+        if runtime and runtime != "ffmpeg":
+            polished = [
+                c.get("id") for c in edit_decisions.get("cuts") or [] if c.get("polish")
+            ]
+            if polished or batch_look:
+                carried = []
+                if polished:
+                    shown = ", ".join(repr(c) for c in polished[:3])
+                    more = f" (+{len(polished) - 3} more)" if len(polished) > 3 else ""
+                    carried.append(f"a polish block on {len(polished)} cut(s) — {shown}{more}")
+                if batch_look:
+                    carried.append("a batch_look")
+                blocks.append(
+                    f"render_runtime={runtime!r} cannot render "
+                    + " and ".join(carried)
+                    + ". The picture plane (punch_in, speed_ramp, transition_out, "
+                    "grade/grain/sharpen) is applied only in the FFmpeg per-cut "
+                    "encode (spec R6); this runtime would drop it silently. "
+                    "Either remove the polish, or lock render_runtime='ffmpeg' "
+                    "at proposal — the tool will not swap runtimes for you."
+                )
+
+        return blocks
+
     def _pre_compose_validation(
         self,
         edit_decisions: dict[str, Any],
         resolved_cuts: list[dict],
         scene_plan: list[dict] | None = None,
+        *,
+        asset_manifest: dict[str, Any] | None = None,
+        batch_look: dict[str, Any] | None = None,
     ) -> ToolResult | None:
         """Pre-compose quality gate — blocks render on critical violations.
 
@@ -1424,6 +1815,16 @@ class VideoCompose(BaseTool):
         1. Delivery promise violation: motion-required brief with >70% still cuts → BLOCK
         2. Slideshow risk score "fail" (average ≥ 4.0) → BLOCK
         3. Missing renderer_family → WARN (log only, don't block)
+        4. Identity: a cut's declared `provenance` disagrees with the tool that
+           produced its asset → BLOCK (spec R5)
+        5. Identity: an `operator_footage` cut carries a look outside the
+           identity-safe set → BLOCK (spec R5)
+
+        Checks 4 and 5 live HERE rather than in the ffmpeg per-segment encode
+        because this is the one place every render runtime passes through. The
+        `look_filters` raise still guards `_compose` called directly; on the
+        atelier and HyperFrames routes it is never reached, so without this the
+        identity guarantee held on one runtime out of three.
 
         Returns a failed ToolResult if render should be blocked, None if OK to proceed.
         """
@@ -1497,22 +1898,47 @@ class VideoCompose(BaseTool):
                 "Re-run the proposal stage with a renderer_family selection."
             )
 
+        # Checks 4-6 are the identity/runtime half of this gate, and they are
+        # asked at BOTH doors into the FFmpeg encode — see
+        # `_identity_blocks` and the `operation == "compose"` branch of
+        # `execute`.
+        blocks.extend(
+            self._identity_blocks(
+                edit_decisions,
+                asset_manifest=asset_manifest,
+                batch_look=batch_look,
+            )
+        )
+
+
         # Log warnings
         for w in warnings:
             log.warning("[pre-compose] %s", w)
 
         # Block on critical violations
         if blocks:
-            return ToolResult(
-                success=False,
-                error=(
-                    "Pre-compose validation failed — render blocked.\n"
-                    + "\n".join(f"  • {b}" for b in blocks)
-                    + ("\n\nWarnings:\n" + "\n".join(f"  • {w}" for w in warnings) if warnings else "")
-                ),
-            )
+            return self._validation_failure(blocks, warnings)
 
         return None
+
+    @staticmethod
+    def _validation_failure(
+        blocks: list[str], warnings: list[str] | None = None
+    ) -> ToolResult:
+        """The one wording for a blocked compose, whichever door asked.
+
+        Shared so the `operation='compose'` gate reports a violation in the
+        exact words `operation='render'` reports it — a caller that learned to
+        read one of them can read the other.
+        """
+        return ToolResult(
+            success=False,
+            error=(
+                "Pre-compose validation failed — render blocked.\n"
+                + "\n".join(f"  • {b}" for b in blocks)
+                + ("\n\nWarnings:\n" + "\n".join(f"  • {w}" for w in warnings) if warnings else "")
+            ),
+        )
 
     def _render(self, inputs: dict[str, Any]) -> ToolResult:
         """High-level render: assemble edit decisions + asset manifest into final video.
@@ -1566,6 +1992,30 @@ class VideoCompose(BaseTool):
                 ),
             )
 
+        # --- Pre-compose validation gate -------------------------------
+        # Hoisted ABOVE the atelier and HyperFrames early returns. Placed
+        # further down (after the templated flow's asset resolution) it
+        # silently never ran for either of those runtimes — the gate looked
+        # present but only policed one of three paths.
+        asset_lookup = {a["id"]: a for a in (asset_manifest or {}).get("assets", [])}
+        resolved_cuts = []
+        for cut in edit_decisions.get("cuts") or []:
+            resolved_cut = dict(cut)
+            source_id = cut.get("source", "")
+            if source_id in asset_lookup:
+                resolved_cut["source"] = asset_lookup[source_id]["path"]
+            resolved_cuts.append(resolved_cut)
+
+        validation_block = self._pre_compose_validation(
+            edit_decisions,
+            resolved_cuts,
+            inputs.get("scene_plan"),
+            asset_manifest=asset_manifest,
+            batch_look=self._resolve_batch_look(inputs, edit_decisions),
+        )
+        if validation_block is not None:
+            return validation_block
+
         # --- Atelier (bespoke) mode -------------------------------------
         # Hand-authored, project-local Remotion composition. Deliberately
         # bypasses the cut-schema, the stock scene-type registry, and the
@@ -1612,27 +2062,8 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", "renders/output.mp4"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build asset lookup: id -> asset info
-        asset_lookup = {a["id"]: a for a in asset_manifest.get("assets", [])}
-
-        cuts = edit_decisions.get("cuts", [])
-        if not cuts:
+        if not resolved_cuts:
             return ToolResult(success=False, error="No cuts in edit_decisions")
-
-        # Resolve asset IDs in cuts to file paths
-        resolved_cuts = []
-        for cut in cuts:
-            source_id = cut.get("source", "")
-            resolved_cut = dict(cut)
-            if source_id in asset_lookup:
-                resolved_cut["source"] = asset_lookup[source_id]["path"]
-            resolved_cuts.append(resolved_cut)
-
-        # --- Pre-compose validation gate ---
-        scene_plan = inputs.get("scene_plan")
-        validation_block = self._pre_compose_validation(edit_decisions, resolved_cuts, scene_plan)
-        if validation_block is not None:
-            return validation_block
 
         # Also accept profile as "output_profile" (skill convention) or "profile"
         profile = inputs.get("profile") or inputs.get("output_profile")
@@ -2445,6 +2876,7 @@ class VideoCompose(BaseTool):
             "unexpected_silence": False,
             "clipping_detected": False,
             "mix_intelligible": True,
+            "mean_volume_db": None,
             "issues": [],
         }
         if technical_probe.get("has_audio") and duration > 0:
@@ -2452,7 +2884,7 @@ class VideoCompose(BaseTool):
                 # Use ffmpeg volumedetect to check audio levels
                 cmd = [
                     "ffmpeg", "-i", str(output_path),
-                    "-af", "volumedetect", "-f", "null", "-",
+                    "-vn", "-af", "volumedetect", "-f", "null", "-",
                 ]
                 proc = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=60
@@ -2473,8 +2905,10 @@ class VideoCompose(BaseTool):
                         except (ValueError, IndexError):
                             pass
 
+                audio_spotcheck["mean_volume_db"] = mean_vol  # None => not measured
+
                 if mean_vol is not None:
-                    if mean_vol < -60:
+                    if mean_vol < SILENCE_FLOOR_DB:
                         audio_spotcheck["unexpected_silence"] = True
                         audio_spotcheck["issues"].append(
                             f"Mean volume {mean_vol:.1f} dB — effectively silent"
@@ -2491,8 +2925,118 @@ class VideoCompose(BaseTool):
                     audio_spotcheck["issues"].append(
                         f"Max volume {max_vol:.1f} dB — possible clipping"
                     )
+
             except Exception as e:
                 audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
+
+            try:
+                # mean_volume is an RMS average a loud music bed satisfies on
+                # its own. Integrated LUFS is the programme-level figure
+                # delivery actually cares about. Negative-only gate.
+                # Its own try: a volumedetect failure must not silently skip
+                # the LUFS probe, nor the reverse.
+                lufs_proc = subprocess.run(
+                    ["ffmpeg", "-i", str(output_path), "-vn", "-af", "ebur128",
+                     "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                for line in (lufs_proc.stderr or "").split("\n"):
+                    if line.strip().startswith("I:") and "LUFS" in line:
+                        try:
+                            audio_spotcheck["integrated_lufs"] = float(
+                                line.split("I:")[1].strip().split()[0]
+                            )
+                        except (ValueError, IndexError):
+                            pass
+                lufs = audio_spotcheck.get("integrated_lufs")
+                if lufs is not None and lufs < LUFS_DELIVERY_FLOOR:
+                    audio_spotcheck["issues"].append(
+                        f"Integrated loudness {lufs:.1f} LUFS is below the "
+                        f"{LUFS_DELIVERY_FLOOR} LUFS floor — programme audio too quiet"
+                    )
+            except Exception as e:
+                audio_spotcheck["issues"].append(f"Loudness analysis error: {e}")
+
+            # A gate that did not run must say so. Never a silent skip.
+            if "integrated_lufs" not in audio_spotcheck:
+                audio_spotcheck["loudness_verdict"] = (
+                    "indeterminate — integrated loudness not measured; "
+                    "LUFS floor gate did not run"
+                )
+                audio_spotcheck["issues"].append(
+                    "Integrated loudness could not be measured — LUFS floor "
+                    "gate skipped, loudness indeterminate"
+                )
+            else:
+                audio_spotcheck["loudness_verdict"] = (
+                    f"measured — {audio_spotcheck['integrated_lufs']:.1f} LUFS"
+                )
+
+        # Narration was promised. Volume alone cannot PROVE narration, but a
+        # measured silence disproves it — so this gate may only fire on a
+        # measurement that actually happened. Analysis failure or a quiet-but-
+        # nonsilent mix is INDETERMINATE, mirroring the subtitle burn-in
+        # treatment: never assert a verdict nothing measured.
+        if edit_decisions:
+            narration_expected = bool(
+                ((edit_decisions.get("audio") or {}).get("narration") or {})
+                .get("segments")
+            )
+            if narration_expected:
+                mv = audio_spotcheck.get("mean_volume_db")
+                if audio_spotcheck["narration_present"]:
+                    audio_spotcheck["narration_verdict"] = (
+                        f"measured — narration-level audio present "
+                        f"(mean {mv:.1f} dB)"
+                    )
+                elif (technical_probe.get("valid_container")
+                        and not technical_probe.get("has_audio")):
+                    # ffprobe measured: no audio stream exists at all.
+                    audio_spotcheck["narration_verdict"] = (
+                        "measured — output has no audio stream"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected in edit_decisions but not detected "
+                        "in the output — narration missing"
+                    )
+                elif mv is None:
+                    audio_spotcheck["narration_verdict"] = (
+                        "indeterminate — audio was not measured "
+                        "(volumedetect failed, timed out, or did not run)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected but audio analysis did not "
+                        "complete — narration presence indeterminate, "
+                        "not verified"
+                    )
+                elif mv < SILENCE_FLOOR_DB:
+                    # Strictly below, exactly as the `unexpected_silence`
+                    # check above and the constant's own definition ("BELOW
+                    # this the mix provably carries no audible programme
+                    # audio"). At exactly SILENCE_FLOOR_DB the silence
+                    # detector says "not silent", so this gate must not
+                    # claim a proof it does not have — it falls through to
+                    # indeterminate.
+                    audio_spotcheck["narration_verdict"] = (
+                        f"measured — no audible programme audio "
+                        f"(mean {mv:.1f} dB)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        "Narration expected in edit_decisions but not detected "
+                        "in the output — narration missing"
+                    )
+                else:
+                    audio_spotcheck["narration_verdict"] = (
+                        f"indeterminate — mix level {mv:.1f} dB is too low to "
+                        "distinguish narration from a bed; presence neither "
+                        "proven nor disproven (transcript comparison is the "
+                        "authoritative narration check)"
+                    )
+                    audio_spotcheck["issues"].append(
+                        f"Narration expected but mean level {mv:.1f} dB cannot "
+                        "confirm or refute it — narration presence "
+                        "indeterminate"
+                    )
 
         issues.extend(audio_spotcheck.get("issues", []))
 
@@ -2624,9 +3168,14 @@ class VideoCompose(BaseTool):
                         # Check if subtitle_path was used (burned in)
                         sub_source = ed_subs.get("source")
                         if sub_source and Path(sub_source).exists():
-                            # Burned-in subtitles are not detectable as streams
-                            subtitle_check["subtitles_present"] = True
-                            subtitle_check["coverage_ratio"] = 1.0
+                            # Burn-in leaves no subtitle stream, and we never
+                            # inspected the pixels — so presence is UNKNOWN.
+                            # Do not assert it: a fabricated pass here hides a
+                            # failed burn-in behind a clean review.
+                            subtitle_check["inspected"] = False
+                            subtitle_check["verdict"] = (
+                                "indeterminate — burned-in, not inspected"
+                            )
                         else:
                             subtitle_check["issues"].append(
                                 "Subtitles expected but not found in output and "
@@ -2655,12 +3204,33 @@ class VideoCompose(BaseTool):
                 "silent downgrade", "delivery promise violation",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
+                "narration missing",       # promised narration absent
+                "programme audio too quiet",
+            ])
+        ]
+
+        # Issues recording a measurement that did NOT happen. Nothing was
+        # disproven, so these are not critical — but nothing was verified
+        # either, so they must not read as a clean pass. Matched by marker
+        # phrase, the same keyword technique the critical list uses; both
+        # markers are tails of the indeterminate issues written above and
+        # appear in no critical or benign issue.
+        indeterminate_issues = [
+            i for i in issues
+            if any(kw in i.lower() for kw in [
+                "presence indeterminate",  # narration never measured
+                "loudness indeterminate",  # LUFS floor gate never ran
             ])
         ]
 
         if critical_issues:
             status = "revise"
             recommended_action = "re_render"
+        elif indeterminate_issues:
+            # A gate could not measure what it checks. A human must look;
+            # this render is unverified, not finished.
+            status = "needs_verification"
+            recommended_action = "human_review"
         elif issues:
             status = "pass"
             recommended_action = "present_to_user"
@@ -2895,10 +3465,18 @@ class VideoCompose(BaseTool):
 
         # Layer 2: edit_decisions subtitle style
         if edit_decisions:
-            ed_style = edit_decisions.get("subtitles", {}).get("style", {})
-            for k, v in ed_style.items():
-                if v is not None:
-                    resolved[k] = v
+            ed_style = (edit_decisions.get("subtitles") or {}).get("style")
+            # The schema types `style` as a STRING — the display mode, one of
+            # sentence / word-by-word / karaoke. A dict is the older in-tree
+            # convention: a bag of ASS overrides merged key by key. Both are in
+            # the wild, so accept both; calling .items() on the schema-valid
+            # form raised AttributeError and failed the whole render.
+            if isinstance(ed_style, str):
+                resolved["style"] = ed_style
+            elif isinstance(ed_style, dict):
+                for k, v in ed_style.items():
+                    if v is not None:
+                        resolved[k] = v
 
         # Layer 3: Explicit override (highest priority)
         if explicit_style:

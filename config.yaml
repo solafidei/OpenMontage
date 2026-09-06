@@ -8,7 +8,7 @@ llm:
 
 budget:
   mode: warn                     # observe | warn | cap
-  total_usd: 10.00
+  total_usd: 15.00
   reserve_pct: 0.10              # holdback for retries / cleanup
   single_action_approval_usd: 0.50
   require_approval_for_new_paid_tool: true

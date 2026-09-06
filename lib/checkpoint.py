@@ -7,6 +7,7 @@ checkpoints to resume pipelines and to present state at human checkpoints.
 from __future__ import annotations
 
 import json
+import math
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,8 @@ SUPPLEMENTARY_ARTIFACTS = {
     "source_media_review",  # Required before first planning stage when user media exists
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages
+    "cost_log",             # Budget ledger, written by tools/cost_tracker.py
+    "clip_ledger",          # Segment claims, written by lib/clip_ledger.py
 }
 
 
@@ -92,7 +95,16 @@ HISTORY_DIRNAME = "history"
 
 
 class CheckpointValidationError(ValueError):
-    """Raised when a checkpoint or its canonical artifacts are invalid."""
+    """Raised when a checkpoint or its canonical artifacts are invalid.
+
+    ``field`` names the top-level checkpoint property the schema rejected
+    (None when the failure is not attributable to one). Read paths use it to
+    tolerate exactly one legacy shape without going blind to the rest.
+    """
+
+    def __init__(self, message: str, *, field: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 def _validate_style_playbook(style_playbook: str | None) -> None:
@@ -188,7 +200,74 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
     try:
         jsonschema.validate(instance=checkpoint, schema=_load_checkpoint_schema())
     except jsonschema.ValidationError as exc:
-        raise CheckpointValidationError(f"Checkpoint failed schema validation: {exc.message}") from exc
+        field = str(exc.absolute_path[0]) if exc.absolute_path else None
+        raise CheckpointValidationError(
+            f"Checkpoint failed schema validation: {exc.message}", field=field
+        ) from exc
+
+
+def _is_legacy_cost_snapshot(value: Any) -> bool:
+    """True only for the genuine legacy cost_snapshot shape.
+
+    Legacy files carry an OBJECT of money figures under keys the tightened
+    schema no longer allows (e.g. spent_usd/approved_budget_usd instead of
+    total_spent_usd/budget_total_usd). The money-key convention is the
+    ``_usd`` suffix, not a fixed key list, so no allowlist is hardcoded —
+    what is checked is that every money figure is a real, finite number.
+
+    Anything else under cost_snapshot is corruption, not history: a bare
+    string or null in place of the object, or a ``*_usd`` value that is not
+    a number. Those reach `cost = cp["cost_snapshot"]` in backlot/state.py
+    and `float(cost_snapshot.get("total_spent_usd", 0.0) or 0.0)` in
+    CostTracker.reconstruct_from_snapshot, so they must fail loudly here.
+    Booleans are excluded explicitly: `isinstance(True, int)` is True in
+    Python, and a boolean money figure is corruption.
+    """
+    if not isinstance(value, dict):
+        return False
+    for key, money in value.items():
+        if not (isinstance(key, str) and key.endswith("_usd")):
+            continue
+        if isinstance(money, bool) or not isinstance(money, (int, float)):
+            return False
+        if not math.isfinite(money):
+            return False
+    return True
+
+
+def _validate_tolerating_legacy_cost_snapshot(
+    checkpoint: dict[str, Any], source: Path
+) -> None:
+    """validate_checkpoint(), tolerating exactly the legacy cost_snapshot shape.
+
+    The single definition of the read-side tolerance, used by EVERY path that
+    validates an already-written checkpoint (read_checkpoint,
+    get_latest_checkpoint, _enforce_stage_prerequisites). cost_snapshot was
+    closed to extra keys after legacy files were written; the schema gates
+    new writes, so legacy files must stay both readable AND advanceable —
+    a predecessor a read path accepts, the prerequisite check must accept.
+
+    The waiver is narrowed to that shape by _is_legacy_cost_snapshot: a
+    failure attributed to cost_snapshot is swallowed ONLY when the value is
+    an object whose ``*_usd`` figures are real numbers. Every other
+    invariant — and every other cost_snapshot value — still fails loudly.
+    """
+    try:
+        validate_checkpoint(checkpoint)
+    except CheckpointValidationError as exc:
+        if exc.field != "cost_snapshot":
+            raise
+        snapshot = (
+            checkpoint.get("cost_snapshot")
+            if isinstance(checkpoint, dict) else None
+        )
+        if not _is_legacy_cost_snapshot(snapshot):
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Checkpoint %s carries a legacy cost_snapshot (%s) — accepting it "
+            "as-is; the schema only gates new writes.", source, exc,
+        )
 
 
 def _checkpoint_path(pipeline_dir: Path, project_id: str, stage: str) -> Path:
@@ -314,7 +393,7 @@ def _enforce_stage_prerequisites(
         try:
             with open(path, encoding="utf-8") as handle:
                 checkpoint = json.load(handle)
-            validate_checkpoint(checkpoint)
+            _validate_tolerating_legacy_cost_snapshot(checkpoint, path)
         except (OSError, json.JSONDecodeError, CheckpointValidationError):
             incomplete.append(predecessor)
             continue
@@ -389,6 +468,46 @@ def _decision_log_path(pipeline_dir: Path, project_id: str) -> Path:
     return pipeline_dir / project_id / "decision_log.json"
 
 
+def _usable_decisions(payload: Any, source: str) -> list[dict[str, Any]]:
+    """The decisions[] entries in ``payload`` carrying a usable decision_id.
+
+    An entry is usable when it is a dict whose "decision_id" is a non-empty
+    string. Anything else — non-dict entries, a decisions value that is not
+    a list, a payload that is not a dict — is skipped with a warning, never
+    raised: decision-log merging must not be able to abort a checkpoint
+    write. Skipped entries are left untouched in their source file (this
+    function never writes), so nothing is destroyed: repair the entry and
+    the next checkpoint write absorbs it.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    decisions = payload.get("decisions") if isinstance(payload, dict) else None
+    if not isinstance(decisions, list):
+        if payload is not None:
+            log.warning(
+                "decision_log merge: %s has no decisions[] list — nothing "
+                "merged from it. Write decision_log through write_checkpoint, "
+                "not by hand.", source,
+            )
+        return []
+    kept: list[dict[str, Any]] = []
+    malformed = 0
+    for d in decisions:
+        did = d.get("decision_id") if isinstance(d, dict) else None
+        if isinstance(did, str) and did:
+            kept.append(d)
+        else:
+            malformed += 1
+    if malformed:
+        log.warning(
+            "decision_log merge: skipped %d malformed entrie(s) in %s (each "
+            "needs a string decision_id). They were left in place — repair "
+            "them and the next checkpoint write absorbs them.",
+            malformed, source,
+        )
+    return kept
+
+
 def _merge_decision_log(
     pipeline_dir: Path, project_id: str, new_log: dict[str, Any]
 ) -> None:
@@ -409,14 +528,94 @@ def _merge_decision_log(
             "decisions": [],
         }
 
-    existing_ids = {d["decision_id"] for d in existing.get("decisions", [])}
-    for decision in new_log.get("decisions", []):
-        if decision.get("decision_id") not in existing_ids:
+    # A code-written canonical log only reaches a broken container shape by
+    # hand-editing. Entry-level damage is tolerated (kept verbatim below);
+    # container-level damage gets a pointed error, not a bare AttributeError.
+    if not isinstance(existing, dict) or not isinstance(
+        existing.get("decisions"), list
+    ):
+        raise CheckpointValidationError(
+            f"{path} is hand-damaged: expected {{\"decisions\": [...]}} — "
+            "restore the container shape; entries inside it are preserved "
+            "verbatim",
+            field="decision_log",
+        )
+
+    # Canonical entries are kept verbatim (a hand-broken entry here is
+    # preserved, not dropped) — only the id set is built defensively, through
+    # the SAME well-formedness definition the side file gets. Filtering on
+    # isinstance(d, dict) alone was not enough: a hand-written decision_id
+    # that is a list or a dict is unhashable, and building the set from it
+    # raised a bare TypeError that aborted the whole checkpoint write — the
+    # crash class this self-heal exists to remove.
+    existing_ids = {d["decision_id"] for d in _usable_decisions(existing, str(path))}
+    for decision in _usable_decisions(new_log, "artifacts['decision_log']"):
+        did = decision["decision_id"]
+        if did not in existing_ids:
             existing["decisions"].append(decision)
+            existing_ids.add(did)
+
+    # Self-heal a forked audit trail. Nothing in the codebase writes
+    # <project>/artifacts/decision_log.json, but an agent hand-writing it
+    # bypasses this merge entirely — which is how ask-jess ended up with 11
+    # decisions here and 30 there for 29 hours. Absorb any well-formed
+    # orphans (exactly once each) rather than letting the canonical log
+    # silently disagree with the artifact. This file is by definition
+    # hand-written and never schema-validated: it must not be able to
+    # crash a checkpoint write, no matter what it contains.
+    artifact_copy = pipeline_dir / project_id / "artifacts" / "decision_log.json"
+    if artifact_copy.exists():
+        try:
+            with open(artifact_copy, encoding="utf-8") as f:
+                side = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            side = None
+            import logging
+            logging.getLogger(__name__).warning(
+                "artifacts/decision_log.json is unreadable (%s) — orphan "
+                "absorption skipped. Write decision_log through "
+                "write_checkpoint, not by hand.", exc,
+            )
+        absorbed = 0
+        for d in _usable_decisions(side, str(artifact_copy)):
+            did = d["decision_id"]
+            if did in existing_ids:
+                continue          # membership re-checked per entry: a
+            existing["decisions"].append(d)   # duplicate side id absorbs once
+            existing_ids.add(did)
+            absorbed += 1
+        if absorbed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "decision_log fork: %d decision(s) existed only in "
+                "artifacts/decision_log.json and were absorbed. Write "
+                "decision_log through write_checkpoint, not by hand.",
+                absorbed,
+            )
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2)
+    # tmp + os.replace: the canonical audit log gets the same crash safety
+    # as the checkpoint itself (write_checkpoint's idiom, this file)
+    # — a truncated decision_log.json would brick every later merge's
+    # json.load and with it every checkpoint write.
+    # The tmp name is unique per writer: every stage of a project merges into
+    # this one file, so a single fixed ".json.tmp" was a shared scratch path —
+    # two stages checkpointing concurrently both wrote it, the first
+    # os.replace consumed it, and the second died with FileNotFoundError,
+    # losing its decision AND aborting its checkpoint write.
+    import os
+    import uuid
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def write_checkpoint(
@@ -567,13 +766,19 @@ def write_checkpoint(
 def read_checkpoint(
     pipeline_dir: Path, project_id: str, stage: str
 ) -> Optional[dict[str, Any]]:
-    """Read a checkpoint file. Returns None if not found."""
+    """Read a checkpoint file. Returns None if not found.
+
+    Validation errors are logged, not raised: a checkpoint written under an
+    older, looser schema (e.g. a legacy cost_snapshot shape) must still be
+    readable for resume/inspect — write time is where the schema is
+    enforced, not read time.
+    """
     path = _checkpoint_path(pipeline_dir, project_id, stage)
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
         checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
+    _validate_tolerating_legacy_cost_snapshot(checkpoint, path)
     return checkpoint
 
 
@@ -595,7 +800,7 @@ def get_latest_checkpoint(
 
     with open(checkpoints[0], encoding="utf-8") as f:
         checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
+    _validate_tolerating_legacy_cost_snapshot(checkpoint, checkpoints[0])
     return checkpoint
 
 

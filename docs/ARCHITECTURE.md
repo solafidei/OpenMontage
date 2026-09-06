@@ -211,9 +211,11 @@ stages:
 | `character-animation` | animation | Local rigged cartoon characters with SVG rigs, pose libraries, GSAP timelines, and HyperFrames rendering |
 | `cinematic` | cinematic | Trailer, teaser, mood-driven edits |
 | `clip-factory` | custom | Batch short-form clips from long source |
+| `documentary-montage` | documentary | Footage-led montage episodes from an archive corpus |
 | `hybrid` | hybrid | Source footage + AI-generated support visuals |
 | `localization-dub` | custom | Subtitle, dub, and translate existing video |
 | `podcast-repurpose` | hybrid | Podcast highlights to video |
+| `reel-batch` | hybrid | Batches of vertical reels beat-cut from one footage pool |
 | `screen-demo` | screen_recording | Software screen recordings and walkthroughs |
 | `talking-head` | talking_head | Footage-led speaker videos |
 | `framework-smoke` | custom | Minimal smoke test for framework validation |
@@ -310,7 +312,8 @@ reconcile(entry_id, $)     # records actual spend
 | `cap` | Reject operations that exceed remaining budget |
 
 ### Controls
-- **Total budget** (default: $10.00)
+- **Total budget** (default: $15.00 — `budget.total_usd` in `config.yaml`, the single
+  source; `CostTracker` resolves it from config when constructed without an explicit budget)
 - **Reserve holdback** (default: 10%) — kept as safety margin
 - **Single-action approval threshold** (default: $0.50) — pause for approval above this
 - **New paid tool approval** — first-time use of any paid tool requires confirmation
@@ -353,7 +356,7 @@ llm:
 
 budget:
   mode: warn
-  total_usd: 10.00
+  total_usd: 15.00
   reserve_pct: 0.10
   single_action_approval_usd: 0.50
 

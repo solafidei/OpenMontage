@@ -1,0 +1,254 @@
+name: reel-batch
+version: "1.0"
+description: >
+  Batch short-form pipeline. Takes a pool of the operator's own footage plus a few audio
+  tracks and produces N finished 9:16 reels from one sitting — beat-cut, word-synced
+  captions from the track's own speech, a hook card, one grade across the batch, and no
+  clip reused within a batch. Identity is default-deny: the operator's face is never
+  regenerated, and AI b-roll is a measured pool-shortfall valve, not a look.
+category: hybrid
+stability: beta
+default_checkpoint_policy: guided
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/reel-batch/executive-producer
+  # A reel is <= 10s, so a five-reel sitting is 0.8333 output minutes:
+  #   target_minutes         = 5 x 0.1667                       = 0.8333
+  #   default_budget_cap_usd = max($2.00, $0.75 x 0.8333)       = $2.00
+  # The flat floor does the work at realistic batch sizes and the rate guards large
+  # ones — the max() flips to the rate at about twenty reels (3.333 min -> $2.50).
+  #
+  # The rate prices a FULL pool shortfall, which is the worst case and not the
+  # typical one. Under spec R8 cutaways are free-first: flash accents come from the
+  # operator's own pool, and AI fires only when the idea gate measures the pool cannot
+  # cover N reels x cuts per reel. A typical sitting spends $0.00. A full five-reel
+  # shortfall is 5 x $0.10 = $0.50 on the pinned kling_video route via video_selector.
+  # Recompute from those two numbers rather than guessing if either changes.
+  budget_default_usd: 2.00
+  budget_per_output_minute_usd: 0.75
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+  max_wall_time_minutes: 20
+
+extensions:
+  custom_scripts: true
+  custom_playbooks: false
+  custom_skills: true
+  custom_tools: false
+
+required_skills:
+  - pipelines/reel-batch/executive-producer
+  - pipelines/reel-batch/idea-director
+  - pipelines/reel-batch/script-director
+  - pipelines/reel-batch/scene-director
+  - pipelines/reel-batch/asset-director
+  - pipelines/reel-batch/edit-director
+  - pipelines/reel-batch/compose-director
+  - pipelines/reel-batch/publish-director
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+compatible_playbooks:
+  recommended:
+    - clean-professional
+  also_works:
+    - flat-motion-graphics
+  custom_allowed: true
+
+stages:
+  - name: idea
+    skill: pipelines/reel-batch/idea-director
+    optional_artifacts_in:
+      - source_media_review
+    produces:
+      - brief
+      - source_media_review
+      - decision_log
+    required_tools:
+      - footage_library
+    optional_tools:
+      - video_selector
+    tools_available:
+      - footage_library
+      - video_selector
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Footage pool indexed, with the usable-segment count measured rather than assumed
+      - Reel count is plannable against that count (N reels x cuts per reel)
+      - Cutaway valve decided from the measured shortfall, not from taste
+      - Both composition runtimes presented with the measured two-plane rationale
+      - Identity lock armed for the operator's own pool
+    success_criteria:
+      - Schema-valid brief artifact
+      - Brief states the reel count, the usable-segment count, and whether any paid cutaway is armed
+      - Schema-valid source_media_review covering every clip in the pool
+      - decision_log carries a render_runtime_selection entry naming both runtimes
+
+  - name: script
+    skill: pipelines/reel-batch/script-director
+    required_artifacts_in:
+      - brief
+    produces:
+      - script
+    required_tools:
+      - transcriber
+      - beat_grid
+    optional_tools:
+      - scene_detect
+    tools_available:
+      - transcriber
+      - beat_grid
+      - scene_detect
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Every track has a beat grid and a word-level transcript
+      - Speech contamination measured per track, not assumed
+      - The hook line lands under the reel's opening beat
+      - Each reel's spoken line is self-contained at <= 10 seconds
+    success_criteria:
+      - Schema-valid script artifact
+      - One beat grid and one word-level transcript per track carried into the script
+      - A hook line and a caption line selected per planned reel
+
+  - name: scene_plan
+    skill: pipelines/reel-batch/scene-director
+    required_artifacts_in:
+      - script
+    optional_artifacts_in:
+      - brief
+      - source_media_review
+    produces:
+      - scene_plan
+      - decision_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Every cut slot is snapped to a beat from its reel's grid
+      - No segment appears in two reels of the batch
+      - Each reel's hook closes on or before its second snap boundary
+      - Every planned cut names its provenance before anything is generated
+    success_criteria:
+      - Schema-valid scene_plan artifact
+      - One reel group per planned reel, each with beat-snapped cut slots totalling <= 10 seconds
+      - Cut slots claimed against the clip ledger so no segment repeats within the batch
+      - Any pool shortfall is itemised per reel with its planned cutaway prompt
+
+  - name: assets
+    skill: pipelines/reel-batch/asset-director
+    required_artifacts_in:
+      - scene_plan
+    optional_artifacts_in:
+      - script
+      - brief
+    produces:
+      - asset_manifest
+      - cost_log
+    required_tools: []
+    optional_tools:
+      - cutaway_gen
+      - video_selector
+      - subtitle_gen
+      - audio_mixer
+      - face_enhance
+    tools_available:
+      - cutaway_gen
+      - video_selector
+      - subtitle_gen
+      - audio_mixer
+      - face_enhance
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Every cut slot resolves to a real file before edit
+      - Cutaways fired only against a measured shortfall, one ledger entry per cutaway cut
+      - No cutaway prompt carries a media reference
+      - Identity-locked clips left ungraded and unenhanced beyond the face-safe presets
+    success_criteria:
+      - Schema-valid asset_manifest artifact
+      - Every planned cut slot has an asset, with its provenance recorded
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
+
+  - name: edit
+    skill: pipelines/reel-batch/edit-director
+    required_artifacts_in:
+      - scene_plan
+      - asset_manifest
+    optional_artifacts_in:
+      - script
+    produces:
+      - edit_decisions
+      - reel_plan
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - The spine carries one flat cuts[] with reel-prefixed ids and per-cut polish
+      - Per-reel axes live in reel_plan, not smuggled into edit_decisions.metadata
+      - One batch look, applied identically to every reel
+      - No grade or grain requested on an identity-locked cut
+    success_criteria:
+      - Schema-valid edit_decisions artifact carrying every cut of every reel
+      - reel_plan carries one entry per reel with its track, hook, subtitle source and cut ids
+      - Every cut id is prefixed with its reel id and appears in exactly one reel_plan entry
+
+  - name: compose
+    skill: pipelines/reel-batch/compose-director
+    required_artifacts_in:
+      - edit_decisions
+      - asset_manifest
+    optional_artifacts_in:
+      - scene_plan
+      - reel_plan
+    produces:
+      - render_report
+      - final_review
+    required_tools:
+      - video_compose
+      - remotion_caption_burn
+    optional_tools:
+      - color_grade
+      - audio_mixer
+      - video_trimmer
+    tools_available:
+      - video_compose
+      - remotion_caption_burn
+      - color_grade
+      - audio_mixer
+      - video_trimmer
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Each reel rendered through both planes, picture then text
+      - Every output is 1080x1920 and carries its own track
+      - Captions clear the platform's lower UI band
+      - A mid-batch abort leaves a resumable checkpoint rather than a half-written report
+    success_criteria:
+      - Schema-valid render_report artifact with one outputs[] entry per reel, each carrying platform_target
+      - Every output file exists and passes ffprobe at 1080x1920 with an audio stream
+      - Schema-valid final_review artifact produced from the actual rendered files
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent
+
+  - name: publish
+    skill: pipelines/reel-batch/publish-director
+    required_artifacts_in:
+      - render_report
+      - final_review
+    optional_artifacts_in:
+      - brief
+      - reel_plan
+    produces:
+      - publish_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Every reel has its own caption copy and hashtag set, not one pasted across the batch
+      - Posting order and spacing stated so the batch is not dumped in one hour
+      - Each reel traceable back to its track and its cut list
+    success_criteria:
+      - Schema-valid publish_log artifact
+      - One entry per reel with its output path, caption copy, track credit and posting slot

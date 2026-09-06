@@ -73,3 +73,105 @@ def test_declared_approval_gates_are_enforceable(name: str) -> None:
             f"{stage['human_approval_default']} but the checkpoint writer "
             f"resolves {resolved}"
         )
+
+
+# ----------------------------------------------------------------------
+# Doc-table sync (#50). Adding a pipeline is a five-artifact job and three
+# of those artifacts are hand-maintained Markdown tables.
+# ----------------------------------------------------------------------
+
+# (path, table heading). Heading level differs — `##` in two files, `###` in
+# the third — so the match below is level-agnostic.
+PIPELINE_TABLES = [
+    ("AGENT_GUIDE.md", "Available Pipelines"),
+    ("PROJECT_CONTEXT.md", "Available Pipelines"),
+    ("docs/ARCHITECTURE.md", "Available Pipelines"),
+]
+
+
+def _table_pipelines(relative_path: str, heading: str) -> set[str]:
+    """The pipeline names listed in one doc table's first column.
+
+    Terminators differ per file — one table ends at a blockquote, the others
+    at a heading — so the walk stops on the first line that is not a table
+    row rather than looking for a specific closer.
+    """
+    import re
+
+    lines = (REPO_ROOT / relative_path).read_text(encoding="utf-8").splitlines()
+    start = next(
+        (i for i, line in enumerate(lines)
+         if re.fullmatch(rf"#+\s+{re.escape(heading)}\s*", line)),
+        None,
+    )
+    assert start is not None, f"{relative_path} has no '{heading}' heading"
+
+    names: set[str] = set()
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("|"):
+            # Stop at the first prose after the HEADING, not after the first
+            # row. AGENT_GUIDE.md carries several other tables; skipping
+            # onwards when this section had no table at all would silently
+            # report the Layer-3 skills table as the pipeline list, and the
+            # sync assertion would then pass against the wrong data.
+            break
+        # Delimiter rows differ in dash count across the three files.
+        if re.fullmatch(r"\|[-\s|:]+\|", stripped):
+            continue
+        cell = stripped.split("|")[1].strip().strip("`")
+        if cell.lower() != "pipeline":
+            names.add(cell)
+    return names
+
+
+@pytest.mark.parametrize(
+    "relative_path,heading", PIPELINE_TABLES, ids=[t[0] for t in PIPELINE_TABLES]
+)
+def test_every_manifest_appears_in_every_pipeline_table(
+    relative_path: str, heading: str
+) -> None:
+    """A pipeline that ships without a doc row is a pipeline nobody finds.
+
+    Membership only. The value columns are deliberately NOT synced: `Best For`,
+    `Type` and `Description` are hand-written prose with no key in the YAML to
+    derive them from, and two `Category` cells in docs/ARCHITECTURE.md already
+    disagree with their manifests (avatar-spokesperson and podcast-repurpose
+    both read `custom` in YAML). Asserting the columns would either fail on
+    arrival or force prose to be generated, which is worse prose. Membership is
+    the part that can be checked and the part that actually drifts — this test
+    was written because `documentary-montage` had shipped into
+    `pipeline_defs/` and one table, and was missing from the other two.
+
+    Discovery globs the directory with no allowlist, so a fourteenth pipeline
+    cannot land with stale docs and no test edit is needed when one does.
+    """
+    documented = _table_pipelines(relative_path, heading)
+    missing = sorted(set(PIPELINE_NAMES) - documented)
+    assert not missing, (
+        f"{relative_path} '{heading}' table is missing {missing}. Adding a "
+        "pipeline means five artifacts: the manifest, its director skills, and "
+        "a row in each of AGENT_GUIDE.md, PROJECT_CONTEXT.md and "
+        "docs/ARCHITECTURE.md."
+    )
+
+
+@pytest.mark.parametrize(
+    "relative_path,heading", PIPELINE_TABLES, ids=[t[0] for t in PIPELINE_TABLES]
+)
+def test_no_pipeline_table_lists_a_manifest_that_does_not_exist(
+    relative_path: str, heading: str
+) -> None:
+    """The other direction: a deleted pipeline must leave its rows behind.
+
+    Without this the sync test above is satisfied by a table that lists
+    everything plus three pipelines that were removed two releases ago.
+    """
+    documented = _table_pipelines(relative_path, heading)
+    phantom = sorted(documented - set(PIPELINE_NAMES))
+    assert not phantom, (
+        f"{relative_path} '{heading}' table lists {phantom}, which have no "
+        f"manifest in pipeline_defs/"
+    )

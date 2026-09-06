@@ -354,3 +354,220 @@ class TestStoryboardVisualSelection:
         assert card["visual"]["exists"] is True
         assert card["visual"]["path"].endswith("real.png")
         assert [t["path"].split("/")[-1] for t in card["takes"]] == ["real.png"]
+
+
+# ----------------------------------------------------------------------
+# Reel cards (#50). A batch is N deliverables, not N versions of one.
+# ----------------------------------------------------------------------
+
+
+def _reel_batch_project(root: Path, *, rendered: int = 5, reels: int = 5) -> Path:
+    p = _make_project(root, "reel-batch-001")
+    _write(p / "artifacts" / "reel_plan.json", {
+        "version": "1.0",
+        "reels": [
+            {
+                "reel_id": f"reel_{n:02d}",
+                "music_asset_id": f"asset_track_{n:02d}",
+                "subtitle_source": f"assets/captions/reel_{n:02d}.json",
+                "hook": f"hook line for reel {n}",
+                "cut_ids": [f"reel_{n:02d}-{c:02d}" for c in range(1, 5)],
+            }
+            for n in range(1, reels + 1)
+        ],
+    })
+    _write(p / "artifacts" / "asset_manifest.json", {
+        "version": "1.0",
+        "assets": [
+            {"id": f"asset_track_{n:02d}", "type": "music",
+             "path": f"assets/music/track_{n:02d}.mp3",
+             "source_tool": "audio_mixer", "scene_id": f"reel_{n:02d}"}
+            for n in range(1, reels + 1)
+        ],
+    })
+    for n in range(1, rendered + 1):
+        # The two-plane render leaves the un-captioned master beside the real one.
+        (p / "renders" / f"reel_{n:02d}.mp4").write_bytes(b"finished")
+        (p / "renders" / f"reel_{n:02d}-picture.mp4").write_bytes(b"intermediate")
+    return p
+
+
+def test_reel_batch_shows_one_card_per_reel(projects_root):
+    """Five reels, five cards — each with its own hook, track and cut count."""
+    _reel_batch_project(projects_root)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert [r["reel_id"] for r in s["reels"]] == [f"reel_{n:02d}" for n in range(1, 6)]
+    for n, card in enumerate(s["reels"], start=1):
+        assert card["hook"] == f"hook line for reel {n}"
+        assert card["track"] == f"track_{n:02d}.mp3"
+        assert card["cut_count"] == 4
+        assert card["output"] == f"renders/reel_{n:02d}.mp4"
+
+
+def test_reel_cards_do_not_point_at_the_picture_intermediate(projects_root):
+    """`<reel_id>-picture.mp4` is a working master, not a deliverable.
+
+    Ten files in renders/ for a five-reel batch is what made the board show
+    "10 versions" of one video. They stay listed — that file is what you look
+    at when the captions are wrong — but they are flagged, and no reel card
+    resolves to one.
+    """
+    _reel_batch_project(projects_root)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert all(not c["output"].endswith("-picture.mp4") for c in s["reels"])
+    flagged = {Path(r["path"]).name for r in s["media"]["renders"] if r.get("intermediate")}
+    assert flagged == {f"reel_{n:02d}-picture.mp4" for n in range(1, 6)}
+    # And the deliverables themselves are never flagged.
+    assert all(
+        not r.get("intermediate")
+        for r in s["media"]["renders"]
+        if not Path(r["path"]).stem.endswith("-picture")
+    )
+
+
+def test_a_reel_with_no_render_yet_still_gets_a_card(projects_root):
+    """Mid-batch is the normal state — two done, three to go."""
+    _reel_batch_project(projects_root, rendered=2)
+
+    s = load_board_state(projects_root / "reel-batch-001")
+
+    assert len(s["reels"]) == 5
+    assert [bool(c["output"]) for c in s["reels"]] == [True, True, False, False, False]
+
+
+def test_a_project_with_no_reel_plan_renders_with_no_reels(projects_root):
+    """The board is an observer. Twelve pipelines have no reel_plan and must
+    look exactly as they did — `reels` is None, not an empty section."""
+    p = _make_project(projects_root, "ordinary-project")
+    _write(p / "artifacts" / "scene_plan.json", SCENE_PLAN)
+
+    s = load_board_state(p)
+
+    assert s["reels"] is None
+
+
+@pytest.mark.parametrize("plan", [
+    {},                                        # no reels key
+    {"version": "1.0", "reels": []},           # written but empty
+    {"version": "1.0", "reels": "not a list"},  # half-written / wrong type
+    {"version": "1.0", "reels": [{"hook": "no reel_id"}]},
+])
+def test_a_malformed_reel_plan_never_breaks_the_board(projects_root, plan):
+    """`load_board_state` never raises — a board that crashes on a half-written
+    artifact is worse than a board with one section missing."""
+    p = _make_project(projects_root, "half-written")
+    _write(p / "artifacts" / "reel_plan.json", plan)
+
+    s = load_board_state(p)
+
+    assert s["reels"] is None
+    assert s["project_id"] == "half-written"
+
+
+def test_reel_output_comes_from_the_compose_checkpoint_when_it_has_one(projects_root):
+    """`reel_outputs` lives on the compose CHECKPOINT's partial_progress.
+
+    Not on `render_report` — that was a branch that could never fire, so every
+    card silently fell through to the filename convention and a mid-batch board
+    could not show what the run already knew. Here the checkpoint names a file
+    the convention would never find.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    (p / "renders" / "hand_named_master.mp4").write_bytes(b"finished")
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {
+            "completed_reel_ids": ["reel_01"],
+            "reel_outputs": {"reel_01": "renders/hand_named_master.mp4"},
+        }},
+    })
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_01"]["output"] == "renders/hand_named_master.mp4"
+    # The other four have neither a report nor a file.
+    assert [by_id[f"reel_{n:02d}"]["output"] for n in range(2, 6)] == [None] * 4
+
+
+def test_a_checkpoint_reported_output_cannot_escape_the_project(projects_root):
+    """The checkpoint is agent-written, so this is a trust boundary.
+
+    `/media` serves only within the project directory (security fix F-04), so a
+    card pointing outside it would 404 at best and serve the wrong file at
+    worst. The card degrades to "not rendered yet" rather than to a bad link.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {"reel_outputs": {
+            "reel_01": "../../../etc/passwd",
+            "reel_02": "/etc/passwd",
+        }}},
+    })
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_01"]["output"] is None
+    assert by_id["reel_02"]["output"] is None
+
+
+def test_a_reported_output_that_is_the_picture_intermediate_is_refused(projects_root):
+    """Even named outright, the un-captioned master is not the deliverable."""
+    p = _reel_batch_project(projects_root, rendered=1)
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {
+            "reel_outputs": {"reel_02": "renders/reel_02-picture.mp4"},
+        }},
+    })
+    (p / "renders" / "reel_02-picture.mp4").write_bytes(b"intermediate")
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_02"]["output"] is None
+
+
+def test_a_lone_picture_file_is_never_offered_as_a_deliverable(projects_root):
+    """A crashed batch leaves `<reel_id>-picture.mp4` with no master beside it.
+
+    Nothing marks it `intermediate` then — that flag needs a finished sibling —
+    so the only thing keeping it off the card is the stem-keyed lookup:
+    `reel_01-picture` is not `reel_01`. This pins that naming contract. Rename
+    the intermediate to a suffix-free scheme and the un-captioned cut starts
+    showing up as the finished reel.
+    """
+    p = _reel_batch_project(projects_root, rendered=0)
+    (p / "renders" / "reel_01-picture.mp4").write_bytes(b"crashed mid-batch")
+
+    s = load_board_state(p)
+
+    assert s["reels"][0]["output"] is None
+
+
+def test_one_bad_reel_entry_costs_that_card_and_not_the_section(projects_root):
+    """Four cards beat none. A batch board is most useful when something is
+    already wrong, so it must survive a half-written entry."""
+    p = _reel_batch_project(projects_root)
+    plan = json.loads((p / "artifacts" / "reel_plan.json").read_text(encoding="utf-8"))
+    plan["reels"][2]["cut_ids"] = {"not": "a list"}
+    plan["reels"][3]["reel_id"] = ["also", "wrong"]
+    # An unhashable music_asset_id raises inside the card builder rather than
+    # being type-checked away — that is the case the try/except is for.
+    plan["reels"][4]["music_asset_id"] = {"unhashable": True}
+    _write(p / "artifacts" / "reel_plan.json", plan)
+
+    s = load_board_state(p)
+
+    ids = [c["reel_id"] for c in s["reels"]]
+    assert "reel_04" not in ids           # unusable id — dropped
+    assert "reel_05" not in ids           # raised while resolving its track
+    assert ids == ["reel_01", "reel_02", "reel_03"]
+    # A wrong-typed cut_ids costs the count, not the card.
+    assert next(c for c in s["reels"] if c["reel_id"] == "reel_03")["cut_count"] == 0

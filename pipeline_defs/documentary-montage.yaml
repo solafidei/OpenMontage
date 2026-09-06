@@ -19,6 +19,7 @@ orchestration:
   mode: executive-producer
   skill: pipelines/documentary-montage/executive-producer
   budget_default_usd: 1.00
+  budget_per_output_minute_usd: 0.60
   max_revisions_per_stage: 3
   max_send_backs: 2
   max_wall_time_minutes: 60
@@ -114,6 +115,7 @@ stages:
       - Schema-valid asset_manifest artifact
       - One video asset per scene slot
       - metadata.corpus_stats present (standard path) OR metadata.search_stats present (fast path)
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
 
   - name: edit
     skill: pipelines/documentary-montage/edit-director
@@ -176,3 +178,4 @@ stages:
       - render_report.end_tag_rendered = true (or explicit opt-out)
       - render_report.end_tag_mode = "overlay" or "concat"
       - render_report.music_mixed = true (or explicit opt-out)
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent

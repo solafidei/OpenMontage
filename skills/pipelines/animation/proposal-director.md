@@ -386,6 +386,25 @@ stages:
     cost: $0
 ```
 
+### Step 6b: Compute the Default Budget Cap
+
+Before pricing line items, compute the default budget cap the approval gate will present. Read it from the pipeline manifest's `orchestration` block (`pipeline_defs/animation.yaml`), not from `config.yaml`'s flat global total — the manifest is what lets budget scale with THIS concept's duration:
+
+```python
+import yaml
+
+manifest = yaml.safe_load(open("pipeline_defs/animation.yaml"))["orchestration"]
+flat_default = manifest["budget_default_usd"]                    # short-form floor
+per_minute_rate = manifest.get("budget_per_output_minute_usd")   # optional duration-aware rate
+
+target_minutes = selected_concept["target_duration_seconds"] / 60
+duration_scaled_usd = (per_minute_rate * target_minutes) if per_minute_rate else 0
+
+default_budget_cap_usd = max(flat_default, duration_scaled_usd)
+```
+
+**Show this math to the user at the approval gate (Step 8), not just the final number.** The user-approved figure (`approval.approved_budget_usd`) always overrides it. Record it on the artifact: `cost_estimate["budget_cap_usd"] = default_budget_cap_usd`.
+
 ### Step 7: Build the Cost Estimate
 
 Itemize every paid operation:
@@ -406,6 +425,37 @@ COST ESTIMATE
 ```
 
 **Animation cost note:** Programmatic animation (Manim, Remotion, diagram_gen) is FREE. This means animation pipelines can often be much cheaper than explainer pipelines — the primary cost is TTS narration and any AI-generated images/video used as backgrounds or transitions.
+
+**No guessing — every number comes from the tool itself.** For each planned tool call (including the free/local ones, at `0.0`), ask the tool for its own `estimate_cost` through the registry, and seed the project's cost tracker with a matching entry in the same pass so the on-screen line items and `cost_log.json` never disagree:
+
+```python
+from tools.tool_registry import registry
+from tools.cost_tracker import CostTracker
+
+registry.discover()
+tracker = CostTracker.for_project(project_id)  # same ledger every stage shares
+
+line_items = []
+for planned in planned_tool_calls:  # e.g. {"tool": "tts_selector", "operation": "narration", "inputs": {...}}
+    tool = registry.get(planned["tool"])
+    unit_usd = tool.estimate_cost(planned["inputs"])   # price of ONE call
+    quantity = planned.get("quantity", 1)
+    estimated_usd = round(unit_usd * quantity, 4)
+    tracker.estimate(planned["tool"], planned["operation"], estimated_usd)  # writes an ESTIMATED cost_log entry
+    line_items.append({"tool": planned["tool"], "operation": planned["operation"],
+                       "quantity": quantity, "estimated_usd": estimated_usd})
+
+cost_estimate["line_items"] = line_items
+total_estimated_usd = round(sum(li["estimated_usd"] for li in line_items), 4)
+usable = min(tracker.usable_budget_usd, default_budget_cap_usd)
+budget_verdict = "over_budget" if total_estimated_usd > usable else (
+    "near_limit" if total_estimated_usd > usable * 0.85 else "within_budget"
+)
+```
+
+**Two pricing shapes — get `quantity` right or the gate lies.** `estimate_cost` prices *one call*. Tools that price the whole payload — `tts_selector` (the entire narration text), `music_gen` (needs `duration_seconds` in `inputs`, raises without it) — take `quantity: 1` with the complete payload in `inputs`. Unit-priced tools — `image_selector`, `video_selector` — ignore any quantity key you pass them and return a single-unit price, so `quantity` carries the planned unit count and the multiplication happens here. Get this wrong and a 6-clip plan is priced as a single clip — on screen and in the seeded ledger alike. Keep `unit_usd` a local variable: `proposal_packet.schema.json` closes line items to `additionalProperties: false`, so persisting it would fail artifact validation.
+
+By the time this stage checkpoints, `cost_log.json` already holds one `estimated`-status entry per line item — what the user sees and what the ledger will enforce are the same numbers.
 
 ### Step 8: Assemble the Approval Gate
 
@@ -429,6 +479,55 @@ Proceed? (approve / approve with changes / reject)
 ### Step 9: Submit
 
 Validate the `proposal_packet` artifact against `schemas/artifacts/proposal_packet.schema.json` and submit.
+
+### Step 10: On Approval — Arm the Tracker
+
+When `approval.status` flips to `approved` or `approved_with_changes` (a later turn), before handing off to the Script Director, do the handshake that turns the approved plan into the tracker's guard configuration:
+
+```python
+import math
+
+# 1. The approved budget figure becomes the tracker's budget total.
+#    A figure the user NAMED is used verbatim — their word is the cap.
+#    A bare "approve" approves the plan AS PRESENTED at the gate: the
+#    estimate within the default cap. Arm with that cap, floored at the
+#    estimate grossed up past the reserve holdback. Arming with the bare
+#    estimate leaves zero headroom: usable budget tops out at
+#    (1 - reserve_pct) x total, so the plan's FINAL reservation would need
+#    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
+#    the tracker (config's budget.reserve_pct via for_project); never
+#    hardcode 0.10.
+total_estimated_usd = round(sum(li["estimated_usd"] for li in cost_estimate["line_items"]), 4)
+min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
+tracker.budget_total_usd = (
+    approval.approved_budget_usd
+    or max(cost_estimate["budget_cap_usd"], min_workable_usd)
+)
+
+# 2. Approve every tool named in the approved plan — clears the first-paid-use
+#    guard for exactly the tools the user saw and approved.
+for tool_name in {li["tool"] for li in cost_estimate["line_items"]}:
+    tracker.approve_tool(tool_name)
+
+# 3. This stage's seeded entries were placeholders — created only so the
+#    on-screen estimate and cost_log.json agreed at the gate. They are never
+#    executed: the stage that actually spends creates and reserves its OWN
+#    entry. Refund them so every entry reaches a terminal state before the
+#    compose-stage cost_log check. (An `estimated` entry does NOT consume budget
+#    — usable_budget_usd subtracts only reserved + spent — so this is ledger
+#    hygiene, not a budget fix. Never RESERVE a placeholder: a reservation
+#    nothing will ever reconcile WOULD eat usable_budget_usd for the rest of
+#    the run.)
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])
+```
+
+> **If the user's named figure is below `min_workable_usd`, say so at this gate** — the reserve holdback guarantees the guard blocks the plan's final approved item. Ask the user to raise the figure or trim the plan. Never silently arm a total the guard is certain to trip on.
+
+Downstream stages must book under these exact names — see `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance.
+
+**The single-action threshold is waived at the point of spend, not here.** Every downstream director (asset-director, compose-director) passes `user_approved=True` on its OWN `tracker.reserve(...)` call, exactly when that entry fulfills a line item the user approved at this gate. Anything outside the approved plan — an unplanned regeneration, a tool with no line item above — still trips the guard, and that's correct: surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly" rather than silently reserving around it.
 
 ## How This Connects Downstream
 

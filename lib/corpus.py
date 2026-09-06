@@ -30,6 +30,7 @@ implements the operations the agent names.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +41,12 @@ import numpy as np
 
 EMBED_DIM = 512
 
+# The only two kinds a corpus row has ever been written with: every one of
+# the shipped adapters passes one of these literals. A third spelling is not
+# merely unknown, it is unreachable — `rank_by_text` filters on `rec.kind ==
+# kind`, so a row spelled anything else matches no query ever issued.
+CLIP_KINDS = ("video", "image")
+
 
 @dataclass
 class ClipRecord:
@@ -48,6 +55,13 @@ class ClipRecord:
     Fields mirror everything we want to query or attribute. Missing
     fields default to None/empty so adapters can populate only what
     they know.
+
+    A row is a *segment*, not necessarily a whole file: `start_seconds`
+    /`end_seconds` name an interval inside `local_path`, so one 45s
+    source can be indexed as three independently rankable rows with
+    three distinct clip_ids. Rows written before segments existed carry
+    neither offset and read as the whole file, `[0, duration]` — see
+    `interval`. No migration is needed.
     """
     clip_id: str                       # unique within corpus: "<source>_<source_id>"
     source: str                        # "pexels", "archive_org", "nasa", ...
@@ -68,6 +82,137 @@ class ClipRecord:
     shot_type: str = ""                # wide/medium/close (optional, may be empty)
     time_of_day: str = ""              # day/golden/night (optional)
     added_at: float = 0.0              # unix timestamp
+
+    # --- segment fields (additive; legacy rows omit them entirely) ----
+    start_seconds: Optional[float] = None   # in-point within local_path; None = 0.0
+    end_seconds: Optional[float] = None     # out-point; None = end of file (duration)
+    sharpness: float = 0.0                  # variance-of-Laplacian; 0.0 = unmeasured
+    # Declared at ingest, never inferred from pixels (spec R5).
+    #
+    # The default is False because a corpus row is stock footage unless
+    # something says otherwise: all 17 corpus adapters are network stock
+    # providers (pexels, archive.org, NASA, Wikimedia), and defaulting True
+    # would make every one of their rows assert it depicts the operator —
+    # a falsehood that the next Corpus.save() persists across the twelve
+    # shipped pipelines that share this index.
+    #
+    # Default-deny lives at the POOL, not at the dataclass: footage_library
+    # sets identity_locked=True on every row it writes from the operator's
+    # own directory, which is the only ingest path that can honestly know.
+    # That is what "declared at ingest" means, and a contract test asserts
+    # it rather than trusting a default to carry the guarantee.
+    identity_locked: bool = False
+
+    def __post_init__(self) -> None:
+        # `kind` arrives straight off disk — `Corpus.load` does
+        # `ClipRecord(**data)` on each JSONL row — so it is untrusted text,
+        # and `interval`'s guard used to be an exact `== "image"` compare.
+        # "IMAGE", "Image" and " image" all walked past it and were answered
+        # (0.0, 0.0) off a still's zero duration: the exact bypass the guard
+        # exists to close. Normalise once, here, so every later compare
+        # (`interval`, and `rank_by_text`'s `rec.kind != kind` filter) sees a
+        # single spelling, and refuse a kind no adapter writes rather than
+        # carrying a row that no query can return and no renderer can cut.
+        self.kind = str(self.kind).strip().lower()
+        if self.kind not in CLIP_KINDS:
+            raise ValueError(
+                f"kind must be one of {list(CLIP_KINDS)}, got {self.kind!r} "
+                f"for clip {self.clip_id}"
+            )
+
+        # NaN and the infinities compare False against every bound, so a NaN
+        # out-point satisfied `<= 0` and `<= start_seconds` alike and sailed
+        # through all three checks below. Reject non-finite offsets outright.
+        for name in ("start_seconds", "end_seconds"):
+            value = getattr(self, name)
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(
+                    f"{name} must be a finite number, got {value!r} "
+                    f"for clip {self.clip_id}"
+                )
+
+        # Trust boundary: a segment whose out-point precedes its in-point
+        # renders as a zero-length cut that ffmpeg drops silently, so it
+        # dies here rather than downstream. Legacy rows (both None) are
+        # untouched, and so is a row carrying only `start_seconds` — that
+        # is the legitimate "from here to the end of the file" shape, but
+        # only when `duration` actually lies past the in-point; that pair is
+        # not knowable field-by-field and is checked in `interval` instead.
+        # A row carrying only `end_seconds` is NOT: its in-point is 0.0
+        # (see `interval`), so `end_seconds <= 0` is the same zero-length
+        # cut written a different way, and it used to slip past because
+        # the pairwise check below needs both offsets present.
+        if self.start_seconds is not None and self.start_seconds < 0:
+            raise ValueError(f"start_seconds must be >= 0, got {self.start_seconds}")
+        if self.end_seconds is not None and self.end_seconds <= 0:
+            raise ValueError(
+                f"end_seconds must be > 0, got {self.end_seconds} "
+                f"for clip {self.clip_id}"
+            )
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds <= self.start_seconds
+        ):
+            raise ValueError(
+                f"end_seconds ({self.end_seconds}) must exceed "
+                f"start_seconds ({self.start_seconds}) for clip {self.clip_id}"
+            )
+
+    @property
+    def interval(self) -> tuple[float, float]:
+        """The (start, end) seconds this row covers inside `local_path`.
+
+        Absent offsets mean the whole file, `[0, duration]` — which is
+        exactly what every pre-segment row reads as.
+
+        An image row has no interval at all, so this raises instead of
+        answering `[0.0, 0.0]` off its zero duration. Every caller reads
+        the result as a renderable range and compares `end - start`
+        against a slot length (reel-batch/scene-director.md), so the old
+        answer made a still look like a too-short video and dropped it
+        with no diagnostic at all. A still's on-screen duration is the
+        slot's, decided when the cut is planned — never a property of
+        the row.
+
+        Rejected here, and not at construction, are the degenerate ranges
+        that only exist once the offsets are resolved against `duration`:
+
+        * a video row with `duration` 0.0 and no offsets, which resolved to
+          `(0.0, 0.0)` — it passes `rank_by_text`'s kind filter and reaches
+          exactly the caller the out-point guard was written to protect;
+        * a row carrying only `start_seconds` at or past `duration`, e.g.
+          `start_seconds=30.0` on a 10s file, which resolved to `(30.0, 10.0)`
+          — the same inverted interval the pairwise check rejects, written
+          in the one shape that check cannot see;
+        * a non-finite `duration`, which no field-level check covers.
+
+        Checking at the accessor rather than only at construction is also
+        what makes the guard hold on a row mutated after it was built: the
+        dataclass is not frozen (`Corpus.add` stamps `added_at` on the record
+        it is handed), so `rec.end_seconds = -5` would otherwise walk past
+        every check in `__post_init__`.
+        """
+        if self.kind == "image":
+            raise ValueError(
+                f"interval is undefined for image row {self.clip_id}: a still has "
+                f"no timeline to cut — take its on-screen duration from the slot"
+            )
+        start = self.start_seconds if self.start_seconds is not None else 0.0
+        end = self.end_seconds if self.end_seconds is not None else self.duration
+        if not math.isfinite(float(start)) or not math.isfinite(float(end)):
+            raise ValueError(
+                f"interval for clip {self.clip_id} is not a finite range: "
+                f"[{start}, {end}]"
+            )
+        if end <= start:
+            raise ValueError(
+                f"interval for clip {self.clip_id} is empty or inverted: "
+                f"[{start}, {end}] — a zero-length cut ffmpeg drops silently. "
+                f"start_seconds={self.start_seconds!r}, "
+                f"end_seconds={self.end_seconds!r}, duration={self.duration!r}"
+            )
+        return (start, end)
 
 
 class Corpus:

@@ -24,6 +24,7 @@ Silent swaps between runtimes are CRITICAL governance violations. If the locked 
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["edit"]["edit_decisions"]`, `state.artifacts["assets"]["asset_manifest"]` | What to render |
 | Tools | `video_compose`, `audio_mixer`, `video_trimmer` | Rendering capabilities |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Reopens the same `projects/<project_id>/artifacts/cost_log.json` the idea and asset directors already wrote to |
 | Playbook | Active style playbook | Quality targets |
 
 ## Process
@@ -91,6 +92,19 @@ Record important findings in:
 - `render_report.verification_notes`
 - `render_report.warnings`
 - `render_report.metadata.variant_notes`
+
+### Ledger Round-Trip For The Render
+
+The render itself is a local, $0-API-cost operation — round-trip it through the same tracker so `cost_log.json` leaves no entry in `estimated`/`reserved` state. One batched entry covers the whole render, however many Remotion/FFmpeg passes it takes:
+
+```python
+entry_id = tracker.estimate("video_compose", "render", 0.0)
+tracker.reserve(entry_id, user_approved=True)
+# ... run the render (Step 3) ...
+tracker.reconcile(entry_id, 0.0, success=True)   # success=False if the render failed
+```
+
+This is what the compose stage's cost_log success criterion checks — every entry in a terminal state with totals matching what the run actually spent. Any paid post pass actually run (`audio_enhance`, a paid upscale) gets its own round trip under its plan line-item name, booked with the same rule as the asset stage's paid calls.
 
 ## Common Pitfalls
 

@@ -46,6 +46,7 @@ orchestration:
   mode: executive-producer
   skill: pipelines/explainer/executive-producer
   budget_default_usd: 2.00
+  budget_per_output_minute_usd: 0.60
   max_revisions_per_stage: 3
   max_send_backs: 3
   max_wall_time_minutes: 20
@@ -194,6 +195,7 @@ stages:
     success_criteria:
       - Schema-valid asset_manifest with all required assets generated
       - All file paths resolve to existing files
+      - Schema-valid cost_log persisted to projects/<id>/artifacts/cost_log.json with an entry for every paid tool call made in this stage
 
   - name: edit
     skill: pipelines/explainer/edit-director
@@ -247,6 +249,7 @@ stages:
     success_criteria:
       - Schema-valid render_report with output paths
       - Output file exists and passes ffprobe validation
+      - Schema-valid cost_log with every entry in a terminal state (completed/failed/refunded) and totals matching what the run actually spent
 
   - name: publish
     skill: pipelines/explainer/publish-director

@@ -66,6 +66,49 @@ Before generating anything:
    - Skip optional assets (SFX, B-roll)
 4. Get cost approval via cost tracker before proceeding
 
+### Ledger Discipline For Every Paid Call
+
+**Ledger discipline for every paid call.** Open the project's tracker once (`tracker = CostTracker.for_project(project_id)` — reopens the same `projects/<project_id>/artifacts/cost_log.json` the EP and every other director share) and, for every paid tool invocation, run the full estimate → reserve → reconcile lifecycle:
+
+```python
+# Before the call: ask the TOOL for its own estimate, then reserve it.
+# user_approved=True because this call fulfills a line item the user saw
+# and approved at the proposal gate (proposal-director.md Step 9) — the
+# single-action threshold was already cleared for this scope of work, and
+# this is the entry that actually executes, so it's the one that needs the
+# flag (Step 9's own placeholder entries were refunded, not reserved).
+inputs = {"prompt": prompt, "provider": provider}
+estimated_usd = image_selector.estimate_cost(inputs)
+entry_id = tracker.estimate("image_selector", "generate_scene_3", estimated_usd)
+tracker.reserve(entry_id, user_approved=True)  # raises ApprovalRequiredError/BudgetExceededError per mode
+
+result = image_selector.execute(inputs)
+
+# Book what actually happened, never what was hoped.
+reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
+if result.success:
+    # A positive report is authoritative. 0.0 on success is ambiguous
+    # (unreported vs genuinely free), so for an entry ESTIMATED as paid,
+    # book the estimate as the best available record — and say so when you
+    # present the stage's cost snapshot.
+    actual_usd = reported if reported > 0 else estimated_usd
+else:
+    # A failed call books only what the tool says was charged — almost
+    # always $0.00. NEVER substitute the estimate on failure:
+    # budget_spent_usd counts FAILED entries as well as completed ones
+    # (CostTracker.budget_spent_usd), so a substituted estimate is phantom
+    # spend that shrinks usable budget and can block the real retry in cap
+    # mode.
+    actual_usd = reported
+tracker.reconcile(entry_id, actual_usd, success=result.success)
+```
+
+- **Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
+- **`user_approved=True` is for approved-plan work only.** Omit it (leave the default `False`) for anything outside what the user approved at the proposal gate — an extra regeneration beyond the approved count, an ad hoc asset the proposal never costed. Those calls should hit the single-action guard like any unplanned spend; that's the guard working as intended, not a bug — surface it as a blocker per `AGENT_GUIDE.md` → "Escalate Blockers Explicitly" rather than silently reserving around it.
+- **Cancelled work**: if a reservation is made but the call never runs (user rejects the sample, budget gate stops the batch), call `tracker.refund(entry_id)` — never leave it dangling in `reserved` state.
+- **Batching**: one ledger entry per same-tool batch is acceptable to keep agent overhead low — e.g. estimate/reserve/reconcile once for "8 images via image_selector" rather than once per image, as long as the estimate and the reconciled actual both cover the whole batch.
+- Local, $0 tools (diagram_gen, text_card) still get an `estimate`/`reserve`/`reconcile` round-trip with `0.0` — that's what keeps every entry in a terminal state for the compose-stage cost_log check.
+
 ### Step 2b: Sample Preview (Prevents Wasted Spend)
 
 Before batch-generating assets, produce one sample of each expensive asset type and present them to the user for approval:

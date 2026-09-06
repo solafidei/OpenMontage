@@ -256,6 +256,8 @@ If the folder has tracks, the proposal and asset stages should present them as o
 | `hybrid` | Source footage plus support visuals | production |
 | `avatar-spokesperson` | Presenter-led avatar or lip-sync videos | production |
 | `localization-dub` | Subtitle, dub, and translated variants | beta |
+| `documentary-montage` | Footage-led montage episodes from an archive corpus | beta |
+| `reel-batch` | Batches of vertical reels from one footage pool | beta |
 | `framework-smoke` | Test: minimal 2-stage smoke test | test |
 
 > **Beta pipelines** have not been fully audited. They work, but expect rough edges. Mention this when the user selects one.
@@ -592,6 +594,25 @@ The checkpoint protocol meta skill (`skills/meta/checkpoint-protocol.md`) teache
 - **Approval is per-gate.** An early "go ahead" never covers later gates; explicit full-run pre-authorization must be recorded as a `decision_log` entry (`category: "approval_policy"`) to count.
 - Wait for human to approve, request revision, or abort.
 
+### Compact at closed gates
+
+Session cost is roughly `0.5 x peak context x number of API calls` — quadratic in
+session length. Eviction is the only thing that addresses a quadratic.
+
+**At a closed stage boundary — a checkpoint just written `completed` or
+`awaiting_human` — and only there**, if session context has passed ~150K, run
+`/compact` before starting the next stage. Never mid-stage, never during a render,
+a take comparison, or a visual-QA sweep.
+
+This is safe *because* the state that matters is already durable: the checkpoint
+holds pipeline state and `decision_log.json` holds judgment state. **Log the rulings
+before compacting** — rejections, vetoes, and the reasons behind them. A verdict that
+exists only in the conversation is lost by definition.
+
+Measured on this project's own sessions: ~51.5% fewer context-tokens, versus 61.8%
+for compacting blind — the 10-point difference buys the guarantee that nothing
+in-flight is ever summarized. See `docs/intent/context-cost-spec.md`.
+
 ## Communication Protocol
 
 Agents coordinate through canonical JSON artifacts, checkpoints, pipeline manifests, and the tool registry.
@@ -708,6 +729,15 @@ The `.agents/skills/` directory is large. When you're not coming in through a to
 
 - **Do not bypass the pipeline.** Never write ad-hoc scripts to call tools directly. All production goes through pipeline stages with director skills. See Rule Zero.
 - **Do not call generation tools without reading their Layer 3 skill.** Check the tool's `agent_skills` field, read the referenced skill, then craft your prompts using that guidance.
+- **Do not regenerate a person's face.** When a pipeline works from footage the
+  operator supplied of themselves, that footage is identity-locked at ingest and
+  what may touch it is grade / grain / sharpen / lighting / upscale. `faceswap`,
+  avatars, and video-restyle of operator footage are **out of scope** — the face
+  is never regenerated. The `faceswap` skill still exists for work that is about
+  a face by consent; it is not reachable through a pipeline that ingests someone's
+  own footage. Enforced at compose by `_pre_compose_validation` and
+  `lib/polish_filters.look_filters`; policed by
+  `tests/contracts/test_identity_chain.py`.
 - **Do not skip stage director skills.** Before executing any pipeline stage, read its director skill. The skill contains the quality bar, the workflow, and the review criteria.
 - Do not use deleted legacy names such as `tts_cloud`, `tts_engine`, or `video_gen`.
 - Do not hardcode provider names, API key names, or setup URLs. Read them from the registry's `install_instructions` and `dependencies` fields.

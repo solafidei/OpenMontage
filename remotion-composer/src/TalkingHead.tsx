@@ -6,7 +6,12 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
+import {
+  CaptionOverlay,
+  CaptionPreset,
+  CaptionSafeZone,
+  WordCaption,
+} from "./components/CaptionOverlay";
 import { resolveAsset } from "./lib/resolveAsset";
 import { TextCard } from "./components/TextCard";
 import { StatCard } from "./components/StatCard";
@@ -304,10 +309,15 @@ export interface TalkingHeadProps {
   fontSize?: number;
   highlightColor?: string;
   captionColor?: string;
-  captionBackgroundColor?: string;
+  // null means "no pill"; omit the key entirely to get the preset's.
+  captionBackgroundColor?: string | null;
   captionFontFamily?: string;
   // Pass "" for CJK captions (no inter-word spacing); defaults to " ".
   captionWordSeparator?: string;
+  // Opt-in caption look; omit for the shipped one.
+  captionPreset?: CaptionPreset;
+  // Proportional 9:16 safe zone; overrides whatever the preset sets.
+  captionSafeZone?: CaptionSafeZone;
 }
 
 export const TalkingHead: React.FC<TalkingHeadProps> = ({
@@ -318,11 +328,27 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
   fontSize = 52,
   highlightColor = "#22D3EE",
   captionColor = "#FFFFFF",
-  captionBackgroundColor = "rgba(0, 0, 0, 0.65)",
+  captionBackgroundColor,
   captionFontFamily,
   captionWordSeparator,
+  captionPreset = "default",
+  captionSafeZone,
 }) => {
   const { fps } = useVideoConfig();
+
+  // reel_pop carries its own stroke, so the pill that keeps the default look
+  // legible only muddies it. Explicit callers still win either way.
+  const presetCaptionBackground =
+    captionPreset === "reel_pop" ? "transparent" : "rgba(0, 0, 0, 0.65)";
+  // Absent (undefined) and explicitly null are different requests: the props
+  // JSON can say null to mean "no pill at all". `??` cannot tell them apart
+  // and painted the preset pill over a caller that had asked for none, so the
+  // two are split by hand. Downstream wants a string, and "transparent" is how
+  // this composition already spells "no pill".
+  const resolvedCaptionBackground =
+    captionBackgroundColor === undefined
+      ? presetCaptionBackground
+      : captionBackgroundColor ?? "transparent";
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
@@ -355,10 +381,12 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
         wordsPerPage={wordsPerPage}
         fontSize={fontSize}
         highlightColor={highlightColor}
-        backgroundColor={captionBackgroundColor}
+        backgroundColor={resolvedCaptionBackground}
         color={captionColor}
+        preset={captionPreset}
         {...(captionFontFamily ? { fontFamily: captionFontFamily } : {})}
         {...(captionWordSeparator !== undefined ? { wordSeparator: captionWordSeparator } : {})}
+        {...(captionSafeZone ? { safeZone: captionSafeZone } : {})}
       />
     </AbsoluteFill>
   );

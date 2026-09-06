@@ -317,6 +317,12 @@ Narration + background music + SFX as parallel `<Audio>` components.
 ### Cost Tracking
 
 Remotion renders are CPU-intensive but $0 API cost. Track via cost_tracker:
+
+```python
+from tools.cost_tracker import CostTracker
+tracker = CostTracker.for_project(project_id)  # opens projects/<project_id>/artifacts/cost_log.json
+```
+
 - `estimate`: based on composition duration × resolution tier
 - `reserve`: 0 (no API spend)
 - `reconcile`: wall-clock render time for benchmarking

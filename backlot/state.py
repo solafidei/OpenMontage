@@ -240,6 +240,7 @@ ARTIFACT_FILES = {
     "final_review": "final_review.json",
     "publish_log": "publish_log.json",
     "decision_log": "decision_log.json",
+    "reel_plan": "reel_plan.json",
 }
 
 
@@ -499,6 +500,129 @@ def _build_storyboard(
 # Media discovery
 # ---------------------------------------------------------------------------
 
+def _build_reels(
+    project_dir: Path,
+    artifacts: dict[str, dict],
+    media: dict[str, list[dict]],
+    checkpoints: dict[str, dict],
+) -> Optional[list[dict]]:
+    """One card per reel for a batch pipeline, or None when this is not one.
+
+    The board is an observer: a missing, malformed or half-written `reel_plan`
+    must render nothing rather than break a production. Everything here is
+    read-time — `reel_plan` entries are `additionalProperties: false`, so the
+    join between a reel and its finished file cannot be stored in the artifact.
+
+    Per-reel COST is deliberately absent. `cost_log` entries are
+    `additionalProperties: false` with no `deliverable_id`, so reel identity
+    exists only inside the free-text `operation` string
+    (`tools/cost_tracker.py`) and nothing parses it. Showing a number here
+    would mean scraping that string; a real per-reel readout needs a schema
+    field and belongs to its own issue.
+    """
+    plan = artifacts.get("reel_plan") or {}
+    entries = plan.get("reels")
+    if not isinstance(entries, list) or not entries:
+        return None
+
+    assets = {
+        a.get("id"): a
+        for a in ((artifacts.get("asset_manifest") or {}).get("assets") or [])
+        if isinstance(a, dict) and a.get("id")
+    }
+    # Where `reel_outputs` actually lives: the COMPOSE CHECKPOINT's
+    # `metadata.partial_progress` (skills/pipelines/reel-batch/compose-director.md
+    # — "This stage owns the ONLY per-reel in_progress checkpoint"). It is not
+    # on `render_report`; reading it there was a branch that could never fire,
+    # so every card silently came from the filename convention below and a
+    # mid-batch board could not show what the run itself already knew.
+    reported = (
+        (((checkpoints.get("compose") or {}).get("metadata") or {})
+         .get("partial_progress") or {}).get("reel_outputs")
+        or {}
+    )
+    if not isinstance(reported, dict):
+        reported = {}
+
+    # Keyed by stem, which is what makes the convention safe: a `-picture`
+    # file's stem is `<reel_id>-picture` and the lookup key is `<reel_id>`, so
+    # an intermediate can never answer for its own reel — including the crashed
+    # case where no finished master exists to flag it as one. The `intermediate`
+    # filter is belt to that braces, for a project whose masters are absent.
+    by_stem = {
+        Path(r["path"]).stem: r["path"]
+        for r in media.get("renders", [])
+        if not r.get("intermediate")
+    }
+
+    cards: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            card = _reel_card(project_dir, entry, assets, reported, by_stem)
+        except Exception:
+            # One wrong-typed field in one reel must cost that card, not the
+            # whole section. A batch board with four cards beats none.
+            continue
+        if card is not None:
+            cards.append(card)
+    return cards or None
+
+
+def _reel_card(
+    project_dir: Path,
+    entry: dict,
+    assets: dict,
+    reported: dict,
+    by_stem: dict,
+) -> Optional[dict]:
+    reel_id = entry.get("reel_id")
+    if not reel_id or not isinstance(reel_id, str):
+        return None
+
+    track = assets.get(entry.get("music_asset_id")) or {}
+    track_path = track.get("path") or ""
+    hook = entry.get("hook")
+    if isinstance(hook, dict):
+        hook = hook.get("text")
+
+    output = _resolve_reel_output(project_dir, reported.get(reel_id)) or by_stem.get(reel_id)
+
+    cut_ids = entry.get("cut_ids")
+    return {
+        "reel_id": reel_id,
+        "hook": hook if isinstance(hook, str) and hook else None,
+        "track": Path(track_path).name if track_path else (
+            entry.get("track_id") or entry.get("music_asset_id") or None
+        ),
+        "cut_count": len(cut_ids) if isinstance(cut_ids, list) else 0,
+        "output": output,
+        "subtitle_source": entry.get("subtitle_source"),
+    }
+
+
+def _resolve_reel_output(project_dir: Path, raw: object) -> Optional[str]:
+    """A checkpoint-reported output path, only if it stays inside the project.
+
+    Same rule `_resolve_artifact` enforces (security fix F-04): /media serves
+    only within the project directory, so a path that escapes it would 404 at
+    best and serve the wrong file at worst. The checkpoint is written by the
+    agent, which makes this a trust boundary, not a formality.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    candidate = Path(raw)
+    resolved = candidate if candidate.is_absolute() else (project_dir / candidate)
+    try:
+        relative = resolved.resolve().relative_to(Path(project_dir).resolve())
+    except (ValueError, OSError):
+        return None
+    if not resolved.exists() or resolved.stem.endswith("-picture"):
+        return None
+    return str(relative)
+
+
 def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
     """Discovered media files (renders, loose assets, snapshots)."""
     renders: list[dict] = []
@@ -529,6 +653,16 @@ def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
             for f in sorted(d.iterdir()):
                 if f.suffix.lower() in MEDIA_IMAGE_EXT and f.is_file():
                     snapshots.append({"path": _rel(project_dir, f)})
+
+    # A two-plane render leaves `<name>-picture.mp4` beside `<name>.mp4` — the
+    # un-captioned working master. Flagged, not dropped: it is the file to look
+    # at when the captions are wrong, and it is only an intermediate when the
+    # finished master actually exists beside it.
+    finished = {Path(r["path"]).stem for r in renders}
+    for entry in renders:
+        stem = Path(entry["path"]).stem
+        if stem.endswith("-picture") and stem[: -len("-picture")] in finished:
+            entry["intermediate"] = True
 
     renders.sort(key=lambda r: r.get("mtime", 0), reverse=True)
     return {"renders": renders, "snapshots": snapshots, "music": music}
@@ -609,6 +743,10 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
     events = read_events(project_dir, limit=250)
     storyboard = _build_storyboard(project_dir, artifacts, events)
     media = _scan_media(project_dir)
+    try:
+        reels = _build_reels(project_dir, artifacts, media, checkpoints)
+    except Exception:  # the board never blocks a production
+        reels = None
 
     stages = _build_stage_rail(pipeline_meta, checkpoints, history)
 
@@ -649,6 +787,7 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
         "artifacts": artifacts,
         "storyboard": storyboard,
         "media": media,
+        "reels": reels,
         "events": events,
         "cost": cost,
         "last_activity": last_activity,

@@ -61,7 +61,36 @@
             "type": "string",
             "description": "Backing color used behind this cut by composition runtimes"
           },
-          "reason": { "type": "string" }
+          "reason": { "type": "string" },
+          "provenance": {
+            "type": "string",
+            "enum": ["operator_footage", "ai_generated"],
+            "description": "Declared origin of this cut's pixels. Travels from ClipRecord.identity_locked at cut-list time; never inferred from the pixels. Gates assert on it per cut, which is why it is typed here rather than side-mapped in metadata."
+          },
+          "polish": {
+            "type": "object",
+            "description": "Per-cut picture-plane polish, applied in the ffmpeg per-segment re-encode (video_compose vf_parts). One value per cut, read per cut by the renderer.",
+            "properties": {
+              "punch_in": {
+                "type": "number",
+                "minimum": 1.0,
+                "maximum": 4.0,
+                "description": "End zoom factor of an eased punch-in across the cut (1.0 = no punch-in)"
+              },
+              "speed_ramp": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 10.0,
+                "description": "Speed multiplier this cut ramps to across its duration, starting from `speed` (equal to `speed` = no ramp)"
+              },
+              "transition_out": {
+                "type": "string",
+                "enum": ["flash", "whip"],
+                "description": "Accent transition leaving this cut — the beat-hit accent, distinct from the cut-level `transition_out`"
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "additionalProperties": false
       }
@@ -231,7 +260,25 @@
         "verdict": { "type": "string", "enum": ["strong", "acceptable", "revise", "fail"] }
       }
     },
-    "metadata": { "type": "object" }
+    "batch_look": {
+      "type": "object",
+      "description": "One grade, one grain, one sharpen, applied identically to every reel of a batch (spec R6/4.2). Lives on the spine so the look a batch was rendered with is visible in the artifact and the audit trail, not only in the call that made it. Refused on an operator_footage cut unless the grade resolves to a face_enhance preset.",
+      "properties": {
+        "grade": { "type": "string", "description": "A face_enhance preset or a color_grade profile name" },
+        "grain": { "type": "integer", "minimum": 0, "maximum": 100, "description": "ffmpeg noise alls= strength; 0 is off" },
+        "sharpen": { "type": "string", "description": "A face_enhance preset name" }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "identity_lock": {
+          "type": "boolean",
+          "description": "Per-project arming switch for the identity guarantee. Arms the check; it is not a per-clip label — that is cut.provenance."
+        }
+      }
+    }
   },
   "additionalProperties": false
 }

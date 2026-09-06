@@ -301,6 +301,7 @@ Run at **compose** and **publish** stages. Ensures the agent reviewed the actual
    - If missing: **CRITICAL** — "Compose produced a render_report but no final_review. The agent must inspect the rendered output before presenting it."
 2. **Status check**: What is `final_review.status`?
    - `pass` → OK, proceed
+   - `needs_verification` → A check could not measure what it inspects (audio probe failed or timed out, loudness never measured), so the render is *unverified*, not clean. It must not be presented to the user as finished — a human inspects it first. If the pipeline presented anyway: **CRITICAL** — "Self-review could not verify the render but the agent presented it as complete."
    - `revise` → The agent should have fixed issues before presenting. If the pipeline continued anyway: **CRITICAL** — "Self-review found revise-worthy issues but the agent presented anyway."
    - `fail` → The pipeline MUST NOT proceed. If it did: **CRITICAL**
 3. **Check completeness**: All 5 required checks must have data:
@@ -352,3 +353,35 @@ The templated→atelier inversion (`AGENT_GUIDE.md` → "Composition Authoring M
 
 ### At publish stage (when composition_mode == "atelier"):
 1. All six atelier compose-stage checks above (existence of `atelier` block, stock_reuse, art_direction_declared, scene_distinctness, captions/text dedup, human distinctness review) must show `resolved` in the review record. Any unresolved: **CRITICAL** — "Cannot publish atelier piece with unresolved doctrine or distinctness findings."
+
+## Visual Evidence — Crop Before You Read
+
+An image costs roughly `(width × height) / 750` tokens, and anything wider than
+1568px is downsampled *before you see it*. Measured across this project's own
+sessions: 336 tokens for a small crop, ~1,630 median, up to 3,872 for a full frame —
+an 11.5× spread. There is no flat per-image cap.
+
+That has a direct consequence for review quality, not just cost:
+
+> A full 1920×1080 frame costs ~2,700–3,900 tokens **and** arrives downsampled to
+> 1568px — an 18% linear loss on exactly the glyph edges, sparkle pixels, lapel
+> step-edges and mouth shapes you are judging. The native crop of the region that
+> answers the question costs ~460 tokens and loses nothing.
+>
+> Reading the whole frame is paying ~6× for a strictly **worse** look at the evidence.
+
+**So: when you have already located the region in numpy — and you usually have,
+because that is what the detector you just wrote was for — save and read that
+region at native resolution.** Do not read the full frame and squint at a
+downsampled copy of it.
+
+Read the whole frame when the whole frame *is* the question: composition, framing,
+subject-versus-panel collision, overall grade. Those are real cases; this is not a
+rule against full frames.
+
+Two things this is explicitly **not**:
+
+- Not "look at fewer frames." Sample as many as the judgment needs.
+- Not a fixed crop box. A static crop that misses a drifting subject does not error —
+  it returns a clean, correctly-labelled sheet of the wrong patch, and the take passes.
+  Derive the ROI from the content, per frame, exactly as you would anyway.

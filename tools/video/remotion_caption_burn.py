@@ -30,6 +30,7 @@ React scene stack in ``remotion-composer/``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -111,6 +112,40 @@ class RemotionCaptionBurn(BaseTool):
                 "type": "string",
                 "default": "#22D3EE",
                 "description": "Highlight color for the active word (hex).",
+            },
+            "preset": {
+                "type": "string",
+                "enum": ["default", "reel_pop"],
+                "default": "default",
+                "description": (
+                    "Caption look. 'default' is the shipped one. 'reel_pop' is "
+                    "the 9:16 short-form look: per-word scale pop, heavy stroke, "
+                    "uppercase, no pill, and a proportional safe zone."
+                ),
+            },
+            "safe_zone": {
+                "type": "object",
+                "description": (
+                    "Proportional keep-clear margins, overriding the preset's. "
+                    "{'bottom': fraction of frame height, 'sides': fraction of "
+                    "frame width}. A 9:16 reel wants bottom ~0.18 so captions "
+                    "clear Instagram's own lower UI band."
+                ),
+            },
+            "fps": {
+                "type": "integer",
+                "default": 30,
+                "description": "Render frame rate. Must match the input video.",
+            },
+            "run_id": {
+                "type": "string",
+                "description": (
+                    "Scopes staged media to one run. Without it every render "
+                    "stages into the same shared public/talking-head/ dir, so a "
+                    "batch of reels whose masters share a filename overwrite "
+                    "each other. Staged media is deleted after the render "
+                    "either way; run_id only groups it while it is live."
+                ),
             },
             "corrections": {
                 "type": "object",
@@ -198,11 +233,18 @@ class RemotionCaptionBurn(BaseTool):
                         trailing = raw[-1]
                     if fixed != raw and not fixed.endswith(trailing):
                         fixed = fixed + trailing
-                    captions.append({
+                    caption = {
                         "word": fixed,
                         "startMs": int(w["start"] * 1000),
                         "endMs": int(w["end"] * 1000),
-                    })
+                    }
+                    # transcriber emits per-word `probability`. Reel speech is
+                    # transcribed off a mixed music track (no stem separation
+                    # exists in this repo), so the caption stage needs the
+                    # confidence to gate on rather than printing ASR guesses.
+                    if w.get("probability") is not None:
+                        caption["confidence"] = w["probability"]
+                    captions.append(caption)
             elif "text" in seg:
                 text_words = seg["text"].strip().split()
                 dur = seg["end"] - seg["start"]
@@ -273,6 +315,10 @@ class RemotionCaptionBurn(BaseTool):
         font_size: int,
         highlight_color: str,
         overlays: list[dict] | None = None,
+        preset: str = "default",
+        safe_zone: dict | None = None,
+        fps: int = 30,
+        run_id: str | None = None,
     ) -> ToolResult:
         root = self._find_remotion_root()
         if root is None:
@@ -288,7 +334,7 @@ class RemotionCaptionBurn(BaseTool):
         dur_result = self.run_command(dur_cmd)
         dur_out = dur_result.stdout
         duration_s = float(dur_out.strip().split("\n")[0])
-        total_frames = math.ceil(duration_s * 30)
+        total_frames = math.ceil(duration_s * fps)
 
         # Detect video dimensions
         dim_cmd = [
@@ -303,25 +349,42 @@ class RemotionCaptionBurn(BaseTool):
         width = int(dim_parts[0])
         height = int(dim_parts[1])
 
-        # Copy video to Remotion public folder
-        pub_dir = root / "public" / "talking-head"
+        # Copy video to Remotion public folder. Without a run_id every render
+        # shares one directory, so a batch of reels whose masters are all named
+        # e.g. master.mp4 overwrite each other mid-flight. Two masters can also
+        # collide *inside* one run when they share a stem, hence the per-source
+        # segment.
+        source_key = self._source_key(input_path)
+        rel_dir = (
+            f"talking-head/{run_id}/{source_key}" if run_id
+            else f"talking-head/{source_key}"
+        )
+        pub_dir = root / "public" / rel_dir
         pub_dir.mkdir(parents=True, exist_ok=True)
         video_filename = Path(input_path).name
         dest_video = pub_dir / video_filename
         shutil.copy2(input_path, dest_video)
 
-        # Build props JSON
+        # Build props JSON. staticFile() rejects a "public/" prefix outright
+        # (TypeError, no render), so the path is relative to public/.
         props = {
-            "videoSrc": f"public/talking-head/{video_filename}",
+            "videoSrc": f"{rel_dir}/{video_filename}",
             "captions": captions,
             "overlays": overlays or [],
             "wordsPerPage": words_per_page,
             "fontSize": font_size,
             "highlightColor": highlight_color,
         }
+        if preset != "default":
+            props["captionPreset"] = preset
+        if safe_zone:
+            props["captionSafeZone"] = safe_zone
         props_dir = root / "public" / "demo-props"
         props_dir.mkdir(parents=True, exist_ok=True)
-        props_file = props_dir / f"caption-burn-{Path(input_path).stem}.json"
+        props_file = props_dir / (
+            f"caption-burn-{run_id}-{source_key}.json" if run_id
+            else f"caption-burn-{source_key}.json"
+        )
         props_file.write_text(json.dumps(props, indent=2), encoding="utf-8")
 
         # Render (use npx.cmd on Windows for subprocess compatibility)
@@ -331,12 +394,40 @@ class RemotionCaptionBurn(BaseTool):
             npx_bin, "remotion", "render",
             "TalkingHead",
             f"--props={props_file.relative_to(root)}",
-            f"--width={width}", f"--height={height}", "--fps=30",
+            f"--width={width}", f"--height={height}", f"--fps={fps}",
             f"--frames=0-{total_frames - 1}",
             "--codec=h264", "--crf=18",
             f"--output={str(Path(output_path).resolve())}",
         ]
-        self.run_command(render_cmd, cwd=str(root))
+        try:
+            self.run_command(render_cmd, cwd=str(root))
+        finally:
+            # pub_dir ends in source_key, whose digest is of *this* resolved
+            # input path, so no other source can be staged inside it — this call
+            # owns it and sweeps it whether the render succeeded or raised.
+            # Un-scoped renders used to keep theirs, back when the leaf was the
+            # bare stem: one dir per stem, overwritten on every rerun, so the
+            # footprint stayed flat. Once the digest made the leaf per-source it
+            # became one dir per distinct source path, kept forever, and a
+            # pipeline that burns many files fills the disk with copies of them.
+            #
+            # Sweeping only our own leaf is the bounded rule that cannot delete
+            # a directory a concurrent render still needs. An age or count cap
+            # would evict *other* sources' dirs, and a slow neighbouring render
+            # would lose its media mid-flight. The one caller that shares this
+            # leaf is a second burn of the same source path under the same
+            # run_id (or, un-scoped, of the same source at all) — and those two
+            # already write the same props filename and clobber each other, so
+            # they were never concurrency-safe here to begin with.
+            shutil.rmtree(pub_dir, ignore_errors=True)
+            if run_id:
+                # The run dir above it is shared by every source in the batch,
+                # so it goes only once it is empty — rmdir refuses while a
+                # sibling burn of the same run is still staged there.
+                try:
+                    pub_dir.parent.rmdir()
+                except OSError:
+                    pass
 
         if not Path(output_path).exists():
             return ToolResult(success=False, error="Remotion render produced no output")
@@ -351,6 +442,8 @@ class RemotionCaptionBurn(BaseTool):
                 "caption_count": len(captions),
                 "overlay_count": len(overlays or []),
                 "words_per_page": words_per_page,
+                "preset": preset,
+                "fps": fps,
             },
             artifacts=[output_path],
         )
@@ -429,12 +522,88 @@ class RemotionCaptionBurn(BaseTool):
         )
 
     @staticmethod
+    def _source_key(input_path: str) -> str:
+        """Stem plus a short digest of the resolved source path.
+
+        Two masters in one batch can share a stem in different folders
+        (``a/clip.mp4`` and ``b/clip.mp4``). Keyed on the stem alone they stage
+        to the same file under public/ and write the same props file, so the
+        second overwrites the first and one reel renders the other's master.
+        The digest is of the resolved path — not the clock, not a random value
+        — so the same input always stages to the same directory and a dir left
+        behind by a failed render can still be traced back to its source.
+        """
+        digest = hashlib.sha256(
+            str(Path(input_path).resolve()).encode("utf-8")
+        ).hexdigest()[:8]
+        return f"{Path(input_path).stem}-{digest}"
+
+    @staticmethod
     def _ms_to_srt(ms: int) -> str:
         h = ms // 3600000
         m = (ms % 3600000) // 60000
         s = (ms % 60000) // 1000
         rem = ms % 1000
         return f"{h:02d}:{m:02d}:{s:02d},{rem:03d}"
+
+    # ------------------------------------------------------------------ #
+    #  Look / staging input validation
+    # ------------------------------------------------------------------ #
+
+    PRESETS = ("default", "reel_pop")
+    # run_id lands in a filesystem path under remotion-composer/public/, so it
+    # is whitelisted rather than sanitised — a traversal here writes anywhere.
+    # \Z, not $: $ also matches before a trailing newline, so "reel\n" passed
+    # the whitelist and became a directory name with a newline in it.
+    _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+    _SAFE_ZONE_KEYS = ("bottom", "sides")
+
+    @classmethod
+    def _validate_look(cls, inputs: dict[str, Any]) -> str | None:
+        """Return an error message for a bad look/staging input, else None."""
+        preset = inputs.get("preset", "default")
+        if preset not in cls.PRESETS:
+            return f"Unknown preset {preset!r}. Expected one of {list(cls.PRESETS)}."
+
+        fps = inputs.get("fps", 30)
+        if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
+            return f"fps must be a positive integer, got {fps!r}."
+
+        run_id = inputs.get("run_id")
+        if run_id is not None and not (
+            isinstance(run_id, str) and cls._RUN_ID_RE.match(run_id)
+        ):
+            return (
+                f"run_id must match {cls._RUN_ID_RE.pattern} "
+                f"(letters, digits, dot, dash, underscore), got {run_id!r}."
+            )
+
+        safe_zone = inputs.get("safe_zone")
+        if safe_zone is None:
+            return None
+        if not isinstance(safe_zone, dict):
+            return f"safe_zone must be an object, got {type(safe_zone).__name__}."
+        unknown = set(safe_zone) - set(cls._SAFE_ZONE_KEYS)
+        if unknown:
+            # Closed, because an unknown key on the TS side is silently ignored
+            # and the caption then renders in the wrong place with no error.
+            return (
+                f"Unknown safe_zone keys: {sorted(unknown)}. "
+                f"Expected {list(cls._SAFE_ZONE_KEYS)}."
+            )
+        if "bottom" not in safe_zone:
+            return "safe_zone requires 'bottom'."
+        for key in cls._SAFE_ZONE_KEYS:
+            if key not in safe_zone:
+                continue
+            value = safe_zone[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return f"safe_zone.{key} must be a number, got {value!r}."
+            # Fractions of the frame. Half the frame is already absurd; past it
+            # the box has negative width or sits off the top.
+            if not 0 <= value < 0.5:
+                return f"safe_zone.{key} must be a fraction in [0, 0.5), got {value!r}."
+        return None
 
     # ------------------------------------------------------------------ #
     #  Main execute
@@ -448,6 +617,14 @@ class RemotionCaptionBurn(BaseTool):
         words_per_page = inputs.get("words_per_page", 4)
         font_size = inputs.get("font_size", 52)
         highlight_color = inputs.get("highlight_color", "#22D3EE")
+        preset = inputs.get("preset", "default")
+        safe_zone = inputs.get("safe_zone")
+        fps = inputs.get("fps", 30)
+        run_id = inputs.get("run_id")
+
+        look_error = self._validate_look(inputs)
+        if look_error:
+            return ToolResult(success=False, error=look_error)
 
         if not Path(input_path).exists():
             return ToolResult(success=False, error=f"Input video not found: {input_path}")
@@ -480,9 +657,59 @@ class RemotionCaptionBurn(BaseTool):
                 input_path, output_path, captions,
                 words_per_page, font_size, highlight_color,
                 overlays=overlays,
+                preset=preset, safe_zone=safe_zone, fps=fps, run_id=run_id,
             )
         else:
             result = self._render_ffmpeg(input_path, output_path, captions)
+            # The fallback burns static SRT: it cannot express the pop, the
+            # safe zone, or a non-default fps. Saying so is the difference
+            # between a downgrade and a silent lie — a caller that asked for
+            # reel_pop and got plain subtitles must be able to tell.
+            if result.success and result.data is not None:
+                dropped = [
+                    name
+                    for name, value in (
+                        ("preset", preset if preset and preset != "default" else None),
+                        ("safe_zone", safe_zone),
+                        ("fps", fps),
+                    )
+                    if value
+                ]
+                result.data["preset"] = "default"
+                result.data["requested_preset"] = preset
+                result.data["degraded"] = True
+                result.data["unhonoured_inputs"] = dropped
+                if dropped:
+                    result.data["note"] = (
+                        "Used FFmpeg fallback: static SRT burn-in. "
+                        f"Ignored {', '.join(dropped)} — the fallback cannot express "
+                        "per-word pop, a safe zone, or a custom fps. Install Remotion "
+                        "for animated captions."
+                    )
+
+        # Report the ASR confidence that came through so a caption stage can
+        # gate on it. Reel speech is transcribed off a mixed music track, so a
+        # low mean here means the burn is printing guesses.
+        if result.success and result.data is not None:
+            result.data.update(self._confidence_stats(captions))
 
         result.duration_seconds = round(time.time() - start, 2)
         return result
+
+    # Below this a word is more likely wrong than right at reel speed.
+    LOW_CONFIDENCE = 0.6
+
+    @classmethod
+    def _confidence_stats(cls, captions: list[dict]) -> dict[str, Any]:
+        """Aggregate per-word ASR confidence. Empty when the source had none."""
+        values = [c["confidence"] for c in captions if "confidence" in c]
+        if not values:
+            return {"word_confidence": None}
+        return {
+            "word_confidence": {
+                "mean": round(sum(values) / len(values), 3),
+                "min": round(min(values), 3),
+                "counted": len(values),
+                "low_confidence_words": sum(v < cls.LOW_CONFIDENCE for v in values),
+            }
+        }

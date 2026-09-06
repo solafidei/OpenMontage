@@ -20,6 +20,7 @@ Per AGENT_GUIDE.md → "Present Both Composition Runtimes (HARD RULE)": do NOT s
 | Schema | `schemas/artifacts/brief.schema.json` | Artifact validation |
 | User input | Conversation history | The raw ask |
 | Meta | `skills/meta/reviewer.md` | Self-review pass |
+| Cost tracker | `tools/cost_tracker.py` — `CostTracker.for_project(project_id)` | Opens the project's persisted `cost_log.json` ledger; every downstream stage reopens the same one |
 
 ## Process
 
@@ -188,6 +189,71 @@ Minimum fields the brief must carry:
 `era_mix` is a documentary-specific field: "modern" biases toward
 Pexels, "vintage" biases toward Archive.org Prelinger, "any" leaves it
 open for the scene director to decide per slot.
+
+### 7b. Compute Budget And Seed The Cost Ledger
+
+Documentary-montage spends real money even on the "free" corpus (a generated music bed is the usual paid line, and some clip providers have paid tiers). This is the approval gate — nothing downstream spends until the user approves it.
+
+Compute the default budget cap from the pipeline manifest's `orchestration` block (`pipeline_defs/documentary-montage.yaml`), not from `config.yaml`'s flat global total — the manifest is what lets budget scale with episode length:
+
+```python
+import yaml
+from tools.cost_tracker import CostTracker
+
+manifest = yaml.safe_load(open("pipeline_defs/documentary-montage.yaml"))["orchestration"]
+flat_default = manifest["budget_default_usd"]                   # $1.00 floor
+per_minute_rate = manifest.get("budget_per_output_minute_usd")  # $0.60/min
+
+target_minutes = duration_seconds / 60
+default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
+```
+
+An 18-minute episode computes `max($1.00, $0.60 x 18) = max($1.00, $10.80) = $10.80` — show that math at the approval gate, not just the final number.
+
+Open the ledger and seed one entry per planned paid call (typically `music_gen`, if `music_plan.source == "generated"`; free/local retrieval tools get a `0.0` entry too so every entry starts in a terminal-reachable state):
+
+```python
+tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
+music_plan_inputs = {
+    "prompt": music_plan["prompt_seed"],
+    "duration_seconds": duration_seconds,  # required — music_gen.estimate_cost raises without it
+}
+estimated_usd = music_gen.estimate_cost(music_plan_inputs) if music_plan["source"] == "generated" else 0.0
+tracker.estimate("music_gen", "score_bed", estimated_usd)
+```
+
+Record `metadata.cost_estimate` (itemized) and `metadata.budget_cap_usd` on the brief so the on-screen number and `cost_log.json` agree.
+
+**On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True` — see `skills/meta/checkpoint-protocol.md`): arm the tracker with what was actually approved, and clear the placeholder entries this step seeded.
+
+```python
+import math
+
+# 1. The approved budget figure becomes the tracker's budget total.
+#    A figure the user NAMED is used verbatim — their word is the cap.
+#    A bare "approve" approves the plan AS PRESENTED at the gate: the
+#    estimate within the default cap. Arm with that cap, floored at the
+#    estimate grossed up past the reserve holdback. Arming with the bare
+#    estimate leaves zero headroom: usable budget tops out at
+#    (1 - reserve_pct) x total, so the plan's FINAL reservation would need
+#    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
+#    the tracker (config's budget.reserve_pct via for_project); never
+#    hardcode 0.10.
+total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
+min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
+tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)
+for tool_name in {li["tool"] for li in metadata["cost_estimate"]["line_items"]}:
+    tracker.approve_tool(tool_name)  # clears the first-paid-use guard for the approved plan
+for entry in tracker.entries:
+    if entry["status"] == "estimated":
+        tracker.refund(entry["id"])  # placeholder, never executed — refund, don't leave it reserved/estimated
+```
+
+> **If the user's named figure is below `min_workable_usd`, say so at this gate** — the reserve holdback guarantees the guard blocks the plan's final approved item. Ask the user to raise the figure or trim the plan. Never silently arm a total the guard is certain to trip on.
+
+Downstream stages must book under these exact names — see `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance.
+
+The asset director creates and reserves its OWN entry at the moment it actually spends, passing `user_approved=True` because that call fulfills a line item approved here. Anything outside this plan still trips `ApprovalRequiredError` — that's the guard working, not a bug. Surface it per AGENT_GUIDE.md → "Escalate Blockers Explicitly."
 
 ### 8. Quality Gate
 
