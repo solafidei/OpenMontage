@@ -142,7 +142,9 @@ class RemotionCaptionBurn(BaseTool):
                     "which is what keeps every existing render byte-identical. "
                     "Pass it to override — {'preset': 'reel_pop', "
                     "'animation_preset': 'none'} is reel_pop's type treatment "
-                    "holding still, which no preset value can express."
+                    "holding still, which no preset value can express. 'pop' is "
+                    "a fixed 0.16 impulse and carries a 0.4 word-gap floor, so "
+                    "the growing word cannot touch its neighbour at the peak."
                 ),
             },
             "safe_zone": {
@@ -740,6 +742,11 @@ class RemotionCaptionBurn(BaseTool):
                 ]
                 result.data["preset"] = "default"
                 result.data["requested_preset"] = preset
+                # Beside requested_preset for the same reason: the echo says
+                # what rendered ("none"), so what was asked for has to survive
+                # somewhere or the loss is unattributable.
+                if animation_preset is not None:
+                    result.data["requested_animation_preset"] = animation_preset
                 result.data["degraded"] = True
                 result.data["unhonoured_inputs"] = dropped
                 if dropped:
@@ -759,6 +766,13 @@ class RemotionCaptionBurn(BaseTool):
             # render paths converge, so the echo cannot drift between them.
             if rendered_animation is not None:
                 result.data["animation_preset"] = rendered_animation
+            # Both paths must write the key. The fallback set it True above;
+            # without this the Remotion path leaves it absent, and a caller
+            # asking `burn.data["degraded"]` raises on every good render. The
+            # alternative — every caller writing `.get("degraded", False)` —
+            # hides the difference between "not degraded" and "the tool did not
+            # say", which is the guess this tool exists not to make.
+            result.data.setdefault("degraded", False)
 
         result.duration_seconds = round(time.time() - start, 2)
         return result

@@ -885,3 +885,37 @@ def test_the_page_entrance_is_omitted_rather_than_neutralised():
     assert "opacity: entrance," in source
     # The identity values must not appear as an else branch.
     assert "transform: `translateY(0px)`" not in source
+
+
+def test_both_render_paths_report_whether_they_degraded(tmp_path, monkeypatch):
+    """`degraded` was written only on the fallback path, so a caller reading
+    `burn.data["degraded"]` raised on every successful Remotion render. A gate
+    cannot ask a question the good path refuses to answer."""
+    src = tmp_path / "master.mp4"
+    src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    tool = RemotionCaptionBurn()
+    monkeypatch.setattr(tool, "_remotion_available", lambda: True)
+    monkeypatch.setattr(
+        tool, "_render_remotion",
+        lambda *a, **k: ToolResult(success=True, data={"method": "remotion"}),
+    )
+
+    result = tool.execute({
+        "input_path": str(src),
+        "output_path": str(tmp_path / "out.mp4"),
+        "segments": [{
+            "text": "PULL", "start": 0.0, "end": 0.4,
+            "words": [{"word": "PULL", "start": 0.0, "end": 0.4, "probability": 0.9}],
+        }],
+    })
+
+    assert result.data["degraded"] is False
+
+
+def test_the_fallback_keeps_what_was_asked_for_alongside_what_rendered(tmp_path, monkeypatch):
+    """The echo reports "none" because that is what a static SRT rendered. The
+    request has to survive somewhere or the loss is unattributable."""
+    result = _fallback_burn(tmp_path, monkeypatch, animation_preset="pop")
+
+    assert result.data["animation_preset"] == "none"
+    assert result.data["requested_animation_preset"] == "pop"
