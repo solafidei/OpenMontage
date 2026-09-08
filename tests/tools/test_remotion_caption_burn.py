@@ -116,6 +116,7 @@ def test_confidence_stats_are_none_when_the_source_carried_none():
         ("safe_zone_half", {"safe_zone": {"bottom": 0.5}}, "fraction in [0, 0.5)"),
         ("safe_zone_negative", {"safe_zone": {"bottom": -0.1}}, "fraction in [0, 0.5)"),
         ("safe_zone_pixels", {"safe_zone": {"bottom": 80}}, "fraction in [0, 0.5)"),
+        ("unknown_animation", {"animation_preset": "slide"}, "Unknown animation_preset"),
     ],
 )
 def test_bad_look_inputs_are_rejected(label, inputs, expect):
@@ -132,6 +133,10 @@ def test_bad_look_inputs_are_rejected(label, inputs, expect):
         {"preset": "default"},
         {"preset": "reel_pop", "fps": 30, "run_id": "reel-03_v2", "safe_zone": {"bottom": 0.18, "sides": 0.08}},
         {"safe_zone": {"bottom": 0.0}},
+        {"animation_preset": "none"},
+        # The combination the feature exists for: reel_pop's type treatment,
+        # holding still.
+        {"preset": "reel_pop", "animation_preset": "none"},
     ],
 )
 def test_good_look_inputs_pass(inputs):
@@ -147,6 +152,17 @@ def test_execute_refuses_a_bad_preset_before_touching_the_input(tmp_path):
 
     assert not result.success
     assert "Unknown preset" in result.error
+
+
+def test_execute_refuses_a_bad_animation_before_touching_the_input(tmp_path):
+    result = RemotionCaptionBurn().execute({
+        "input_path": str(tmp_path / "missing.mp4"),
+        "output_path": str(tmp_path / "out.mp4"),
+        "animation_preset": "slide",
+    })
+
+    assert not result.success
+    assert "Unknown animation_preset" in result.error
 
 
 # --- Remotion staging ------------------------------------------------------
@@ -232,6 +248,9 @@ def test_default_preset_stages_and_renders_exactly_as_before(render, tmp_path, m
     props = _props(root)
     assert "captionPreset" not in props
     assert "captionSafeZone" not in props
+    # An absent animation must leave the props JSON byte-identical: talking-head
+    # and avatar-spokesperson render through this same composition.
+    assert "captionAnimation" not in props
     # Staged for the render, then swept — asserted at render time, because
     # after the call the dir is gone (see the un-scoped footprint test).
     assert present == [True]
@@ -490,6 +509,7 @@ def test_talking_head_passes_the_preset_and_safe_zone_through():
     call = call[: call.index("/>")]
 
     assert "preset={captionPreset}" in call
+    assert "{...(captionAnimation ? { animation: captionAnimation } : {})}" in call
     assert "{...(captionSafeZone ? { safeZone: captionSafeZone } : {})}" in call
     # reel_pop supplies its own stroke, so the pill is dropped unless asked for.
     assert "backgroundColor={resolvedCaptionBackground}" in call
@@ -656,3 +676,212 @@ def test_an_explicit_null_caption_background_means_no_pill():
     # The fix: an explicit null is not the same request as an absent key.
     assert explicit_null == "transparent", "null must mean no pill"
     assert explicit_color == "#FF0000"
+
+
+# --- motion, separately from typography ------------------------------------
+
+def test_an_explicit_animation_reaches_the_props(render, tmp_path):
+    """The combination no preset value can express: reel_pop type, held still."""
+    tool, root, _ = render
+    _burn(tool, tmp_path, preset="reel_pop", animation_preset="none")
+
+    props = _props(root)
+    assert props["captionPreset"] == "reel_pop"
+    assert props["captionAnimation"] == "none"
+
+
+def test_a_preset_without_an_animation_emits_no_animation_key(render, tmp_path):
+    """reel_pop keeps rendering its pop, resolved in TypeScript, not in Python."""
+    tool, root, _ = render
+    _burn(tool, tmp_path, preset="reel_pop")
+
+    props = _props(root)
+    assert props["captionPreset"] == "reel_pop"
+    assert "captionAnimation" not in props
+
+
+def _fallback_burn(tmp_path, monkeypatch, **inputs):
+    """execute() over the shipped fake-fallback idiom.
+
+    The real _render_ffmpeg shells out to ffmpeg over a stub file, so the
+    degradation block — which is gated only on success and a non-None data —
+    is exercised through a fake, exactly as the test above does it.
+    """
+    tool = RemotionCaptionBurn()
+
+    def fake_ffmpeg(input_path, output_path, captions):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        return ToolResult(
+            success=True,
+            data={
+                "method": "ffmpeg_fallback",
+                "output": str(output_path),
+                "caption_count": len(captions),
+                "note": "Used FFmpeg fallback. Install Remotion for animated captions.",
+            },
+            artifacts=[str(output_path)],
+        )
+
+    monkeypatch.setattr(tool, "_render_ffmpeg", fake_ffmpeg)
+    src = tmp_path / "master.mp4"
+    src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    return tool.execute({
+        "input_path": str(src),
+        "output_path": str(tmp_path / "out.mp4"),
+        "segments": [{
+            "text": "PULL", "start": 0.0, "end": 0.4,
+            "words": [{"word": "PULL", "start": 0.0, "end": 0.4, "probability": 0.9}],
+        }],
+        "force_ffmpeg": True,
+        **inputs,
+    })
+
+
+def test_the_fallback_reports_motion_as_none_and_says_it_dropped_it(tmp_path, monkeypatch):
+    """A static SRT burn animates nothing, whatever was asked for."""
+    result = _fallback_burn(tmp_path, monkeypatch, animation_preset="pop")
+
+    assert result.data["animation_preset"] == "none"
+    assert "animation_preset" in result.data["unhonoured_inputs"]
+    assert result.data["degraded"] is True
+
+
+def test_the_fallback_does_not_flag_an_animation_it_honoured(tmp_path, monkeypatch):
+    """Asked for none, got none — nothing was lost. degraded still stands: the
+    method downgrade (static SRT, no per-word highlight) is real regardless."""
+    result = _fallback_burn(tmp_path, monkeypatch, animation_preset="none")
+
+    assert result.data["animation_preset"] == "none"
+    assert "animation_preset" not in result.data["unhonoured_inputs"]
+    assert result.data["degraded"] is True
+
+
+def test_an_all_default_fallback_admits_dropping_nothing(tmp_path, monkeypatch):
+    """The guard that stopped `fps` firing on every single fallback render.
+
+    Asserted on the note's "Ignored" clause rather than the absence of a `note`
+    key: the fallback sets its own note, and `if dropped` only overwrites it.
+    """
+    result = _fallback_burn(tmp_path, monkeypatch)
+
+    assert result.data["unhonoured_inputs"] == []
+    assert result.data["degraded"] is True
+    assert "Ignored" not in result.data["note"]
+
+
+def test_the_remotion_path_echoes_only_what_it_was_asked_for(tmp_path, monkeypatch):
+    """Python never derives motion from the preset — that table lives once, in
+    TypeScript. Asked explicitly: echoed. Not asked: no key, no guess."""
+    src = tmp_path / "master.mp4"
+    src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    segments = [{
+        "text": "PULL", "start": 0.0, "end": 0.4,
+        "words": [{"word": "PULL", "start": 0.0, "end": 0.4, "probability": 0.9}],
+    }]
+
+    def run(**extra):
+        tool = RemotionCaptionBurn()
+        monkeypatch.setattr(tool, "_remotion_available", lambda: True)
+        monkeypatch.setattr(
+            tool, "_render_remotion",
+            lambda *a, **k: ToolResult(success=True, data={"method": "remotion"}),
+        )
+        return tool.execute({
+            "input_path": str(src),
+            "output_path": str(tmp_path / "out.mp4"),
+            "segments": segments,
+            **extra,
+        })
+
+    assert run(preset="reel_pop", animation_preset="none").data["animation_preset"] == "none"
+    # reel_pop implies pop, and TypeScript is what knows that.
+    assert "animation_preset" not in run(preset="reel_pop").data
+
+
+def _resolve_motion(*cases: tuple[str, str]) -> list:
+    """Run the REAL resolveMotion from CaptionOverlay.tsx, in node.
+
+    Source-string assertions cannot police this one. The identity it asserts —
+    that an absent animation resolves to exactly what each preset has always
+    rendered — is the whole basis of the byte-identity promise, and this is the
+    ONLY copy of that table anywhere (Python deliberately holds none).
+    """
+    source = _read("components/CaptionOverlay.tsx")
+
+    def _slice(start_marker: str, end_marker: str) -> str:
+        start = source.index(start_marker)
+        return source[start : source.index(end_marker, start)]
+
+    js = (
+        _slice("const PRESETS", "// The shipped absolute offset")
+        + _slice("const MOTIONS", "interface PresetStyle")
+    )
+    # The harness strips the type annotations, exactly as the pop-pulse one does.
+    js = js.replace("export ", "").replace(": Record<CaptionPreset, PresetStyle>", "")
+    js = js.replace(": Record<CaptionAnimation, MotionStyle>", "")
+    js = js.replace(": Record<CaptionPreset, CaptionAnimation>", "")
+    js = js.replace("(preset: string, animation?: string): MotionStyle", "(preset, animation)")
+    js = js.replace("  const presetKey: CaptionPreset =", "  const presetKey =")
+    js = js.replace(" as CaptionPreset", "").replace(" as CaptionAnimation", "")
+
+    script = (
+        js
+        + "\nconsole.log(JSON.stringify(["
+        + ",".join(f"resolveMotion({p}, {a})" for p, a in cases)
+        + "]));"
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_an_absent_animation_renders_what_the_preset_always_rendered():
+    """The byte-identity promise, executed rather than asserted about."""
+    default_absent, pop_absent = _resolve_motion(
+        ('"default"', "undefined"), ('"reel_pop"', "undefined")
+    )
+
+    # default has always been: page entrance, no per-word pop.
+    assert default_absent == {"entrance": True, "popScale": 0, "minWordGapRatio": 0}
+    # reel_pop has always been: entrance plus the 0.16 impulse.
+    assert pop_absent == {"entrance": True, "popScale": 0.16, "minWordGapRatio": 0.4}
+
+
+def test_an_unvalidated_preset_still_renders_rather_than_throwing():
+    """A hand-written props JSON has no Python guard in front of it, and today
+    `PRESETS[preset] ?? PRESETS.default` renders it. Resolving the preset key
+    second would index the motion table with a bad string and throw."""
+    (unknown,) = _resolve_motion(('"tiktok"', "undefined"))
+
+    assert unknown == {"entrance": True, "popScale": 0, "minWordGapRatio": 0}
+
+
+def test_none_turns_off_both_the_entrance_and_the_pop():
+    (none_on_pop,) = _resolve_motion(('"reel_pop"', '"none"'))
+
+    assert none_on_pop["entrance"] is False
+    assert none_on_pop["popScale"] == 0
+
+
+def test_motion_carries_a_word_gap_floor_typography_does_not_supply():
+    """{default, pop} is newly reachable and has never rendered: a 0.16 pop
+    against a 0 gap makes the growing word touch its neighbour at the peak."""
+    (pop_on_default,) = _resolve_motion(('"default"', '"pop"'))
+
+    assert pop_on_default["minWordGapRatio"] == 0.4
+
+
+def test_the_page_entrance_is_omitted_rather_than_neutralised():
+    """Writing opacity: 1, transform: translateY(0px) is not the same as writing
+    neither: a bare transform still promotes the div to its own layer and shifts
+    rasterization. Same reason the per-word transform is already conditional."""
+    source = _read("components/CaptionOverlay.tsx")
+
+    assert "...(animateEntrance" in source
+    assert "opacity: entrance," in source
+    # The identity values must not appear as an else branch.
+    assert "transform: `translateY(0px)`" not in source

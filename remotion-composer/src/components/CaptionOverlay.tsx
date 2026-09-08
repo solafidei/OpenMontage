@@ -37,6 +37,46 @@ export interface CaptionSafeZone {
   sides?: number;
 }
 
+// Caption MOTION, separately from the typography and layout a preset fuses in
+// with it. Declared here — above PresetStyle, outside the slice the pop-pulse
+// harness test evaluates — so that test keeps compiling.
+export type CaptionAnimation = "none" | "fade" | "pop";
+
+interface MotionStyle {
+  entrance: boolean;       // page-level spring: opacity + 20px rise
+  popScale: number;        // per-word scale impulse; 0 emits no transform
+  // The gap the pop needs in order not to collide. `reel_pop`'s 0.4 was never
+  // an independent typographic choice — it was tuned to survive the peak of
+  // the pop — so motion carries its own floor rather than trusting whatever
+  // typography it lands on.
+  minWordGapRatio: number;
+}
+
+const MOTIONS: Record<CaptionAnimation, MotionStyle> = {
+  none: { entrance: false, popScale: 0, minWordGapRatio: 0 },
+  fade: { entrance: true, popScale: 0, minWordGapRatio: 0 },
+  pop: { entrance: true, popScale: 0.16, minWordGapRatio: 0.4 },
+};
+
+// What each shipped preset already is, restated in the motion vocabulary. This
+// identity is what keeps every existing render byte-identical, and it is the
+// ONLY copy of this table — Python deliberately holds none.
+const PRESET_MOTION: Record<CaptionPreset, CaptionAnimation> = {
+  default: "fade",
+  reel_pop: "pop",
+};
+
+// The preset key is resolved FIRST. An unrecognised preset from a hand-written
+// props JSON has no Python guard in front of it and must still render, exactly
+// as `PRESETS[preset] ?? PRESETS.default` makes it render today — indexing
+// PRESET_MOTION with an unvalidated string would yield undefined on both sides
+// of the ?? and throw on the first field read.
+export function resolveMotion(preset: string, animation?: string): MotionStyle {
+  const presetKey: CaptionPreset =
+    preset in PRESETS ? (preset as CaptionPreset) : "default";
+  return MOTIONS[animation as CaptionAnimation] ?? MOTIONS[PRESET_MOTION[presetKey]];
+}
+
 interface PresetStyle {
   popScale: number;        // extra scale applied to the active word
   strokeRatio: number;     // text stroke width as a fraction of fontSize
@@ -102,6 +142,9 @@ type CaptionOverlayProps = {
   wordSeparator?: string;
   // Opt-in look. Omitted or "default" renders exactly as before.
   preset?: CaptionPreset;
+  // Motion, independent of the preset's typography. Omitted means "whatever
+  // this preset has always rendered" — see PRESET_MOTION.
+  animation?: CaptionAnimation;
   // Overrides the preset's safe zone. Applies to either preset.
   safeZone?: CaptionSafeZone;
 };
@@ -142,7 +185,8 @@ const PageRenderer: React.FC<{
   wordSeparator: string;
   style: PresetStyle;
   safeZone: CaptionSafeZone | null;
-}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, wordSeparator, style, safeZone }) => {
+  animateEntrance: boolean;
+}> = ({ page, fontSize, color, highlightColor, backgroundColor, fontFamily, wordSeparator, style, safeZone, animateEntrance }) => {
   const frame = useCurrentFrame();
   const { fps, height } = useVideoConfig();
 
@@ -167,8 +211,16 @@ const PageRenderer: React.FC<{
     >
       <div
         style={{
-          opacity: entrance,
-          transform: `translateY(${interpolate(entrance, [0, 1], [20, 0])}px)`,
+          // Both keys are OMITTED under "none" rather than written as identity
+          // values: a bare transform still promotes the div to its own layer
+          // and shifts rasterization, which is the same reason the per-word
+          // transform is conditional below.
+          ...(animateEntrance
+            ? {
+                opacity: entrance,
+                transform: `translateY(${interpolate(entrance, [0, 1], [20, 0])}px)`,
+              }
+            : {}),
           backgroundColor,
           borderRadius: 12,
           padding: "14px 28px",
@@ -251,12 +303,23 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
   fontFamily = "Space Grotesk, Inter, system-ui, sans-serif",
   wordSeparator = " ",
   preset = "default",
+  animation,
   safeZone,
 }) => {
   const { fps } = useVideoConfig();
   const pages = buildPages(words, wordsPerPage);
-  const style = PRESETS[preset] ?? PRESETS.default;
-  const resolvedSafeZone = safeZone ?? style.safeZone;
+  const base = PRESETS[preset] ?? PRESETS.default;
+  const motion = resolveMotion(preset, animation);
+  const style: PresetStyle = {
+    ...base,
+    popScale: motion.popScale,
+    // Motion's floor, not typography's choice: {preset: "default",
+    // animation: "pop"} would otherwise put a 0.16 pop against a 0 gap and the
+    // words touch at the peak. A no-op for every shipped call, since reel_pop
+    // already carries 0.4.
+    wordGapRatio: Math.max(base.wordGapRatio, motion.minWordGapRatio),
+  };
+  const resolvedSafeZone = safeZone ?? base.safeZone;
 
   return (
     <AbsoluteFill>
@@ -280,6 +343,7 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
               wordSeparator={wordSeparator}
               style={style}
               safeZone={resolvedSafeZone}
+              animateEntrance={motion.entrance}
             />
           </Sequence>
         );

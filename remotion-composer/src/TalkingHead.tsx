@@ -7,6 +7,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import {
+  CaptionAnimation,
   CaptionOverlay,
   CaptionPreset,
   CaptionSafeZone,
@@ -324,6 +325,9 @@ export interface TalkingHeadProps {
   captionWordSeparator?: string;
   // Opt-in caption look; omit for the shipped one.
   captionPreset?: CaptionPreset;
+  // Caption motion, independent of the preset's typography. Omit to get
+  // whatever this preset has always rendered.
+  captionAnimation?: CaptionAnimation;
   // Proportional 9:16 safe zone; overrides whatever the preset sets.
   captionSafeZone?: CaptionSafeZone;
 }
@@ -340,6 +344,7 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
   captionFontFamily,
   captionWordSeparator,
   captionPreset = "default",
+  captionAnimation,
   captionSafeZone,
 }) => {
   const { fps } = useVideoConfig();
@@ -394,6 +399,7 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
         preset={captionPreset}
         {...(captionFontFamily ? { fontFamily: captionFontFamily } : {})}
         {...(captionWordSeparator !== undefined ? { wordSeparator: captionWordSeparator } : {})}
+        {...(captionAnimation ? { animation: captionAnimation } : {})}
         {...(captionSafeZone ? { safeZone: captionSafeZone } : {})}
       />
     </AbsoluteFill>

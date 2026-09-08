@@ -72,6 +72,13 @@ class RemotionCaptionBurn(BaseTool):
         "burn_ffmpeg_captions_fallback",
     ]
 
+    # Motion, separately from the typography and layout `preset` fuses into one
+    # value. Declared above input_schema so the enum below is spelled from it
+    # rather than restated — `PRESETS` and its schema enum are two literals that
+    # have never been able to diverge observably, and this one is not going to
+    # start that habit off.
+    ANIMATION_PRESETS = ("none", "fade", "pop")
+
     input_schema = {
         "type": "object",
         "required": ["input_path", "output_path"],
@@ -121,6 +128,21 @@ class RemotionCaptionBurn(BaseTool):
                     "Caption look. 'default' is the shipped one. 'reel_pop' is "
                     "the 9:16 short-form look: per-word scale pop, heavy stroke, "
                     "uppercase, no pill, and a proportional safe zone."
+                ),
+            },
+            "animation_preset": {
+                "type": "string",
+                "enum": list(ANIMATION_PRESETS),
+                "description": (
+                    "Caption MOTION, independently of the typography and layout "
+                    "'preset' fuses in with it. 'pop' is the per-word scale "
+                    "impulse plus the page entrance; 'fade' is the entrance "
+                    "alone; 'none' is neither. Deliberately has NO default: "
+                    "absent means 'whatever preset implies' and emits no prop, "
+                    "which is what keeps every existing render byte-identical. "
+                    "Pass it to override — {'preset': 'reel_pop', "
+                    "'animation_preset': 'none'} is reel_pop's type treatment "
+                    "holding still, which no preset value can express."
                 ),
             },
             "safe_zone": {
@@ -316,6 +338,7 @@ class RemotionCaptionBurn(BaseTool):
         highlight_color: str,
         overlays: list[dict] | None = None,
         preset: str = "default",
+        animation_preset: str | None = None,
         safe_zone: dict | None = None,
         fps: int = 30,
         run_id: str | None = None,
@@ -377,6 +400,11 @@ class RemotionCaptionBurn(BaseTool):
         }
         if preset != "default":
             props["captionPreset"] = preset
+        # Only an explicit request emits the key. An absent value must leave the
+        # props JSON byte-identical to what talking-head and avatar-spokesperson
+        # render today; TypeScript resolves it from the preset instead.
+        if animation_preset is not None:
+            props["captionAnimation"] = animation_preset
         if safe_zone:
             props["captionSafeZone"] = safe_zone
         props_dir = root / "public" / "demo-props"
@@ -565,6 +593,16 @@ class RemotionCaptionBurn(BaseTool):
         if preset not in cls.PRESETS:
             return f"Unknown preset {preset!r}. Expected one of {list(cls.PRESETS)}."
 
+        # None is legal and is not a member: it means "resolve from preset", and
+        # the resolution happens in TypeScript so the table exists once. Python
+        # never guesses what an absent value renders as.
+        animation_preset = inputs.get("animation_preset")
+        if animation_preset is not None and animation_preset not in cls.ANIMATION_PRESETS:
+            return (
+                f"Unknown animation_preset {animation_preset!r}. "
+                f"Expected one of {list(cls.ANIMATION_PRESETS)}."
+            )
+
         fps = inputs.get("fps", 30)
         if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
             return f"fps must be a positive integer, got {fps!r}."
@@ -618,6 +656,9 @@ class RemotionCaptionBurn(BaseTool):
         font_size = inputs.get("font_size", 52)
         highlight_color = inputs.get("highlight_color", "#22D3EE")
         preset = inputs.get("preset", "default")
+        # No default, deliberately (R3). None means "resolve from preset", and
+        # that resolution lives only in TypeScript.
+        animation_preset = inputs.get("animation_preset")
         safe_zone = inputs.get("safe_zone")
         fps = inputs.get("fps", 30)
         run_id = inputs.get("run_id")
@@ -657,10 +698,17 @@ class RemotionCaptionBurn(BaseTool):
                 input_path, output_path, captions,
                 words_per_page, font_size, highlight_color,
                 overlays=overlays,
-                preset=preset, safe_zone=safe_zone, fps=fps, run_id=run_id,
+                preset=preset, animation_preset=animation_preset,
+                safe_zone=safe_zone, fps=fps, run_id=run_id,
             )
+            # What rendered is what was asked for. When nothing was asked for,
+            # TypeScript resolved it from the preset and Python does not guess —
+            # the value stays None and no key is written.
+            rendered_animation = animation_preset
         else:
             result = self._render_ffmpeg(input_path, output_path, captions)
+            # A static SRT burn animates nothing, whatever was requested.
+            rendered_animation = "none" if animation_preset else None
             # The fallback burns static SRT: it cannot express the pop, the
             # safe zone, or a non-default fps. Saying so is the difference
             # between a downgrade and a silent lie — a caller that asked for
@@ -670,8 +718,23 @@ class RemotionCaptionBurn(BaseTool):
                     name
                     for name, value in (
                         ("preset", preset if preset and preset != "default" else None),
+                        # Guarded on the RAW input, not the resolved one: a caller
+                        # who asked for "none" and got "none" lost nothing, and a
+                        # caller who asked for nothing lost the preset's implied
+                        # motion — which "preset" above already reports. Resolving
+                        # first would fire this row on every fallback render.
+                        (
+                            "animation_preset",
+                            animation_preset
+                            if animation_preset and animation_preset != "none"
+                            else None,
+                        ),
                         ("safe_zone", safe_zone),
-                        ("fps", fps),
+                        # Mirrors the preset guard: a permanently-firing row makes
+                        # the rest of the list illegible. Honest limit — an explicit
+                        # 30 is indistinguishable from no request, and is told
+                        # nothing was dropped.
+                        ("fps", fps if fps != 30 else None),
                     )
                     if value
                 ]
@@ -683,8 +746,8 @@ class RemotionCaptionBurn(BaseTool):
                     result.data["note"] = (
                         "Used FFmpeg fallback: static SRT burn-in. "
                         f"Ignored {', '.join(dropped)} — the fallback cannot express "
-                        "per-word pop, a safe zone, or a custom fps. Install Remotion "
-                        "for animated captions."
+                        "per-word pop, motion, a safe zone, or a custom fps. Install "
+                        "Remotion for animated captions."
                     )
 
         # Report the ASR confidence that came through so a caption stage can
@@ -692,6 +755,10 @@ class RemotionCaptionBurn(BaseTool):
         # low mean here means the burn is printing guesses.
         if result.success and result.data is not None:
             result.data.update(self._confidence_stats(captions))
+            # Written here, not in _render_remotion: this is the one point both
+            # render paths converge, so the echo cannot drift between them.
+            if rendered_animation is not None:
+                result.data["animation_preset"] = rendered_animation
 
         result.duration_seconds = round(time.time() - start, 2)
         return result
