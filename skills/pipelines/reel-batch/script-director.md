@@ -273,7 +273,33 @@ and the hook lands mid-reel.
 4. `window_end = min(window_start + 10.0, bg.data["duration_seconds"])` (the analyser's own
    duration, `beat_grid.py:380`; `tx.data["duration_seconds"]` is the same number),
    pulled back to the last snap boundary so the final cut lands on the grid rather than
-   mid-hold.
+   mid-hold — **then extended to the end of the word the line finishes on, when that word
+   still ends inside the 10-second cap.** Only the LAST boundary moves; every other cut edge
+   stays on the grid, so the reel gains a slightly longer final hold rather than a cut that
+   drifts.
+
+   The pull-back alone discards up to a whole bar, and at `bar` policy a bar is 2.4-2.7s on
+   a 90-99 BPM track. Measured on the week-37 batch it cost 1.04s / 1.45s / 1.80s / 2.66s of
+   a 10-second budget across four reels, and — worse than the waste — it truncated the sung
+   line at the boundary: `reel_03` ended "I just say" with "I will" 0.30s outside the window,
+   `reel_01` ended "walls come" without "down". The operator hears that as the track being
+   cut early, because it is. The reel the same batch got right wasted 0.32s.
+
+   ```python
+   window_end = min(window_start + 10.0, bg.data["duration_seconds"])
+   grid_abs = [t for t in line if window_start <= t <= window_end]
+   window_end = grid_abs[-1]                       # on the grid, as before
+   tail = [w for w in words                        # the line the reel ends mid-way through
+           if w["start"] < window_end < w["end"] or
+              (window_end <= w["start"] < window_start + 10.0)]
+   for w in tail:                                  # extend only while the cap allows it
+       if w["end"] <= window_start + 10.0 and w["probability"] >= 0.6:
+           window_end = w["end"]
+   ```
+
+   Stop extending at the first word that would breach the cap or fail the confidence gate —
+   a reel that runs to 10.04s fails compose's own probe, and a sub-0.6 word is not caption
+   content (step 7). If nothing follows the boundary, the pulled-back value stands.
 5. Rebase the hook off `window_start` the way step 6 rebases the caption — the stored
    `hook` is reel-local, `{"text", "start_seconds", "end_seconds"}` — and require
    `hook["end_seconds"] <= snap_grid[2]`, both sides reel-local. Running past the first
