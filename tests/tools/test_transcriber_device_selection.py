@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -167,9 +168,23 @@ def test_vad_filter_defaults_on_but_can_be_turned_off(monkeypatch, tmp_path) -> 
     audio = tmp_path / "track.mp3"
     audio.write_bytes(b"fake")
 
-    Transcriber().execute({"input_path": str(audio), "output_dir": str(tmp_path)})
-    Transcriber().execute(
+    # Both calls share input_path, so both write tmp_path/track_transcript.json
+    # and the second overwrites the first. Read each transcript before the next
+    # execute() rather than both at the end.
+    transcript = tmp_path / "track_transcript.json"
+
+    on = Transcriber().execute({"input_path": str(audio), "output_dir": str(tmp_path)})
+    assert on.data["vad_filter"] is True
+    assert json.loads(transcript.read_text())["vad_filter"] is True
+
+    off = Transcriber().execute(
         {"input_path": str(audio), "output_dir": str(tmp_path), "vad_filter": False}
+    )
+    assert off.data["vad_filter"] is False
+    assert json.loads(transcript.read_text())["vad_filter"] is False, (
+        "the transcript on disk must record which VAD setting produced it — it is "
+        "an idempotency key field, and a thin transcript is otherwise "
+        "indistinguishable from a silent track"
     )
 
     assert seen == [True, False], (

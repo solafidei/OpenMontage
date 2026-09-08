@@ -255,6 +255,13 @@ class Transcriber(BaseTool):
             "language": detected_language,
             "duration_seconds": round(duration, 3),
             "model_size": model_size,
+            # Recorded because the tool keys its idempotency on it
+            # (idempotency_key_fields) while the transcript on disk said nothing
+            # about it: two transcripts of one track, one VAD-stripped to a
+            # handful of words and one whole, were indistinguishable after the
+            # fact. A caption stage reading a thin transcript could not tell a
+            # silent track from a VAD casualty.
+            "vad_filter": vad_filter,
             "device": device,
             "compute_type": compute_type,
             "gpu_fallback_reason": gpu_fallback_reason,
