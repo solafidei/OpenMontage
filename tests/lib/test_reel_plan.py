@@ -438,6 +438,16 @@ def test_the_motion_enum_is_spelled_the_same_in_the_schema_and_the_tool() -> Non
         RemotionCaptionBurn.input_schema["properties"]["animation_preset"]["enum"]
         == list(RemotionCaptionBurn.ANIMATION_PRESETS)
     )
+    # The third copy. Widening it lets compose record a motion the tool can never
+    # emit; narrowing it makes every held-still reel produce an invalid report.
+    # Both were green before this assertion existed.
+    render_report = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / "artifacts" / "render_report.schema.json").read_text()
+    )
+    assert (
+        render_report["properties"]["outputs"]["items"]["properties"]["caption_animation"]["enum"]
+        == list(RemotionCaptionBurn.ANIMATION_PRESETS)
+    )
 
 
 # --- what actually rendered ------------------------------------------------

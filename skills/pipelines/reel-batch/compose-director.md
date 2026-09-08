@@ -373,10 +373,15 @@ would report an untouched render as clean.
 `render_time_seconds` is the sitting's wall clock, so it sits a little above
 `picture_seconds + text_seconds` — the probe between the two planes lives in that gap.
 
-`outputs[]` items are `additionalProperties: false` and carry no `reel_id`, so **reel
-identity cannot live there** — it goes in `metadata.reels[]`. **That array is the
-authoritative reel↔output join publish-director uses**; the filename-stem heuristic is
-only a fallback for a report that lacks it, so every reel that rendered must appear here.
+`outputs[].reel_id` is the **typed** reel↔output join, and step 5 writes it. It exists so a
+gate can say "the outputs[] entry *for that reel*" and mean something checkable — G6's
+motion comparison has no left-hand side without it.
+
+**`metadata.reels[]` stays authoritative for the four fields publish-director reads**
+(`track_asset_id`, `hook`, `path`, caption copy); the filename-stem heuristic is only a
+fallback for a report that lacks it, so every reel that rendered must appear there too.
+The two are not rivals: `outputs[]` answers "what rendered, and how", `metadata.reels[]`
+answers "what publish needs to post it".
 
 Each entry carries `track_asset_id` — an **asset id**, resolvable through
 `asset_manifest.assets[].id` — not a free-text track name that publish cannot resolve to

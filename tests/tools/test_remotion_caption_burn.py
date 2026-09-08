@@ -24,6 +24,7 @@ runner in this repo.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -799,14 +800,10 @@ def test_the_remotion_path_echoes_only_what_it_was_asked_for(tmp_path, monkeypat
     assert "animation_preset" not in run(preset="reel_pop").data
 
 
-def _resolve_motion(*cases: tuple[str, str]) -> list:
-    """Run the REAL resolveMotion from CaptionOverlay.tsx, in node.
-
-    Source-string assertions cannot police this one. The identity it asserts —
-    that an absent animation resolves to exactly what each preset has always
-    rendered — is the whole basis of the byte-identity promise, and this is the
-    ONLY copy of that table anywhere (Python deliberately holds none).
-    """
+def _caption_js() -> str:
+    """The real motion table, resolver and composition from CaptionOverlay.tsx,
+    with the TypeScript annotations stripped — the idiom the pop-pulse harness
+    already uses. One copy, because two strippers drift."""
     source = _read("components/CaptionOverlay.tsx")
 
     def _slice(start_marker: str, end_marker: str) -> str:
@@ -817,26 +814,53 @@ def _resolve_motion(*cases: tuple[str, str]) -> list:
         _slice("const PRESETS", "// The shipped absolute offset")
         + _slice("const MOTIONS", "interface PresetStyle")
     )
-    # The harness strips the type annotations, exactly as the pop-pulse one does.
-    js = js.replace("export ", "").replace(": Record<CaptionPreset, PresetStyle>", "")
-    js = js.replace(": Record<CaptionAnimation, MotionStyle>", "")
-    js = js.replace(": Record<CaptionPreset, CaptionAnimation>", "")
+    js = js.replace("export ", "")
+    js = re.sub(r":\s*Record<[^>]+>", "", js)
+    # Both function signatures, single- and multi-line.
     js = js.replace("(preset: string, animation?: string): MotionStyle", "(preset, animation)")
-    js = js.replace("  const presetKey: CaptionPreset =", "  const presetKey =")
-    js = js.replace(" as CaptionPreset", "").replace(" as CaptionAnimation", "")
-
-    script = (
-        js
-        + "\nconsole.log(JSON.stringify(["
-        + ",".join(f"resolveMotion({p}, {a})" for p, a in cases)
-        + "]));"
+    js = re.sub(
+        r"\(\s*preset: string,\s*animation\?: string,\s*safeZone\?: CaptionSafeZone,\s*\)"
+        r"\s*:\s*\{[^}]*\}",
+        "(preset, animation, safeZone)",
+        js,
     )
+    js = js.replace("  const presetKey: CaptionPreset =", "  const presetKey =")
+    js = re.sub(r"\s+as CaptionPreset", "", js)
+    js = re.sub(r"\s+as CaptionAnimation", "", js)
+    js = js.replace("const style: PresetStyle = {", "const style = {")
+    return js
+
+
+def _eval_js(fn: str, cases) -> list:
+    calls = ",".join(f"{fn}({', '.join(c)})" for c in cases)
+    script = _caption_js() + f"\nconsole.log(JSON.stringify([{calls}]));"
     out = subprocess.run(
         ["node", "--input-type=module", "-e", script],
         capture_output=True, text=True, timeout=60,
     )
-    assert out.returncode == 0, out.stderr
+    assert out.returncode == 0, f"{out.stderr}\n---SCRIPT---\n{script}"
     return json.loads(out.stdout)
+
+
+def _resolve_motion(*cases) -> list:
+    """Run the REAL resolveMotion from CaptionOverlay.tsx, in node.
+
+    Pins the lookup table: an absent animation must resolve to exactly what each
+    preset has always rendered. This is the ONLY copy of that table anywhere —
+    Python deliberately holds none.
+    """
+    return _eval_js("resolveMotion", cases)
+
+
+def _resolve_style(*cases) -> list:
+    """Run the REAL composition — resolveCaptionStyle — in node.
+
+    `_resolve_motion` only proves the table is right. Resolving motion correctly
+    and then failing to APPLY it is a defect no table test can see: `popScale:
+    base.popScale`, `animateEntrance={true}`, a dead `animation` argument and a
+    dropped `Math.max` each left the entire suite green.
+    """
+    return _eval_js("resolveCaptionStyle", cases)
 
 
 def test_an_absent_animation_renders_what_the_preset_always_rendered():
@@ -926,3 +950,62 @@ def test_the_fallback_keeps_what_was_asked_for_alongside_what_rendered(tmp_path,
 
     assert result.data["animation_preset"] == "none"
     assert result.data["requested_animation_preset"] == "pop"
+
+
+def test_the_resolved_motion_actually_reaches_the_style():
+    """`popScale: base.popScale` left 62 renderer tests green while inverting
+    the feature in both directions. This is the assertion that catches it."""
+    pop_on_default, none_on_pop = _resolve_style(
+        ('"default"', '"pop"'), ('"reel_pop"', '"none"')
+    )
+
+    # Motion asked for, typography that never carried it.
+    assert pop_on_default["style"]["popScale"] == 0.16
+    assert pop_on_default["style"]["uppercase"] is False, "typography must not follow motion"
+    # The combination decision #12 says the feature exists for.
+    assert none_on_pop["style"]["popScale"] == 0
+    assert none_on_pop["style"]["uppercase"] is True, "motion must not disturb typography"
+    assert none_on_pop["style"]["strokeRatio"] == 0.14
+
+
+def test_the_entrance_flag_is_resolved_not_constant():
+    """`animateEntrance={true}` passed the whole 2438-test suite."""
+    none_on_pop, absent_on_pop, none_on_default = _resolve_style(
+        ('"reel_pop"', '"none"'), ('"reel_pop"', "undefined"), ('"default"', '"none"')
+    )
+
+    assert none_on_pop["animateEntrance"] is False
+    assert none_on_default["animateEntrance"] is False
+    assert absent_on_pop["animateEntrance"] is True
+
+
+def test_the_word_gap_floor_survives_into_the_composed_style():
+    """The floor is the sole engineering justification for keeping motion
+    additive, and dropping the Math.max left 1611 tests green."""
+    pop_on_default, none_on_pop, absent_on_default = _resolve_style(
+        ('"default"', '"pop"'), ('"reel_pop"', '"none"'), ('"default"', "undefined")
+    )
+
+    # Newly reachable, never rendered before: a 0.16 pop needs the gap.
+    assert pop_on_default["style"]["wordGapRatio"] == 0.4
+    # A Math.min typo would drop reel_pop's own typographic 0.4 to 0 here.
+    assert none_on_pop["style"]["wordGapRatio"] == 0.4
+    # And the floor must not invent a gap where neither side asked for one.
+    assert absent_on_default["style"]["wordGapRatio"] == 0
+
+
+def test_an_explicit_safe_zone_still_outranks_the_presets():
+    """The composition took over safeZone resolution; it must not have changed."""
+    (explicit,) = _resolve_style(('"default"', "undefined", '{bottom: 0.2}'))
+
+    assert explicit["safeZone"] == {"bottom": 0.2}
+
+
+def test_the_component_passes_the_resolved_values_rather_than_literals():
+    """Catches the constant that the composition harness cannot see: the
+    function can be correct and the component still ignore it."""
+    source = _read("components/CaptionOverlay.tsx")
+
+    assert "resolveCaptionStyle(preset, animation, safeZone)" in source
+    assert "animateEntrance={animateEntrance}" in source
+    assert "animateEntrance={true}" not in source

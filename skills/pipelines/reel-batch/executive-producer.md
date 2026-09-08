@@ -248,9 +248,10 @@ G6 — after COMPOSE
     tools/video/remotion_caption_burn.py:150)?
   - No render_report.outputs[] entry carries caption_degraded: true? A degraded reel is a
     static SRT burn standing in for a motion-led render — it is a failed reel, not a note.
-  - For every reel whose reel_plan entry declares animation_preset AND whose caption_source
-    is not absent-by-refusal, the outputs[] entry for that reel carries the same
-    caption_animation? A mismatch means the motion changed between approval and render.
+  - Each outputs[] entry's caption_animation matches that reel's reel_plan.animation_preset
+    — or caption_degraded is true and a warnings line names the fallback? Join on
+    outputs[].reel_id. A mismatch means the motion changed between approval and render,
+    which is the whole reason it is recorded.
   - cost_log: every entry terminal (completed/failed/refunded), totals matching real spend?
 
 G7 — after PUBLISH

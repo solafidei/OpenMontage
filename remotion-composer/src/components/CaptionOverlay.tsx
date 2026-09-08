@@ -77,6 +77,33 @@ export function resolveMotion(preset: string, animation?: string): MotionStyle {
   return MOTIONS[animation as CaptionAnimation] ?? MOTIONS[PRESET_MOTION[presetKey]];
 }
 
+/**
+ * The whole caption look, composed: typography and layout from the preset,
+ * motion from the animation, and the one place they interact.
+ *
+ * Extracted from the component body so it can be EXECUTED in a test rather than
+ * asserted about in a source string. Resolving these values correctly and then
+ * failing to apply them is a defect no `resolveMotion` test can see.
+ */
+export function resolveCaptionStyle(
+  preset: string,
+  animation?: string,
+  safeZone?: CaptionSafeZone,
+): { style: PresetStyle; animateEntrance: boolean; safeZone: CaptionSafeZone | null } {
+  const base = PRESETS[preset as CaptionPreset] ?? PRESETS.default;
+  const motion = resolveMotion(preset, animation);
+  const style: PresetStyle = {
+    ...base,
+    popScale: motion.popScale,
+    // Motion's floor, not typography's choice: {preset: "default",
+    // animation: "pop"} would otherwise put a 0.16 pop against a 0 gap and the
+    // words touch at the peak. A no-op for every shipped call, since reel_pop
+    // already carries 0.4.
+    wordGapRatio: Math.max(base.wordGapRatio, motion.minWordGapRatio),
+  };
+  return { style, animateEntrance: motion.entrance, safeZone: safeZone ?? base.safeZone };
+}
+
 interface PresetStyle {
   popScale: number;        // extra scale applied to the active word
   strokeRatio: number;     // text stroke width as a fraction of fontSize
@@ -308,18 +335,11 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
 }) => {
   const { fps } = useVideoConfig();
   const pages = buildPages(words, wordsPerPage);
-  const base = PRESETS[preset] ?? PRESETS.default;
-  const motion = resolveMotion(preset, animation);
-  const style: PresetStyle = {
-    ...base,
-    popScale: motion.popScale,
-    // Motion's floor, not typography's choice: {preset: "default",
-    // animation: "pop"} would otherwise put a 0.16 pop against a 0 gap and the
-    // words touch at the peak. A no-op for every shipped call, since reel_pop
-    // already carries 0.4.
-    wordGapRatio: Math.max(base.wordGapRatio, motion.minWordGapRatio),
-  };
-  const resolvedSafeZone = safeZone ?? base.safeZone;
+  const {
+    style,
+    animateEntrance,
+    safeZone: resolvedSafeZone,
+  } = resolveCaptionStyle(preset, animation, safeZone);
 
   return (
     <AbsoluteFill>
@@ -343,7 +363,7 @@ export const CaptionOverlay: React.FC<CaptionOverlayProps> = ({
               wordSeparator={wordSeparator}
               style={style}
               safeZone={resolvedSafeZone}
-              animateEntrance={motion.entrance}
+              animateEntrance={animateEntrance}
             />
           </Sequence>
         );

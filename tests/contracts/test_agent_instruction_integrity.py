@@ -1254,6 +1254,31 @@ def test_reel_batch_compose_still_reads_the_per_reel_motion() -> None:
         )
 
 
+def test_reel_batch_compose_still_records_what_it_rendered() -> None:
+    """There is no Python builder for `render_report.outputs[]` anywhere in the
+    repo — compose-director's fence is the only author of every field in it.
+
+    So deleting the three caption keys from that fence is a silent no-op: every
+    report stays schema-valid (all three are optional), publish still works, and
+    both new G6 bullets become permanently vacuous. Verified: stripping them left
+    1544 tests green before this assertion existed.
+    """
+    compose = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "compose-director.md"
+    text = compose.read_text(encoding="utf-8")
+
+    for key in ("reel_id", "caption_animation", "caption_degraded"):
+        assert f'entry_out["{key}"]' in text, (
+            f"compose-director no longer writes {key} into render_report.outputs[]"
+        )
+        assert f'"{key}"' in text, f"the outputs[] JSON sample dropped {key}"
+
+    # The prose promises a direct subscript; `.get(..., False)` would report an
+    # untouched render as clean.
+    assert 'burn.data["degraded"]' in text, (
+        "compose-director no longer reads degraded as a direct subscript"
+    )
+
+
 def test_reel_batch_edit_still_authors_both_caption_axes() -> None:
     """G5 requires both on every entry; the schema makes both optional."""
     edit = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "edit-director.md"
