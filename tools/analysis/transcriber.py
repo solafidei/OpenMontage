@@ -78,6 +78,10 @@ class Transcriber(BaseTool):
         },
     }
 
+    # Declares every key `execute` actually returns. The four transcript keys
+    # were declared and the five run-record ones were not, so the contract
+    # understated the tool by more than it stated — and `vad_filter`, which the
+    # caption stage is meant to assert against, was among the undeclared.
     output_schema = {
         "type": "object",
         "properties": {
@@ -85,6 +89,13 @@ class Transcriber(BaseTool):
             "word_timestamps": {"type": "array"},
             "language": {"type": "string"},
             "duration_seconds": {"type": "number"},
+            # How the transcript was produced. Written to the transcript file
+            # too, so a reader holding only the JSON can reproduce the run.
+            "model_size": {"type": "string"},
+            "vad_filter": {"type": "boolean"},
+            "device": {"type": "string"},
+            "compute_type": {"type": "string"},
+            "gpu_fallback_reason": {"type": ["string", "null"]},
         },
     }
 

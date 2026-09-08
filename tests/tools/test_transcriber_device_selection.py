@@ -191,3 +191,44 @@ def test_vad_filter_defaults_on_but_can_be_turned_off(monkeypatch, tmp_path) -> 
         f"vad_filter reached faster-whisper as {seen}; it must default True and "
         "be switchable off for sung vocals"
     )
+
+
+def test_output_schema_declares_every_key_execute_returns(monkeypatch, tmp_path) -> None:
+    """A contract that understates its tool is a contract a reader cannot use.
+
+    `vad_filter` is the key a caption stage asserts against, and it was one of
+    five the tool returned without declaring.
+    """
+
+    class FakeWhisperModel:
+        def __init__(self, model_size, *, device, compute_type):
+            pass
+
+        def transcribe(self, *args, **kwargs):
+            return iter(()), _Info()
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "ctranslate2",
+        SimpleNamespace(
+            get_cuda_device_count=lambda: 0,
+            get_supported_compute_types=lambda device: {"int8"},
+        ),
+    )
+    audio = tmp_path / "track.mp3"
+    audio.write_bytes(b"fake")
+
+    result = Transcriber().execute(
+        {"input_path": str(audio), "output_dir": str(tmp_path)}
+    )
+    declared = set(Transcriber.output_schema["properties"])
+
+    assert set(result.data) == declared, (
+        f"returned but undeclared: {sorted(set(result.data) - declared)}; "
+        f"declared but not returned: {sorted(declared - set(result.data))}"
+    )
+    # The written transcript is the same dict, so the file matches the contract.
+    assert set(json.loads((tmp_path / "track_transcript.json").read_text())) == declared
