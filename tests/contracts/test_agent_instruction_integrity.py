@@ -1265,3 +1265,18 @@ def test_reel_batch_edit_still_authors_both_caption_axes() -> None:
     assert '"animation_preset":' in text, (
         "edit-director no longer authors animation_preset on the reel_plan entry"
     )
+
+
+def test_reel_batch_script_declares_the_caption_source_edit_subscripts() -> None:
+    """`edit-director` carries caption_source by DIRECT subscript, so if the
+    script stage stops declaring it the batch dies at `edit` with a bare
+    KeyError. The two directors are separate files with no compiler between
+    them; this test is the join."""
+    script = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "script-director.md"
+    edit = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "edit-director.md"
+
+    assert '"caption_source": "music_bed"' in script.read_text(encoding="utf-8"), (
+        "script-director no longer declares caption_source on its reel metadata, "
+        "which edit-director subscripts directly"
+    )
+    assert 'sr["caption_source"]' in edit.read_text(encoding="utf-8")

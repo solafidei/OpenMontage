@@ -195,6 +195,15 @@ G1 — after IDEA
 
 G2 — after SCRIPT
   - One beat grid AND one word-level transcript per track?
+  - Every reel declares `caption_source`, and it is `"music_bed"`? It is the only member
+    this pipeline can produce; anything else fails the reel_plan schema one stage later.
+  - Each track's transcript on disk records `vad_filter: false`, matching what a
+    `music_bed` declaration means? Read it from the file at
+    `script.metadata.tracks[].transcript_path`. A `music_bed` reel whose track was
+    transcribed with the VAD ON is a contradiction — the VAD scores sung vocals as
+    non-speech, so the captions are a fraction of the words the track actually sings.
+    A transcript written before this key existed has no `vad_filter` at all: that is
+    UNVERIFIABLE, not a mismatch, and it does not fail the gate. No backfill is proposed.
   - Speech contamination measured per track (tools/analysis/beat_grid.py:449) — not assumed?
     A grid whose beats are mostly speech is not a grid to cut on.
   - Each reel's spoken line self-contained at <= 10s? `hook["end_seconds"] <= snap_grid[2]`?

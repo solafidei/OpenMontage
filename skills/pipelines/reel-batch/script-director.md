@@ -24,7 +24,7 @@ the words are and when they happen. `edit` owns the caption *style*, `compose` o
 | Reference | `skills/meta/checkpoint-protocol.md` | Checkpointing and cost-ledger rules |
 
 Neither required tool spends — `BeatGrid.estimate_cost` returns `0.0`
-(`tools/analysis/beat_grid.py:232-233`) and `transcriber` runs local faster-whisper
+(`tools/analysis/beat_grid.py:262-263`) and `transcriber` runs local faster-whisper
 (`tools/analysis/transcriber.py:39`). **This stage books nothing;** the ledger opened by the
 cost gate in `idea-director.md` is read only for the checkpoint snapshot.
 
@@ -70,7 +70,7 @@ chooses fewer. Never quietly cut two reels from one track.
 ### 1. Transcribe Each Track First
 
 Order matters and is not negotiable: `beat_grid` only produces its speech report when word
-timestamps are handed to it (`tools/analysis/beat_grid.py:320` — `if words else None`).
+timestamps are handed to it (`tools/analysis/beat_grid.py:355` — `if words else None`).
 Transcribe first, grid second.
 
 ```python
@@ -87,19 +87,23 @@ tx = Transcriber().execute({
     "output_dir": work,
 })
 assert tx.success, tx.error
-transcript_path = tx.artifacts[0]        # <stem>_transcript.json (transcriber.py:264, :270)
+transcript_path = tx.artifacts[0]        # <stem>_transcript.json (transcriber.py:282, :285)
 ```
 
-What comes back (`transcriber.py:252-261`): `segments`, `word_timestamps`, `language`,
-`duration_seconds`, plus `model_size` / `device` / `compute_type` / `gpu_fallback_reason`.
+What comes back (`transcriber.py:263-280`): `segments`, `word_timestamps`, `language`,
+`duration_seconds`, plus `model_size` / `vad_filter` / `device` / `compute_type` /
+`gpu_fallback_reason`. All nine are declared on `output_schema` (`:81-99`) and a parity test
+holds the two together. **`vad_filter` is the one G2 reads back** — it is what makes a reel's
+`caption_source: "music_bed"` declaration checkable against how the track was actually
+transcribed, and it is written into the transcript file itself, not just the return value.
 Every word entry is `{"word", "start", "end", "probability"}`, probability rounded to three
 places (`:216-221`) — exactly the shape `remotion_caption_burn` consumes at `compose`
 (`tools/video/remotion_caption_burn.py:222-245`). **Do not reshape it.**
 
-`word_timestamps=True` is the only kwarg this tool forces (`transcriber.py:197`).
-`vad_filter` is an ordinary input — default `True` (`transcriber.py:65-67`), read at `:137`,
-handed straight to `model.transcribe` at `:198`. **Reel-batch passes `False`, always.** The
-schema says why in its own description (`:68-74`): the VAD scores sung vocals under a music
+`word_timestamps=True` is the only kwarg this tool forces (`transcriber.py:208`).
+`vad_filter` is an ordinary input — default `True` (`transcriber.py:65-68`), read at `:148`,
+handed straight to `model.transcribe` at `:209`. **Reel-batch passes `False`, always.** The
+schema says why in its own description (`:68-73`): the VAD scores sung vocals under a music
 bed as non-speech and discards nearly all of them, and in this pipeline the captions *are*
 the track's words. Measured on two operator tracks: `"small"` with the VAD on returned 10
 and 11 words; `"medium"` with `vad_filter: False` returned 282 and 319 on the same audio.
@@ -409,6 +413,7 @@ to snap cuts without re-analysing alongside it.
                   "start_seconds": 0.06, "end_seconds": 2.31 },
         "caption": { "segments": [{ "start": 0.0, "end": 9.8, "text": "...", "words": [] }] },
         "caption_confidence": { "min": 0.71, "mean": 0.89, "low_confidence_words": 0 },
+        "caption_source": "music_bed",
         "corrections": {} }
     ]
   }
@@ -429,12 +434,28 @@ to snap cuts without re-analysing alongside it.
   downstream as `beat_seconds`.
 - `caption.segments` is in the transcriber segment shape, ready for the burn's `segments`
   input.
+- `caption_source` declares which audio these words came from. Write `"music_bed"` on every
+  reel — it is the only member the schema accepts, and the only thing this pipeline can
+  produce. Do not omit it on the grounds that it never varies: `edit` carries it onto the
+  `reel_plan` entry by direct subscript, absence there reads as *undeclared* rather than as
+  `music_bed`, and G5 checks for it. What the declaration is *for* is the pairing G2 can then
+  assert — a reel declaring `music_bed` whose track was transcribed with `vad_filter: True`
+  is a contradiction, because a VAD scores sung vocals as non-speech and throws them away.
+  It does **not** prevent that; it makes it nameable after the fact.
+  The other four candidates are refused for want of a producer and would fail validation:
+  `speech_stem` (no stem separation exists in this repo), `video_sound` (the pool is never
+  transcribed — `footage_library.py:323` passes `transcribe: False`, and `transcriber` is
+  granted to this stage, which never sees the pool), `voice_over` (every track is music), and
+  `none` (a captionless reel has no hook copy either, since `hook` is required on every
+  `reel_plan` entry and its text is rebased off these words).
 - This stage claims nothing against `lib/clip_ledger.py` — `claim()` (`:138`) belongs to
   `scene_plan`. Track windows are kept disjoint here by arithmetic and recorded above.
 
 ### 9. Quality Gate
 
 - One `audiomap_path` and one `transcript_path` per track, both files on disk.
+- Every reel carries `caption_source: "music_bed"`. A reel without it stops here rather than
+  at `edit`, where the carry raises a `KeyError` with no useful message.
 - `contamination` present for **every** track, with real numbers from `bg.data["speech"]` —
   a missing block means the transcript never reached `beat_grid` and the report was skipped.
 - Every `window` is `<= 10.0` seconds and its `snap_grid` carries at least
@@ -454,7 +475,7 @@ to snap cuts without re-analysing alongside it.
 ## Common Pitfalls
 
 - **Grid before transcript.** `beat_grid` returns `speech: None` with no words to check
-  against (`beat_grid.py:320`) — a grid and no verdict, and the verdict is the point.
+  against (`beat_grid.py:355`) — a grid and no verdict, and the verdict is the point.
 - **Reading `speech: None` as "the track is clean."** It means *no verdict was reached*,
   which is a different thing, and there are two ways to get there. Check
   `bg.data["speech_warning"]`: it is `None` when no transcript was supplied, and a
