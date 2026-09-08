@@ -219,9 +219,14 @@ G5 — after EDIT
   - edit_decisions carries ONE flat cuts[] covering every reel, ids <reel_id>-prefixed?
   - reel_plan has exactly one entry per reel, and every cut id appears in exactly one of them?
   - Every reel_plan entry carries reel_id, track_id, music_asset_id, subtitle_source,
-    subtitle_srt_source, hook (a string), cut_ids[], corrections, caption_confidence —
+    subtitle_srt_source, audio_offset_seconds, hook (a string), cut_ids[], corrections,
+    caption_confidence, caption_source, animation_preset —
     with music_asset_id / subtitle_source / subtitle_srt_source being asset_manifest
     asset ids, NOT paths? The schema types the shape; only this bullet checks the ids resolve.
+    caption_source and animation_preset are optional in the schema and REQUIRED here:
+    absence is not equivalence. A missing caption_source reads as "undeclared", never as
+    music_bed, and a missing animation_preset silently hands the motion decision back to
+    the batch's caption preset — which is the axis this pipeline just made per-reel.
   - Per-reel axes are in reel_plan, NOT smuggled into edit_decisions.metadata?
   - `edit_decisions.batch_look` (spine root) survives `look_filters(look, "operator_footage")`
     — a `face_enhance` preset in the `grade` slot, no `grain` key, no `color_grade` profile
@@ -231,7 +236,12 @@ G6 — after COMPOSE
   - One render_report.outputs[] entry per reel, each carrying platform_target?
   - Every file ffprobes at 1080x1920 with an audio stream?
   - Captions clear the lower UI band (remotion_caption_burn safe_zone,
-    tools/video/remotion_caption_burn.py:125)?
+    tools/video/remotion_caption_burn.py:150)?
+  - No render_report.outputs[] entry carries caption_degraded: true? A degraded reel is a
+    static SRT burn standing in for a motion-led render — it is a failed reel, not a note.
+  - For every reel whose reel_plan entry declares animation_preset AND whose caption_source
+    is not absent-by-refusal, the outputs[] entry for that reel carries the same
+    caption_animation? A mismatch means the motion changed between approval and render.
   - cost_log: every entry terminal (completed/failed/refunded), totals matching real spend?
 
 G7 — after PUBLISH

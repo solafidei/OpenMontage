@@ -244,6 +244,12 @@ burn_inputs = {
 }
 if entry.get("corrections"):
     burn_inputs["corrections"] = entry["corrections"]   # {wrong: right}, carried from script
+if entry.get("animation_preset"):
+    # Per-reel motion. Read by direct subscript in the same idiom as corrections:
+    # an absent value is NOT "pop" and must not be defaulted here — omitting the
+    # input is how the caller says "let the preset decide", and the resolution
+    # lives in TypeScript so it exists exactly once.
+    burn_inputs["animation_preset"] = entry["animation_preset"]
 
 burn = RemotionCaptionBurn().execute(burn_inputs)
 ```
@@ -257,6 +263,10 @@ burn = RemotionCaptionBurn().execute(burn_inputs)
 - **Never re-type `safe_zone` as a literal.** `sides` is `0.08` in the authored style; a
   hand-typed `0.06` here silently ships captions 2% of frame width wider than the batch
   agreed. Read `spine["metadata"]["caption_style"]`, whole.
+- **`animation_preset` is passed through, never derived.** `entry.get(...)` and omit when
+  absent; do not write `entry.get("animation_preset", "pop")`. `reel_pop` already implies
+  the pop, resolved in `CaptionOverlay.tsx`'s `PRESET_MOTION`, and a Python-side default
+  would put that table in two languages with nothing pinning them equal.
 - `corrections` only goes in when non-empty — the script stage's `{wrong: right}` map is
   the last chance to fix a misrecognised word before it is burned into pixels
   (`tools/video/remotion_caption_burn.py:148-155`).
@@ -312,7 +322,24 @@ live claims to the pool (`lib/clip_ledger.py:204-210`). Otherwise leave it alone
 ### 5. Assemble The Render Report
 
 One `outputs[]` entry per reel, each with `platform_target`, every field probed from
-the file rather than copied from the plan:
+the file rather than copied from the plan — with one named exception:
+
+**`caption_animation` and `caption_degraded` come from the burn's own result, not from
+a probe and not from the plan.** Motion is burned into pixels and leaves no container
+trace, so it is the one output fact `ffprobe` cannot recover. Reporting what the plan
+*asked for* would defeat the G6 bullet that exists to catch the two disagreeing:
+
+```python
+entry_out["caption_degraded"] = burn.data["degraded"]     # both paths write it
+if burn.data.get("animation_preset"):                     # absent = the preset decided
+    entry_out["caption_animation"] = burn.data["animation_preset"]
+entry_out["reel_id"] = entry["reel_id"]                   # types the join G6 needs
+```
+
+`burn.data["degraded"]` is a direct subscript on purpose: the tool writes the key on
+both render paths, so a `KeyError` here means the tool regressed, and `.get(..., False)`
+would report an untouched render as clean.
+
 
 ```json
 {
@@ -321,7 +348,8 @@ the file rather than copied from the plan:
     { "path": "projects/<id>/renders/reel_01.mp4", "format": "mp4", "codec": "h264",
       "audio_codec": "aac", "resolution": "1080x1920", "fps": 30,
       "duration_seconds": 9.8, "file_size_bytes": 4812344,
-      "platform_target": "instagram_reels" }
+      "platform_target": "instagram_reels", "reel_id": "reel_01",
+      "caption_animation": "pop", "caption_degraded": false }
   ],
   "render_time_seconds": 117.0,
   "warnings": ["caption pass re-encodes the master once at crf 18"],
@@ -392,6 +420,9 @@ video file, and `runtime_swap_detected` is false; fail it the moment any of thos
 
 ### 7. Quality Gate
 
+- Every `outputs[]` entry carries `caption_degraded`, and `caption_animation` wherever
+  the reel's plan entry declared `animation_preset`; both read off the burn result rather
+  than the plan.
 - One `outputs[]` entry per planned reel, each with `platform_target`; every output
   exists and passes ffprobe at 1080x1920 with an audio stream.
 - Every reel carries its own track and its own hook — nothing pasted across the batch.

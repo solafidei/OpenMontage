@@ -860,6 +860,13 @@ def test_an_unvalidated_preset_still_renders_rather_than_throwing():
     assert unknown == {"entrance": True, "popScale": 0, "minWordGapRatio": 0}
 
 
+def test_reel_pop_can_be_asked_for_the_plain_entrance():
+    """The fourth resolution case: reel_pop typography, fade motion."""
+    (fade_on_pop,) = _resolve_motion(('"reel_pop"', '"fade"'))
+
+    assert fade_on_pop == {"entrance": True, "popScale": 0, "minWordGapRatio": 0}
+
+
 def test_none_turns_off_both_the_entrance_and_the_pop():
     (none_on_pop,) = _resolve_motion(('"reel_pop"', '"none"'))
 

@@ -41,8 +41,9 @@ way to write that into one music object. So:
   `CANONICAL_STAGE_ARTIFACTS["edit"]` (`lib/checkpoint.py:31-41`,
   `"edit": "edit_decisions"` at `:38`) and keeps the validated cut schema.
 - **`reel_plan` = the per-reel axes.** `reel_id`, `track_id`,
-  `music_asset_id`, `subtitle_source`, `subtitle_srt_source`, `hook`,
-  `cut_ids[]`, `corrections`, `caption_confidence`.
+  `music_asset_id`, `subtitle_source`, `subtitle_srt_source`,
+  `audio_offset_seconds`, `hook`, `cut_ids[]`, `corrections`,
+  `caption_confidence`, `caption_source`, `animation_preset`.
 
 `compose-director` rebuilds each reel's own `edit_decisions` **in memory** by
 filtering `cuts[]` on the reel prefix and merging that reel's `reel_plan`
@@ -322,6 +323,11 @@ spine["metadata"]["caption_style"] = {   # what the typed block cannot express
 back off `edit_decisions.metadata.caption_style.safe_zone` and passes it to the
 burn rather than re-typing the literal.
 
+`caption_style` is the batch's TYPOGRAPHY and LAYOUT. Motion is no longer part
+of it: `preset` still carries `reel_pop`'s stroke, uppercase and safe zone, and
+each reel's `animation_preset` decides its motion independently. Do not add a
+motion key here — a per-sitting motion would silently outrank the per-reel one.
+
 `remotion_caption_burn` accepts `preset` from `["default", "reel_pop"]`
 (`tools/video/remotion_caption_burn.py:115-124`, `PRESETS` at `:507`).
 `reel_pop` is the 9:16 short-form look: per-word scale pop, heavy stroke,
@@ -369,6 +375,14 @@ for reel in scene_meta["reels"]:
         "cut_ids": idx["cut_ids"],                            # reel order
         "corrections": sr.get("corrections", {}),
         "caption_confidence": sr["caption_confidence"],
+        # Which audio these captions came from. One member exists, and writing
+        # it is still not ceremony: absence reads as "undeclared", so the value
+        # is what lets G5 tell a declared reel from a forgotten one.
+        "caption_source": sr["caption_source"],
+        # This reel's motion. Author it on EVERY entry even when the whole batch
+        # takes one value — absence hands the decision back to caption_style's
+        # preset, which is the coupling this axis exists to undo.
+        "animation_preset": "pop",
     })
 ```
 
@@ -387,6 +401,15 @@ order later, from its own strength ranking.
   caption copy.
 - `cut_ids` are in reel order and, across the batch, partition
   `edit_decisions.cuts[]` exactly (asserted in step 7).
+- `caption_source` is carried from `script["metadata"]["reels"][i]`, where the
+  script stage declared which audio it transcribed. `edit` does not choose it and
+  must not invent it: a reel whose script did not declare one is a script defect,
+  and substituting `"music_bed"` here would launder it.
+- `animation_preset` is chosen HERE, because motion is caption style and `edit`
+  owns style. It is per-reel by design — the one-look rule binds `grade` and
+  `sharpen` on the picture plane and says nothing about the text plane — but a
+  batch that varies it should do so for a reason it can state at G5, not for
+  variety's own sake.
 - `corrections` (`{wrong: right}`) and `caption_confidence` are carried from
   `script["metadata"]["reels"][i]` so compose can pass corrections to the burn
   and re-report confidence without opening an artifact its stage never
@@ -437,7 +460,8 @@ claimed the segments — this is the last stage that can fix a collision cheaply
 - `reel_plan` has one entry per reel and its `cut_ids` partition `cuts[]`;
   `music_asset_id`, `subtitle_source` and `subtitle_srt_source` all resolve in
   `asset_manifest.assets[].id`; `hook` is a string; `corrections` and
-  `caption_confidence` are present.
+  `caption_confidence` are present; `caption_source` and `animation_preset` are
+  on every entry, not just the ones that differ.
 
 ### 9. Checkpoint
 

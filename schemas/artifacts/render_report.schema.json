@@ -21,7 +21,20 @@
           "fps": { "type": "number" },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "file_size_bytes": { "type": "integer" },
-          "platform_target": { "type": "string" }
+          "platform_target": { "type": "string" },
+          "reel_id": {
+            "type": "string",
+            "description": "Which reel produced this output, for pipelines that render more than one per run. Without it 'this output's plan entry' has no typed referent — both joins that exist today go through metadata, which is untyped. Absent for every single-output pipeline, which is what optional means."
+          },
+          "caption_animation": {
+            "type": "string",
+            "enum": ["none", "fade", "pop"],
+            "description": "The caption motion that actually rendered, as reported by the burn tool rather than copied from the plan. This is the one class of output fact ffprobe cannot recover: motion is burned into pixels with no container trace, so it is the documented exception to composing every output field from a probe."
+          },
+          "caption_degraded": {
+            "type": "boolean",
+            "description": "True when the caption pass fell back to a static SRT burn. Separates a downgrade from a defect; a warnings[] string cannot be joined back to a reel."
+          }
         },
         "additionalProperties": false
       },

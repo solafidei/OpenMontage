@@ -438,3 +438,35 @@ def test_the_motion_enum_is_spelled_the_same_in_the_schema_and_the_tool() -> Non
         RemotionCaptionBurn.input_schema["properties"]["animation_preset"]["enum"]
         == list(RemotionCaptionBurn.ANIMATION_PRESETS)
     )
+
+
+# --- what actually rendered ------------------------------------------------
+
+def test_an_output_records_the_reel_and_the_motion_that_rendered() -> None:
+    """The three fields G6 needs to compare a render against its plan."""
+    entry = _output("reel_01")
+    entry.update(
+        {"reel_id": "reel_01", "caption_animation": "pop", "caption_degraded": False}
+    )
+
+    validate_artifact("render_report", {"version": "1.0", "outputs": [entry]})
+
+
+def test_an_output_refuses_a_motion_that_cannot_have_rendered() -> None:
+    entry = _output("reel_01")
+    entry["caption_animation"] = "slide"
+
+    with pytest.raises(Exception):
+        validate_artifact("render_report", {"version": "1.0", "outputs": [entry]})
+
+
+def test_an_output_from_a_pipeline_with_no_caption_pass_still_validates() -> None:
+    """Twelve of the thirteen manifests that produce a render_report will never
+    carry any of the three. That is what optional means, and it is asserted
+    rather than assumed."""
+    entry = _output("reel_01")
+
+    assert "reel_id" not in entry
+    assert "caption_animation" not in entry
+    assert "caption_degraded" not in entry
+    validate_artifact("render_report", {"version": "1.0", "outputs": [entry]})

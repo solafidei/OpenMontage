@@ -1218,3 +1218,50 @@ def test_every_decision_category_the_instructions_name_is_in_the_schema() -> Non
         "agent following them writes an invalid artifact:\n  "
         + "\n  ".join(f"{name!r} named by {sorted(set(docs))}" for name, docs in unknown.items())
     )
+
+
+# --- reel-batch: the per-reel caption axes must stay wired ---------------------
+
+def test_reel_batch_compose_still_reads_the_per_reel_motion() -> None:
+    """`animation_preset` is declared in a schema and authored by a director.
+
+    Neither of those makes it reach a render. The `batch_look` scar is exactly
+    this shape — a property declared, validated and carried, whose consumer was
+    never wired, so five reels materialised with `batch_look: None` and nothing
+    was invalid enough for a validator to notice. Compose's burn fence is the
+    only consumer, so "compose quietly stopped reading it" has to be a red test
+    rather than a silent pass.
+    """
+    compose = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "compose-director.md"
+    text = compose.read_text(encoding="utf-8")
+
+    assert 'entry.get("animation_preset")' in text, (
+        "compose-director no longer reads animation_preset off the reel_plan entry"
+    )
+    assert 'burn_inputs["animation_preset"]' in text, (
+        "compose-director reads animation_preset but never passes it to the burn"
+    )
+    # The default it must NOT acquire: resolution lives in TypeScript, once.
+    # Checked inside the code fences only — the prose deliberately quotes the
+    # forbidden form in order to forbid it.
+    fences = re.findall(r"```python\n(.*?)```", text, re.DOTALL)
+    assert fences, "compose-director has no python fences left to check"
+    for fence in fences:
+        assert 'entry.get("animation_preset", ' not in fence, (
+            "compose-director defaults animation_preset in Python — that puts "
+            "the preset->motion table in two languages with nothing pinning "
+            "them equal"
+        )
+
+
+def test_reel_batch_edit_still_authors_both_caption_axes() -> None:
+    """G5 requires both on every entry; the schema makes both optional."""
+    edit = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "edit-director.md"
+    text = edit.read_text(encoding="utf-8")
+
+    assert '"caption_source": sr["caption_source"]' in text, (
+        "edit-director no longer carries caption_source from the script artifact"
+    )
+    assert '"animation_preset":' in text, (
+        "edit-director no longer authors animation_preset on the reel_plan entry"
+    )
