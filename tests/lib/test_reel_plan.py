@@ -339,3 +339,102 @@ def test_a_spine_carrying_a_root_batch_look_writes_at_the_edit_checkpoint(tmp_pa
     )
     restored = read_checkpoint(tmp_path, "b", "edit")
     assert restored["artifacts"]["edit_decisions"]["batch_look"] == spine["batch_look"]
+
+
+# --- the two per-reel caption axes -----------------------------------------
+#
+# `_plan()` deliberately carries NEITHER property. Both are optional, absence is
+# the normal case for every artifact written before them, and a fixture carrying
+# them would make every other test in this file assert against a shape no
+# director produces. Each test below sets what it needs on a copy.
+
+@pytest.mark.parametrize(
+    ("prop", "value"),
+    [
+        ("caption_source", "music_bed"),
+        ("animation_preset", "none"),
+        ("animation_preset", "fade"),
+        ("animation_preset", "pop"),
+    ],
+)
+def test_a_reel_entry_accepts_the_caption_axes(prop, value) -> None:
+    plan = _plan()
+    plan["reels"][0][prop] = value
+
+    validate_artifact("reel_plan", plan)
+
+
+@pytest.mark.parametrize(
+    ("prop", "value"),
+    [
+        # Refused for want of a producer: nothing in this pipeline transcribes
+        # the pool, separates stems, or ships a spoken-word track. An enum member
+        # with no producer is a guard bypassed by omission.
+        ("caption_source", "video_sound"),
+        ("caption_source", "speech_stem"),
+        ("caption_source", "voice_over"),
+        ("caption_source", "none"),
+        ("animation_preset", "slide"),
+        ("animation_preset", "reel_pop"),
+    ],
+)
+def test_a_reel_entry_refuses_an_unavailable_caption_axis(prop, value) -> None:
+    plan = _plan()
+    plan["reels"][0][prop] = value
+
+    with pytest.raises(Exception):
+        validate_artifact("reel_plan", plan)
+
+
+def test_a_plan_written_before_either_axis_still_validates() -> None:
+    """The widening is monotone: four reel_plans already exist on disk."""
+    plan = _plan()
+
+    assert "caption_source" not in plan["reels"][0]
+    assert "animation_preset" not in plan["reels"][0]
+    validate_artifact("reel_plan", plan)
+
+
+@pytest.mark.parametrize(
+    ("prop", "value"),
+    [("caption_source", "music_bed"), ("animation_preset", "pop")],
+)
+def test_the_caption_axes_reach_no_renderer(prop, value) -> None:
+    """Both are read by the schema and by gates, and by nothing that renders.
+
+    `materialise` builds the per-reel `edit_decisions` that compose hands to the
+    renderer; neither axis belongs in it. One parametrised test rather than two,
+    because two tests asserting one invariant about two properties is the drift
+    both specs argue against.
+    """
+    spine = _spine()
+    entry = dict(_plan()["reels"][0])
+    entry[prop] = value
+
+    decisions = materialise(spine, entry)
+
+    assert prop not in decisions
+    assert prop not in decisions.get("metadata", {})
+
+
+def test_the_motion_enum_is_spelled_the_same_in_the_schema_and_the_tool() -> None:
+    """Two hardcoded copies of one value set, in JSON and in Python.
+
+    The JSON schema cannot import the tuple, so the single-sourcing claim is a
+    mechanism only while this test exists.
+    """
+    import json
+    from pathlib import Path
+
+    from tools.video.remotion_caption_burn import RemotionCaptionBurn
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas" / "artifacts" / "reel_plan.schema.json").read_text()
+    )
+    declared = schema["properties"]["reels"]["items"]["properties"]["animation_preset"]["enum"]
+
+    assert declared == list(RemotionCaptionBurn.ANIMATION_PRESETS)
+    assert (
+        RemotionCaptionBurn.input_schema["properties"]["animation_preset"]["enum"]
+        == list(RemotionCaptionBurn.ANIMATION_PRESETS)
+    )

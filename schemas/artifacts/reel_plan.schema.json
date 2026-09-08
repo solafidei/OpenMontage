@@ -47,6 +47,16 @@
             "type": "object",
             "description": "Per-reel caption corrections: wrong word (lowercase) -> replacement."
           },
+          "caption_source": {
+            "type": "string",
+            "enum": ["music_bed"],
+            "description": "Which audio this reel's captions were transcribed from. One member ships because one is all this pipeline can produce: the pool is never transcribed (footage_library passes transcribe: False), no stem separation exists, and no track is spoken word. The value of closing the enum is that a director cannot spell the intent three ways and a reel declaring an unavailable source fails validation rather than a reviewer. Optional: absence means undeclared, never music_bed."
+          },
+          "animation_preset": {
+            "type": "string",
+            "enum": ["none", "fade", "pop"],
+            "description": "This reel's caption MOTION, independent of the batch's caption typography. Absent means the caption look's preset decides, resolved in the renderer. Mirrors remotion_caption_burn's input of the same name; the enum is pinned equal to that tool's ANIMATION_PRESETS by contract test."
+          },
           "caption_confidence": {
             "type": "object",
             "description": "Carried verbatim from script.metadata.reels[].caption_confidence. Compose re-reports these off what it actually burned; a mismatch means a word changed between approval and render.",
