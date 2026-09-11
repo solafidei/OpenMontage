@@ -26,8 +26,17 @@ from tools.base_tool import (
 
 
 _MODELS = {
+    # Hunyuan 3D v3.1 Rapid: $0.225 per generation (+$0.15 with PBR), prompt up to
+    # 200 UTF-8 characters.
     "text_to_3d": "fal-ai/hunyuan-3d/v3.1/rapid/text-to-3d",
     "image_to_3d": "fal-ai/hunyuan-3d/v3.1/rapid/image-to-3d",
+    # Hunyuan 3D v3.1 Pro (published 2026-01-27): $0.375 per generation (+$0.15
+    # with PBR), prompt up to 1024 UTF-8 characters. Same payload keys as rapid;
+    # the optional multi-view image and custom face_count controls (each +$0.15)
+    # are not exposed by this tool.
+    "text_to_3d_pro": "fal-ai/hunyuan-3d/v3.1/pro/text-to-3d",
+    "image_to_3d_pro": "fal-ai/hunyuan-3d/v3.1/pro/image-to-3d",
+    # SAM 3D Objects: $0.02 per unit.
     "reconstruct_objects": "fal-ai/sam-3/3d-objects",
 }
 
@@ -82,12 +91,26 @@ class Fal3D(BaseTool):
         "required": ["operation", "output_path"],
         "properties": {
             "operation": {"type": "string", "enum": list(_MODELS)},
-            "prompt": {"type": "string"},
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "text_to_3d: max 200 UTF-8 characters on hunyuan-3d/v3.1/rapid "
+                    "(1024 on the /pro operations). reconstruct_objects: sam-3 "
+                    "segmentation prompt such as 'chair'; fal defaults it to 'car' "
+                    "when it is omitted and no masks or points are given."
+                ),
+            },
             "image_url": {"type": "string"},
             "image_path": {"type": "string"},
             "output_path": {"type": "string"},
             "enable_pbr": {"type": "boolean", "default": True},
-            "seed": {"type": "integer"},
+            "seed": {
+                "type": "integer",
+                "description": (
+                    "Honoured only by reconstruct_objects (fal-ai/sam-3/3d-objects); the "
+                    "Hunyuan 3D v3.1 rapid/pro endpoints declare no seed input."
+                ),
+            },
             "export_textured_glb": {"type": "boolean", "default": True},
             "detection_threshold": {"type": "number", "minimum": 0.1, "maximum": 1.0},
             "poll_timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800, "default": 900},
@@ -106,9 +129,12 @@ class Fal3D(BaseTool):
         return ToolStatus.AVAILABLE if _api_key() else ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        if inputs.get("operation") == "reconstruct_objects":
-            return 0.02
-        return 0.225 + (0.15 if inputs.get("enable_pbr", True) else 0.0)
+        operation = str(inputs.get("operation") or "")
+        if operation == "reconstruct_objects":
+            return 0.02  # fal-ai/sam-3/3d-objects: $0.02 per unit
+        # hunyuan-3d/v3.1: rapid $0.225, pro $0.375 per generation; PBR adds $0.15.
+        base = 0.375 if operation.endswith("_pro") else 0.225
+        return base + (0.15 if inputs.get("enable_pbr", True) else 0.0)
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         key = _api_key()
@@ -117,13 +143,14 @@ class Fal3D(BaseTool):
         operation = str(inputs.get("operation") or "")
         if operation not in _MODELS:
             return ToolResult(success=False, error=f"Unknown operation {operation!r}")
-        if operation == "text_to_3d" and not inputs.get("prompt"):
-            return ToolResult(success=False, error="prompt is required for text_to_3d")
-        if operation != "text_to_3d" and not (inputs.get("image_url") or inputs.get("image_path")):
+        text_operations = ("text_to_3d", "text_to_3d_pro")
+        if operation in text_operations and not inputs.get("prompt"):
+            return ToolResult(success=False, error=f"prompt is required for {operation}")
+        if operation not in text_operations and not (inputs.get("image_url") or inputs.get("image_path")):
             return ToolResult(success=False, error=f"image_url or image_path is required for {operation}")
 
         payload: dict[str, Any] = {}
-        if operation == "text_to_3d":
+        if operation in text_operations:
             payload["prompt"] = inputs["prompt"]
             payload["enable_pbr"] = bool(inputs.get("enable_pbr", True))
         else:
@@ -132,7 +159,7 @@ class Fal3D(BaseTool):
                 from tools.video._shared import upload_image_fal
                 image_url = upload_image_fal(str(inputs["image_path"]))
             payload["image_url" if operation == "reconstruct_objects" else "input_image_url"] = image_url
-            if operation == "image_to_3d":
+            if operation in ("image_to_3d", "image_to_3d_pro"):
                 payload["enable_pbr"] = bool(inputs.get("enable_pbr", True))
             else:
                 payload["export_textured_glb"] = bool(inputs.get("export_textured_glb", True))
@@ -140,7 +167,9 @@ class Fal3D(BaseTool):
                     payload["prompt"] = inputs["prompt"]
                 if inputs.get("detection_threshold") is not None:
                     payload["detection_threshold"] = inputs["detection_threshold"]
-        if inputs.get("seed") is not None:
+        # Only fal-ai/sam-3/3d-objects declares a seed input; the Hunyuan 3D v3.1
+        # rapid/pro endpoints have none and would silently ignore it.
+        if inputs.get("seed") is not None and operation == "reconstruct_objects":
             payload["seed"] = inputs["seed"]
 
         headers = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
@@ -208,6 +237,6 @@ class Fal3D(BaseTool):
             artifacts=artifacts,
             cost_usd=self.estimate_cost(inputs),
             duration_seconds=round(time.time() - started, 2),
-            seed=inputs.get("seed"),
+            seed=inputs.get("seed") if operation == "reconstruct_objects" else None,
             model=model,
         )

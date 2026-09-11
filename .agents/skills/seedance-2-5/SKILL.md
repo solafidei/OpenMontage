@@ -6,8 +6,8 @@ description: |
 
 # Seedance 2.5
 
-Seedance 2.5 extends the Seedance 2 family to 4–30 second 480p/720p clips and
-larger multimodal reference sets. It is hosted; there are no local model
+Seedance 2.5 extends the Seedance 2 family to 4–30 second 480p/720p/1080p clips
+and larger multimodal reference sets. It is hosted; there are no local model
 weights in OpenMontage.
 
 ## Choose a supported route
@@ -22,10 +22,12 @@ weights in OpenMontage.
 Do not invent a Replicate, HeyGen, or Higgsfield identifier when their current
 public API schema does not list Seedance 2.5.
 
-> **Resolution note.** The supported routes above expose 480p and 720p. The model
-> generates 1080p natively on the vendor's own web platform, which is not an
-> OpenMontage route. If a vendor blog cites 1080p or 4K, check which surface it means
-> before promising it in a pipeline.
+> **Resolution note.** fal.ai exposes 480p, 720p and 1080p on all three Seedance 2.5
+> endpoints (see Cost and verification for the per-second rates); `seedance_video`
+> passes all three (1080p ≈ $1.164/s) on the 2.5 route. Runway is the one surface
+> here limited to 480p/720p. If a vendor blog cites 4K, check which surface it
+> means before promising it in a pipeline — `seedance_video` has no 4k on the 2.5
+> route.
 
 ## Reference limits
 
@@ -221,10 +223,13 @@ a continuity method.
 
 ## Cost and verification
 
-All supported routes are paid. Confirm the exact provider/model before calling
-and review the result for identity continuity, cuts, lip sync, audio artifacts,
-and prompt adherence. ComfyUI Partner Nodes use prepaid Comfy credits and are
-not an offline fallback.
+All supported routes are paid. fal.ai bills Seedance 2.5 per second of generated
+video at roughly $0.2205 (480p), $0.4730 (720p) or $1.164 (1080p), so a 30 s 720p
+clip is ≈ $14. Reference-to-video with video inputs multiplies that rate by 0.6
+(≈ $0.2838/s at 720p) but charges for input *and* output seconds. Confirm the exact
+provider/model before calling and review the result for identity continuity, cuts,
+lip sync, audio artifacts, and prompt adherence. ComfyUI Partner Nodes use prepaid
+Comfy credits and are not an offline fallback.
 
 Iteration discipline that keeps that cost bounded:
 

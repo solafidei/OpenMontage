@@ -25,12 +25,13 @@ Read [references/api-and-prompting.md](references/api-and-prompting.md) when cho
 | Need | Model | Contract |
 |---|---|---|
 | Prompt iteration, preview, loop, exact 30-second source | `lyria-3-clip-preview` | Always generates a 30-second MP3; currently $0.04/request |
-| Full song, vocals, longer structure, image-conditioned score | `lyria-3-pro-preview` | Prompt-influenced duration up to roughly three minutes; currently $0.08/request |
+| Full song, vocals, longer structure, image-conditioned score | `lyria-3.5` | Public preview since 2026-09-03 (models page lists it as the stable flagship, replacing `lyria-3-pro-preview`); full-length, prompt-controllable duration (a couple of minutes); MP3 default or WAV via `response_format`; up to 10 images; $0.08 per song. This is the model `google_music` calls |
+| Same, on the previous generation | `lyria-3-pro-preview` | Superseded by `lyria-3.5` (Google's models page calls it "previous generation"; the deprecations page names `lyria-3.5` as its recommended replacement, no shutdown date announced); prompt-influenced duration of a couple of minutes (the adapter capped it at 184s); $0.08 per song. No longer routed through `google_music` |
 | Live, continuously steered instrumental performance | `lyria-realtime-exp` | Separate WebSocket workflow; do not route through `google_music` |
 
-The current OpenMontage `google_music` adapter is locked to `lyria-3-pro-preview`. It does not expose Clip, WAV response selection, multiple images, or RealTime controls. Surface that limitation rather than implying those options are available through the adapter.
+The current OpenMontage `google_music` adapter is locked to `lyria-3.5`; it no longer calls `lyria-3-pro-preview`, which Google now lists as previous generation with `lyria-3.5` as its recommended replacement on the deprecations page (no shutdown date announced). It does not expose Clip, WAV response selection, multiple images, or RealTime controls. Surface that limitation rather than implying those options are available through the adapter.
 
-Do not change models silently. For a 30-second video, either obtain approval for Pro plus exact-duration mastering or use Clip through an explicitly supported path.
+Do not change models silently. For a 30-second video, either obtain approval for Lyria 3.5 through `google_music` plus exact-duration mastering or use Clip through an explicitly supported path.
 
 ## Build The Prompt
 
@@ -71,7 +72,7 @@ Treat the returned vocal as untrusted until auditioned. Check lyric adherence, l
 
 ## Treat Duration As Untrusted Until Probed
 
-Lyria 3 Pro duration is controlled through prompt instructions and timestamps, not an exact API parameter. The OpenMontage adapter appends a target-duration instruction, but its returned `duration_seconds` field is the request, not a media probe.
+Lyria 3.5 duration (as with `lyria-3-pro-preview` before it) is controlled through prompt instructions and timestamps, not an exact API parameter. The OpenMontage adapter appends a target-duration instruction, but its returned `duration_seconds` field is the request, not a media probe.
 
 Always inspect the generated file:
 

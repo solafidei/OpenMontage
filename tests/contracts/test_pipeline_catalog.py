@@ -75,6 +75,77 @@ def test_declared_approval_gates_are_enforceable(name: str) -> None:
         )
 
 
+def test_reel_batch_wall_time_covers_a_cold_index_sitting() -> None:
+    """20 min was below the branch's own measured cold-index time (1171.8s,
+    ~19.5 min, decision #11) with zero room left for idea/script/scene/asset/
+    edit/compose/publish stacked on top of indexing alone — a healthy first
+    sitting was told to stop and escalate. Raised to ~45 so it isn't."""
+    raw = yaml.safe_load((PIPELINE_DEFS / "reel-batch.yaml").read_text(encoding="utf-8"))
+    cap_minutes = raw["orchestration"]["max_wall_time_minutes"]
+    assert cap_minutes >= 45, (
+        f"max_wall_time_minutes={cap_minutes} leaves too little headroom over "
+        "the measured 1171.8s cold-index time (decision #11) for the rest of "
+        "a first sitting"
+    )
+
+
+def test_gate_dry_run_prices_the_payload_cutaway_gen_actually_builds() -> None:
+    """`CLIP` must be built from the same exported constants
+    `CutawayGen._provider_inputs` uses, or the headline $0.63/$3.15 numbers
+    describe a clip cutaway_gen never executes — right only because a
+    provider's default happens to match the pin."""
+    import importlib
+
+    from tools.video.cutaway_gen import (
+        CUTAWAY_ASPECT_RATIO,
+        CUTAWAY_CLIP_SECONDS,
+        CUTAWAY_MODEL_VARIANT,
+        CUTAWAY_PROVIDER_PIN,
+    )
+
+    dry_run = importlib.import_module("scripts.reel_batch_gate_dry_run")
+
+    assert dry_run.CLIP["preferred_provider"] == CUTAWAY_PROVIDER_PIN[0]
+    assert dry_run.CLIP["model_variant"] == CUTAWAY_MODEL_VARIANT
+    assert dry_run.CLIP["duration"] == CUTAWAY_CLIP_SECONDS
+    assert dry_run.CLIP["aspect_ratio"] == CUTAWAY_ASPECT_RATIO
+
+
+def test_source_media_review_frame_dirs_keyed_by_resolved_path() -> None:
+    """Two pool files sharing a basename (different folders) must sample into
+    different frame directories, or the second overwrites the first's frames
+    and both report the same wrong `representative_frames`."""
+    from types import SimpleNamespace
+
+    from lib.source_media_review import _probe_video
+
+    class _FrameSampler:
+        def __init__(self) -> None:
+            self.seen_output_dirs: list[str] = []
+
+        def execute(self, inputs: dict) -> SimpleNamespace:
+            self.seen_output_dirs.append(inputs["output_dir"])
+            return SimpleNamespace(success=True, data={"frames": []})
+
+    class _Registry:
+        def __init__(self, sampler: "_FrameSampler") -> None:
+            self._sampler = sampler
+
+        def get(self, name: str):
+            return self._sampler if name == "frame_sampler" else None
+
+    sampler = _FrameSampler()
+    registry = _Registry(sampler)
+
+    _probe_video(Path("/pool/a/clip.mp4"), registry, frames_dir=Path("/frames"))
+    _probe_video(Path("/pool/b/clip.mp4"), registry, frames_dir=Path("/frames"))
+
+    assert sampler.seen_output_dirs[0] != sampler.seen_output_dirs[1], (
+        "clip.mp4 in two different pool folders sampled into the same frame "
+        f"directory: {sampler.seen_output_dirs}"
+    )
+
+
 # ----------------------------------------------------------------------
 # Doc-table sync (#50). Adding a pipeline is a five-artifact job and three
 # of those artifacts are hand-maintained Markdown tables.

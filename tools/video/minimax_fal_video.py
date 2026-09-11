@@ -68,12 +68,34 @@ class MiniMaxFalVideo(BaseTool):
                 "type": "string",
                 "enum": ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
                 "default": "16:9",
+                "description": "Ignored for image_to_video (the canvas follows the image). 'adaptive' is only accepted by reference_to_video (its fal default).",
+            },
+            "resolution": {
+                "type": "string",
+                "enum": ["480P", "768P", "2K", "4K"],
+                "default": "2K",
+                "description": "480P and 768P are native generation modes; 2K and 4K upscale a 768P base result. Billed per second of output: $0.05 (480P), $0.06 (768P), $0.13 (2K), $0.16 (4K).",
             },
             "image_url": {"type": "string"},
             "end_image_url": {"type": "string"},
-            "reference_image_urls": {"type": "array", "items": {"type": "string"}},
-            "reference_video_urls": {"type": "array", "items": {"type": "string"}},
-            "reference_audio_urls": {"type": "array", "items": {"type": "string"}},
+            "reference_image_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 9,
+                "description": "Up to 9 subject/style images, cited in the prompt as Image 1, Image 2, ... The first 5 are free; each additional image costs $0.08. Images + videos + audio clips must total at most 12 files.",
+            },
+            "reference_video_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 3,
+                "description": "Up to 3 motion/reference clips, 2-15 s each and at most 15 s combined, cited as Video 1, Video 2, ...",
+            },
+            "reference_audio_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 3,
+                "description": "Up to 3 audio clips, 2-15 s each and at most 15 s combined, cited as Audio 1, ... Audio cannot be the only reference input.",
+            },
             "output_path": {"type": "string"},
         },
     }
@@ -83,7 +105,7 @@ class MiniMaxFalVideo(BaseTool):
     retry_policy = RetryPolicy(
         max_retries=2, retryable_errors=["rate_limit", "timeout"]
     )
-    idempotency_key_fields = ["prompt", "operation", "duration", "aspect_ratio"]
+    idempotency_key_fields = ["prompt", "operation", "duration", "aspect_ratio", "resolution"]
     side_effects = ["writes video file to output_path", "calls fal.ai API"]
     user_visible_verification = ["Watch the result and verify native audio"]
 
@@ -94,8 +116,21 @@ class MiniMaxFalVideo(BaseTool):
     def get_status(self) -> ToolStatus:
         return ToolStatus.AVAILABLE if self._api_key() else ToolStatus.UNAVAILABLE
 
+    # fal.ai minimax/h3/* list prices per second of output, by resolution
+    # (fal_all.json pricingInfoOverride, 2026-09-09).
+    _COST_PER_SECOND = {"480P": 0.05, "768P": 0.06, "2K": 0.13, "4K": 0.16}
+    # reference_to_video: the first 5 reference images are free, then $0.08 each.
+    _FREE_REFERENCE_IMAGES = 5
+    _EXTRA_REFERENCE_IMAGE_USD = 0.08
+
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        return round(0.19 * int(inputs.get("duration", 5)), 2)
+        resolution = str(inputs.get("resolution", "2K")).upper()
+        rate = self._COST_PER_SECOND.get(resolution, self._COST_PER_SECOND["2K"])
+        cost = rate * int(inputs.get("duration", 5))
+        if inputs.get("operation") == "reference_to_video":
+            extra = len(inputs.get("reference_image_urls") or []) - self._FREE_REFERENCE_IMAGES
+            cost += max(0, extra) * self._EXTRA_REFERENCE_IMAGE_USD
+        return round(cost, 2)
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return 120.0
@@ -113,7 +148,7 @@ class MiniMaxFalVideo(BaseTool):
         payload: dict[str, Any] = {
             "prompt": inputs["prompt"],
             "duration": int(inputs.get("duration", 5)),
-            "resolution": "2K",
+            "resolution": str(inputs.get("resolution", "2K")).upper(),
         }
         if operation != "image_to_video":
             payload["aspect_ratio"] = inputs.get("aspect_ratio", "16:9")
@@ -141,7 +176,9 @@ class MiniMaxFalVideo(BaseTool):
                     success=False,
                     error="reference_to_video requires a reference image or video",
                 )
-        endpoint = f"fal-ai/minimax/hailuo-03/{operation.replace('_', '-')}"
+        # fal catalog id (published 2026-07-31). The older fal-ai/minimax/hailuo-03/*
+        # path still resolves as a legacy alias but is no longer a listed model.
+        endpoint = f"minimax/h3/{operation.replace('_', '-')}"
         headers = {
             "Authorization": f"Key {api_key}",
             "Content-Type": "application/json",

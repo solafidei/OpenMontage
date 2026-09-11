@@ -8,12 +8,12 @@ that arithmetic against the real `video_selector` price so the two headline numb
 the spec can be checked rather than trusted:
 
   a pool that covers the batch  ->  TOTAL ESTIMATED $0.00 of $2.00, a proven-$0 ledger
-  a pool five cuts short        ->  TOTAL ESTIMATED $0.50 of $2.00, itemised per reel
+  a pool five cuts short        ->  TOTAL ESTIMATED $3.15 of $2.00, itemised per reel
 
 The cap that makes the second number reachable is decision #6: at most ONE cut per reel
 may be an AI flash, so a reel needs `cuts_per_reel - 1` of the operator's own segments.
 Without it, greedy fill-free-reels-first allocation gives four reels at $0.00 from a
-20-segment pool and the $0.50 worst case never occurs.
+20-segment pool and the $3.15 worst case never occurs.
 
 Run:  python scripts/reel_batch_gate_dry_run.py
 """
@@ -27,19 +27,28 @@ sys.path.insert(0, str(REPO))
 
 import yaml  # noqa: E402
 
-from tools.video.cutaway_gen import CUTAWAY_PROVIDER_PIN  # noqa: E402
+from tools.video.cutaway_gen import (  # noqa: E402
+    CUTAWAY_ASPECT_RATIO,
+    CUTAWAY_CLIP_SECONDS,
+    CUTAWAY_MODEL_VARIANT,
+    CUTAWAY_PROVIDER_PIN,
+)
 from tools.video.video_selector import VideoSelector  # noqa: E402
 
 CUTS_PER_REEL = 5
 REQUESTED_REELS = 5
 REEL_SECONDS = 10.0
-# One 5s clip, pinned, 9:16 — what cutaway_gen prices and executes (cutaway_gen.py:296-303).
+# The pinned inputs `_provider_inputs` builds (cutaway_gen.py:324-339), minus the
+# per-prompt `output_path` — built from the same exported constants so this dry run
+# prices what cutaway_gen actually executes, not a lookalike that happens to agree.
 CLIP = {
     "prompt": "chalk dust drifting through a hard side light, black background, macro",
     "operation": "text_to_video",
     "allowed_providers": list(CUTAWAY_PROVIDER_PIN),
-    "duration": "5",
-    "aspect_ratio": "9:16",
+    "preferred_provider": CUTAWAY_PROVIDER_PIN[0],
+    "model_variant": CUTAWAY_MODEL_VARIANT,
+    "duration": CUTAWAY_CLIP_SECONDS,
+    "aspect_ratio": CUTAWAY_ASPECT_RATIO,
 }
 
 

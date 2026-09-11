@@ -112,7 +112,7 @@ Include in requests via the `xi-api-key` header:
 curl -X POST "https://api.elevenlabs.io/v1/convai/agents/create" \
   -H "xi-api-key: $ELEVENLABS_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "My Agent", "conversation_config": {"agent": {"prompt": {"prompt": "You are helpful.", "llm": "gemini-2.0-flash"}}, "tts": {"voice_id": "JBFqnCBsd6RMkjVDRZzb"}}}'
+  -d '{"name": "My Agent", "conversation_config": {"agent": {"prompt": {"prompt": "You are helpful.", "llm": "gemini-2.5-flash"}}, "tts": {"voice_id": "JBFqnCBsd6RMkjVDRZzb"}}}'
 ```
 
 ## Getting an API Key

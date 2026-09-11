@@ -88,11 +88,17 @@ class RecraftImage(BaseTool):
                     "vector_illustration", "icon",
                 ],
                 "default": "any",
+                "description": (
+                    "Not a fal input: the Recraft V4 text-to-image routes reject it "
+                    "with 422. Only 'vector_illustration' has an effect - it routes to "
+                    "recraft/v4[/pro]/text-to-vector and returns SVG. Express other "
+                    "styles in the prompt text."
+                ),
             },
             "colors": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Color palette as hex strings, e.g. ['#FF5733', '#2E86C1']",
+                "description": "Color palette as 3- or 6-digit hex strings, e.g. ['#FF5733', '#2E86C1', '#F53']; converted to fal RGBColor objects ({r, g, b} 0-255) before submission.",
             },
             "output_path": {"type": "string"},
         },
@@ -115,10 +121,53 @@ class RecraftImage(BaseTool):
         return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
+        # fal: recraft/v4/text-to-image $0.04, /v4/pro $0.25 per image;
+        # recraft/v4/text-to-vector $0.08, /v4/pro/text-to-vector $0.30 per image.
         model = inputs.get("model", "v4")
+        vector = inputs.get("style") == "vector_illustration"
         if model == "v4-pro":
-            return 0.25
-        return 0.04
+            return 0.30 if vector else 0.25
+        return 0.08 if vector else 0.04
+
+    @staticmethod
+    def _normalize_colors(colors: Any) -> tuple[list[Any] | None, str | None]:
+        """Normalise a colour palette into fal RGBColor objects.
+
+        Accepts 3-digit shorthand ("#F53") and 6-digit ("#FF5533") hex strings,
+        and passes already-formed {"r","g","b"} objects through. Returns
+        (converted, None) on success or (None, message) so execute() can fail
+        closed with a ToolResult instead of raising out of the tool.
+        """
+        converted: list[Any] = []
+        for c in colors:
+            if isinstance(c, dict):
+                if {"r", "g", "b"} <= set(c):
+                    converted.append(c)
+                    continue
+                return None, f"color objects need r/g/b keys, got {c!r}"
+            if not isinstance(c, str):
+                return None, (
+                    "colors entries must be hex strings or {r,g,b} objects, "
+                    f"got {c!r}"
+                )
+            hexval = c.lstrip("#").strip()
+            if len(hexval) == 3:
+                hexval = "".join(ch * 2 for ch in hexval)
+            if len(hexval) != 6:
+                return None, (
+                    f"colors entries must be 3- or 6-digit hex strings, got {c!r}"
+                )
+            try:
+                converted.append(
+                    {
+                        "r": int(hexval[0:2], 16),
+                        "g": int(hexval[2:4], 16),
+                        "b": int(hexval[4:6], 16),
+                    }
+                )
+            except ValueError:
+                return None, f"invalid hex color {c!r}"
+        return converted, None
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         api_key = self._get_api_key()
@@ -134,27 +183,29 @@ class RecraftImage(BaseTool):
         model = inputs.get("model", "v4")
         prompt = inputs["prompt"]
 
-        model_path = f"recraft/{model}/text-to-image"
+        # SVG comes from the separate text-to-vector endpoints (output
+        # image/svg+xml); the text-to-image routes only return raster files.
+        vector = inputs.get("style") == "vector_illustration"
         if model == "v4-pro":
-            model_path = "recraft/v4/pro/text-to-image"
-        elif model == "v4":
-            model_path = "recraft/v4/text-to-image"
+            model_path = "recraft/v4/pro/text-to-vector" if vector else "recraft/v4/pro/text-to-image"
+        else:
+            model_path = "recraft/v4/text-to-vector" if vector else "recraft/v4/text-to-image"
 
         payload: dict[str, Any] = {"prompt": prompt}
         if inputs.get("image_size"):
             payload["image_size"] = inputs["image_size"]
-        if inputs.get("style"):
-            # NOTE: As of 2026-04, fal.ai's Recraft V4 endpoint rejects the
-            # `style` parameter with a 422 Unprocessable Entity error. The
-            # style enum values (digital_illustration, realistic_image, etc.)
-            # are NOT accepted by the /fal-ai/recraft/v4/text-to-image route.
-            # Workaround: encode the style direction in the prompt text instead
-            # (e.g. "digital illustration of..." rather than style="digital_illustration").
-            # We still pass the parameter through in case fal.ai re-enables it,
-            # but callers should be aware this may fail.
-            payload["style"] = inputs["style"]
+        # `style` is not forwarded. fal's Recraft V4 text-to-image/text-to-vector
+        # inputs are prompt, image_size, colors, background_color and
+        # enable_safety_checker (OpenAPI checked 2026-09); the route rejected
+        # `style` with 422 in 2026-04 and still has no such field. Encode the
+        # style direction in the prompt text (e.g. "digital illustration of...");
+        # style="vector_illustration" selects the text-to-vector endpoint above.
         if inputs.get("colors"):
-            payload["colors"] = inputs["colors"]
+            # fal expects RGBColor objects ({"r","g","b"} 0-255), not hex strings.
+            colors, color_error = self._normalize_colors(inputs["colors"])
+            if color_error:
+                return ToolResult(success=False, error=color_error)
+            payload["colors"] = colors
 
         try:
             response = requests.post(
@@ -169,11 +220,20 @@ class RecraftImage(BaseTool):
             response.raise_for_status()
             data = response.json()
 
-            image_url = data["images"][0]["url"]
+            image = data["images"][0]
+            image_url = image["url"]
             image_response = requests.get(image_url, timeout=60)
             image_response.raise_for_status()
 
-            ext = "svg" if inputs.get("style") == "vector_illustration" else "png"
+            # text-to-vector returns image/svg+xml; the text-to-image routes
+            # return a raster File (fal's example output is image/webp), so
+            # take the default extension from the returned content type.
+            if vector:
+                ext = "svg"
+            else:
+                ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(
+                    image.get("content_type"), "png"
+                )
             output_path = Path(inputs.get("output_path", f"generated_image.{ext}"))
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(image_response.content)

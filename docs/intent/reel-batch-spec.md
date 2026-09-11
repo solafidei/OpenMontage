@@ -342,14 +342,19 @@ At that length the choice is not about quality — nothing reads in half a secon
 - A flash to **another of the operator's own clips** costs $0.00, keeps him on screen, and is what
   hand-cut gym edits actually do — but it **consumes pool**, and no-reuse means every flash frame is
   a segment reels 4 and 5 cannot have.
-- An **AI cutaway** costs $0.10 but is **pool-neutral**.
+- An **AI cutaway** costs $0.63 as billed today on the pinned Kling 3.0 Standard route (fal lists
+  `fal-ai/kling-video/v3/standard` at $0.126/s with native audio on — fal's default, which the tool
+  never overrides — and $0.084/s with `generate_audio: false`, so a 5s clip is $0.63 or $0.42;
+  `kling_video.estimate_cost` still returns $0.10, which is the figure every guard and every cap in
+  §5.3 is derived from) but is **pool-neutral**.
 
 **The ruling is free-first with a measured valve.** Flash cuts come from the operator's own pool by
 default. AI cutaways fire **only** when the `idea` gate measures that the pool cannot support the
 planned batch. This is deliberately not a preference toggle: #41 must report usable-segment count
 anyway to stop the gate over-planning, so the same measurement arms the valve at zero extra cost.
-Most sittings therefore spend **$0.00**; thin-pool sittings degrade into spending fifty cents rather
-than into worse reels.
+Most sittings therefore spend **$0.00**; thin-pool sittings degrade into spending a few dollars
+($3.15 at fal list for five clips, $2.10 with audio off — fifty cents by the tool's stale $0.10
+estimate, which is what §5.3's caps were derived from) rather than into worse reels.
 
 **The valve mechanism, concretely.** At gate 1 the director compares measured usable segments against
 `N reels × cuts per reel` (~5 cuts for a 10s reel). If the pool covers it, `assets` makes no paid
@@ -361,13 +366,14 @@ available) settle it:
 
 | Route | Cost | Runtime | Verdict |
 |---|---|---|---|
-| `kling_video` | $0.10 | ~1 min/clip | **chosen** |
+| `kling_video` | $0.63 as shipped (fal `v3/standard` at $0.126/s, audio on by fal's default, never overridden by the tool); $0.42 with `generate_audio: false`; `estimate_cost` still returns the stale $0.10 | ~1 min/clip | **chosen** (ruled at $0.10 — see below) |
 | `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | $0.00 | ~4 min/clip | 20 min for five clips |
 | `wan_video` | $0.00 | **~43 min/clip** | disqualified |
-| `gemini_omni_video` | $0.30 | — | dropped; 3× the price for a flash nobody can resolve |
+| `gemini_omni_video` | $0.30 | — | dropped as "3× the price" when kling was believed to cost $0.10; at fal's list prices it is the cheaper route, so this verdict rests on a stale price and needs re-logging before it moves |
 
 Twenty minutes of dead time is itself a sitting, which is the thing this pipeline exists to abolish.
-Fifty cents buys it back on the rare sittings where the valve fires.
+Two to three dollars ($2.10–$3.15 for five clips at fal list; fifty cents by the tool's $0.10
+estimate) buys it back on the rare sittings where the valve fires.
 
 **Consequence — reel-batch remains a paid pipeline.** Choosing a local route would have removed the
 paid surface entirely (no provider pinning, no per-reel booking, and `budget_per_output_minute_usd`
@@ -492,14 +498,16 @@ floor, so the floor alone sets the price. Verified live:
 
 | Tool | Shortest clip | Price | Runtime | Note |
 |---|---|---|---|---|
-| `kling_video` (standard, via fal) | **5s** — enum `["5","10"]`, hard floor | **$0.10** | ~1 min | `tools/video/kling_video.py:75-77, :107-114` |
+| `kling_video` (`v3/standard`, via fal) | **5s** as shipped — the tool's enum is `["5","10"]`, but fal's `fal-ai/kling-video/v3/*` endpoints accept `"3"`–`"15"`; only the legacy `v2.1/*` ones are `["5","10"]` | **$0.63** as shipped (fal $0.126/s; `generate_audio` defaults to `true` and the tool never sends it), **$0.42** audio off ($0.084/s); `estimate_cost` still returns **$0.10** | ~1 min | `tools/video/kling_video.py:75-77, :107-114, :136-142` |
 | `gemini_omni_video` | 3s — a *hint*; the model chooses actual length | $0.30 | — | `:43, :123-126, :200-201` |
 | `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | — | $0.00 | ~4 min | local, RTX 5070 |
 | `wan_video` | — | $0.00 | **~43 min** | disqualified |
 | `seedance_video` (unpinned default) | 5s | $1.52 | — | `:225-229` |
 
-**Generate 5s, use half a second, discard the rest.** Paying for unused footage is correct here: the
-only route that generates shorter costs 3× more. Because `gemini_omni_video`'s duration is a hint
+**Generate 5s, use half a second, discard the rest.** Paying for unused footage was the cheaper
+choice at the tool's $0.10 estimate; at fal's list prices it is not — a 3s `v3/standard` clip ($0.25
+audio off, $0.38 audio on) and `gemini_omni_video` ($0.30) both undercut the 5s pin, so the pin is a
+ruling to re-log (§8), not a price fact. Because `gemini_omni_video`'s duration is a hint
 rather than a guarantee, trimming is mandatory on every route — no design may depend on receiving an
 exact clip length.
 
@@ -514,6 +522,17 @@ per output minute                    = $0.50 / 0.8333     = $0.60
 
 **Derived manifest values:** `budget_default_usd: 2.00`, `budget_per_output_minute_usd: 0.75`.
 
+> **Price basis (catalog audit, 2026-09-09).** The $0.10 above is `kling_video.estimate_cost`
+> (`tools/video/kling_video.py:107-114`) — the number `cost_tracker` guards against and the number the
+> manifest was derived from, so the derivation and the values below hold exactly as written. fal prices
+> the pinned `v3/standard` route far higher: $0.084/s audio off ($0.42 per 5s clip) and $0.126/s audio
+> on ($0.63 — what the route bills today, since `execute` never sends `generate_audio` and fal defaults
+> it to `true`, `:136-142`). Re-derived at $0.42 the block reads 5 × $0.42 = $2.10 → $2.52/min → $3.02
+> → rate $3.25 on a $2.50 floor; at a 3s pin ($0.252/clip) it is $1.26 → $1.51 → $1.82 → rate $2.00; at
+> the as-billed $0.63 it is $3.15 → $3.78 → $4.54 → rate $4.75. Which pin applies is a ruling for the
+> decision log, not an edit here: `pipeline_defs/reel-batch.yaml:18-29`, the worked examples below,
+> §5.4's $0.10 per-reel entry, decision #6 and `idea-director.md`'s shortfall table all move with it.
+
 At $0.75 the rate is **in family** with every existing pipeline (0.05 / 0.25 / 0.30 / 0.40 / 0.60),
 where the pre-R8 figures were outliers twice over. The flat floor governs at realistic batch sizes
 and the rate guards large ones:
@@ -525,7 +544,9 @@ and the rate guards large ones:
 ```
 
 Unpinned, a five-cutaway shortfall routes to seedance at $1.52/clip = **$7.60** — 15× the pinned
-figure, for footage trimmed to half a second. Pinning is what keeps the valve cheap.
+estimate ($0.10/clip), and still 2.4× what the pinned route bills at fal list ($0.63/clip audio on;
+3.6× against the $0.42 audio-off price), for footage trimmed to half a second. Pinning is what keeps
+the valve cheap.
 
 ### 5.4 Per-reel booking (a deliberate divergence)
 
@@ -665,8 +686,10 @@ All three questions this spec opened are now answered and are recorded as R8:
 
 1. **Cutaway length** — sub-second flash accents, not B-roll.
 2. **Sourcing** — free-first from his own pool; AI fires only on a measured shortfall.
-3. **Route when it fires** — `kling_video` at $0.10/~1 min, over a free local route at ~4 min/clip.
-   Twenty minutes of dead time is itself a sitting.
+3. **Route when it fires** — `kling_video` at ~1 min/clip, over a free local route at ~4 min/clip.
+   Ruled at the tool's $0.10 estimate; fal lists the pinned `v3/standard` route at $0.42 per 5s audio
+   off and $0.63 as the tool ships it (audio on), so the price basis of this ruling is stale and needs
+   re-logging before the figure moves. Twenty minutes of dead time is itself a sitting.
 
 No open questions remain against the operator. What remains is measurement, below.
 

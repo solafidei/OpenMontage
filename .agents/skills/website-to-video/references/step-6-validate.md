@@ -143,6 +143,8 @@ Output lands in `<project-dir>/snapshots/`. Gemini writes `snapshots/description
 
 **If `descriptions.md` is missing or empty after the snapshot:** `GEMINI_API_KEY` was not set — confirm it's in `<project-dir>/.env` (the CLI loads .env from CWD) or in your shell environment. Re-run after fixing.
 
+**If every entry in `descriptions.md` is a `## (error)` heading followed by `Gemini call failed: …`:** hyperframes 0.8.31 defaults its Gemini vision model to `gemini-3.1-flash-lite-preview`, which Google shut down on 2026-05-25 — add `HYPERFRAMES_GEMINI_MODEL=gemini-3.1-flash-lite` (its stable successor; `gemini-2.5-flash` also works) to `<project-dir>/.env` or the shell and re-run.
+
 **Fallback if Gemini is genuinely unavailable** (no key, key invalid, or quota exhausted): use your own image-reading capability to inspect each frame in `snapshots/` directly. For each frame, write one sentence describing what's on screen — focus on the dimensions Gemini would catch (blank/dark frames, missing brand assets, text legibility, layout problems). Save these descriptions as `snapshots/descriptions.md` yourself so the rest of the checklist still has a single source of truth. State explicitly in your verdict that descriptions were agent-authored, not Gemini-authored, so the user knows to spot-check.
 
 **Gemini descriptions will flag two frames as "blank/black" — these two are expected and not bugs:**

@@ -37,7 +37,7 @@ Spawned **detached** so voice work isn't blocked; `audio_meta.bgm_pending: true`
 
 | Order | Provider                             | Env / deps                                                                            | Speed                                   | Quality                     |
 | ----- | ------------------------------------ | ------------------------------------------------------------------------------------- | --------------------------------------- | --------------------------- |
-| 1     | Google Lyria RealTime                | `$GEMINI_API_KEY` or `$GOOGLE_API_KEY` + `google-genai` (auto-installed on demand)    | Real-time stream (≈ requested duration) | Production-grade            |
+| 1     | Google Lyria RealTime (`lyria-realtime-exp`, experimental) | `$GEMINI_API_KEY` or `$GOOGLE_API_KEY` + `google-genai` (auto-installed on demand) | Real-time stream (≈ requested duration) | High, but experimental (Google: not suitable for production use, endpoint availability subject to change) with no row on the pricing page; the current Lyria song model (`lyria-3.5`, public preview since 2026-09-03 though the models page lists it as stable, $0.08 per song, Interactions API) is a different, non-streaming API that this engine does not implement — see the repo's separate `google_music` tool (`tools/audio/google_music.py`) for that |
 | 2     | MusicGen (`facebook/musicgen-small`) | Python `transformers + torch + soundfile + numpy` (~300 MB first run; auto-installed) | Slow on CPU; fast on Apple MPS / CUDA   | Decent; prompt-only control |
 
 Output → `assets/bgm/track.wav`, target = total voice duration. MusicGen generates **one** seed clip (≤28–30s, under the decoder's positional limit) then crossfade-loops it up to the target (or trims down if shorter), avoiding per-segment seams. Backend selection is by what can actually **run**: Lyria only when `import google.genai` succeeds, else MusicGen; if neither can be made to run, BGM is skipped (voice + SFX still render).
@@ -57,7 +57,7 @@ Archetype then reshapes the arc — PAS → "MINOR to MAJOR" build; BAB / future
 
 ## Lyria knobs (direct recipe use)
 
-The engine bakes BPM / scale into the **prompt text** (via the inference above) and passes only `--output` / `--duration` / `--prompt` to the recipe. If you invoke `scripts/lyria-recipe.py` directly you can also set: `--bpm` (90–110 calm, 110–130 energetic), `--brightness` (0–1, ≥0.7 promotional), `--density` (0–1, higher = fuller), `--scale` (`MAJOR` / `MINOR` / `PENTATONIC` / …), `--negative-prompt` (styles to exclude). MusicGen ignores all of these — put the mood in the prompt.
+The engine bakes BPM / scale into the **prompt text** (via the inference above) and passes only `--output` / `--duration` / `--prompt` to the recipe. If you invoke `scripts/lyria-recipe.py` directly you can also set: `--bpm` (API range 60–200; 90–110 calm, 110–130 energetic), `--brightness` (0–1, ≥0.7 promotional), `--density` (0–1, higher = fuller), `--scale` (a `google.genai.types.Scale` name — key / relative-minor pairs such as `C_MAJOR_A_MINOR`, `G_MAJOR_E_MINOR`, `A_MAJOR_G_FLAT_MINOR`; there is no bare `MAJOR` / `MINOR` / `PENTATONIC`, and an unknown name is silently dropped), `--negative-prompt` (sent as a second `WeightedPrompt` with weight −1.0; the Lyria RealTime docs only say a weight must not be 0 and do not document negative weights as exclusion, so treat it as best-effort). MusicGen ignores all of these — put the mood in the prompt.
 
 ## Failure modes
 

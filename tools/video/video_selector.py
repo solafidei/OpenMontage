@@ -51,7 +51,8 @@ class VideoSelector(BaseTool):
     # estimate/execute divergence. It is NOT consumed by an execute: one quote
     # legitimately answers for a whole batch (reel-batch prices one cutaway and
     # generates five), and clearing it on the first execute left clips 2..N of a
-    # 76x over-spend unwarned. A new estimate_cost supersedes it.
+    # ~18x over-spend unwarned — five unpinned seedance clips ($7.60) against the
+    # single audio-off cutaway quote ($0.42). A new estimate_cost supersedes it.
     _last_estimate: dict[str, object] | None = None
 
     capabilities = [
@@ -323,9 +324,10 @@ class VideoSelector(BaseTool):
         Pass the SAME inputs dict to :meth:`execute`. The provider and price
         quoted here are remembered, and ``execute`` stamps ``estimate_divergence``
         on its result when it ends up on a different provider or at a different
-        price — pricing with ``allowed_providers=["kling"]`` ($0.10) and then
-        executing unpinned (seedance, $1.52) is a 15x under-price that slips both
-        approval guards, and it must not stay silent.
+        price — pricing with ``allowed_providers=["kling"]`` ($0.63 for a generic
+        5 s v3/standard quote, which passes no ``generate_audio`` and so is billed
+        audio-on) and then executing unpinned (seedance, $1.52) is a ~2.4x
+        under-price, and it must not stay silent.
 
         The comparison is on the OUTCOME, not on the inputs, because the inputs
         arm is unfixable by enumeration: every field this selector forwards can
@@ -423,12 +425,14 @@ class VideoSelector(BaseTool):
 
         Comparing the inputs instead was silent on a divergence the inputs
         cannot show: hand the same dict to both calls and let kling go
-        UNAVAILABLE in between, and the money quietly moves to seedance at 15x.
+        UNAVAILABLE in between, and the money quietly moves to seedance at ~2.4x
+        (a generic audio-on kling quote is $0.63 against seedance's $1.52).
         ``prior['provider']`` was already recorded for this and sat unused.
 
         The quote is NOT cleared here. One estimate can legitimately answer for a
         whole batch, and consuming it on the first execute meant five unpinned
-        clips against one $0.10 quote flagged [True, False, False, False, False].
+        clips against one audio-off cutaway quote ($0.42) flagged
+        [True, False, False, False, False].
         That also removes the reason to care whether the execute succeeded: a
         failed call no longer strands a baseline for an unrelated later one.
         """

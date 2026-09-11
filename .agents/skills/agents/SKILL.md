@@ -47,7 +47,7 @@ agent = client.conversational_ai.agents.create(
             "language": "en",
             "prompt": {
                 "prompt": "You are a helpful assistant. Be concise and friendly.",
-                "llm": "gemini-2.0-flash",
+                "llm": "gemini-2.5-flash",
                 "temperature": 0.7
             }
         },
@@ -71,7 +71,7 @@ const agent = await client.conversationalAi.agents.create({
       language: "en",
       prompt: {
         prompt: "You are a helpful assistant.",
-        llm: "gemini-2.0-flash",
+        llm: "gemini-2.5-flash",
         temperature: 0.7
       }
     },
@@ -85,7 +85,7 @@ const agent = await client.conversationalAi.agents.create({
 ```bash
 curl -X POST "https://api.elevenlabs.io/v1/convai/agents/create?enable_versioning=true" \
   -H "xi-api-key: $ELEVENLABS_API_KEY" -H "Content-Type: application/json" \
-  -d '{"name": "My Assistant", "conversation_config": {"agent": {"first_message": "Hello!", "language": "en", "prompt": {"prompt": "You are helpful.", "llm": "gemini-2.0-flash"}}, "tts": {"voice_id": "JBFqnCBsd6RMkjVDRZzb"}}}'
+  -d '{"name": "My Assistant", "conversation_config": {"agent": {"first_message": "Hello!", "language": "en", "prompt": {"prompt": "You are helpful.", "llm": "gemini-2.5-flash"}}, "tts": {"voice_id": "JBFqnCBsd6RMkjVDRZzb"}}}'
 ```
 
 ## Starting Conversations
@@ -126,7 +126,7 @@ await conversation.startSession({ signedUrl: token });
 |----------|--------|
 | OpenAI | `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo` |
 | Anthropic | `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-haiku-4-5`, `claude-3-7-sonnet`, `claude-3-5-sonnet`, `claude-3-haiku` |
-| Google | `gemini-3.1-flash-lite-preview`, `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`, `gemini-2.0-flash-lite` |
+| Google | `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | ElevenLabs | `glm-45-air-fp8`, `qwen3-30b-a3b`, `gpt-oss-120b` |
 | Custom | `custom-llm` (bring your own endpoint) |
 
@@ -147,7 +147,7 @@ Workspace environment variables can resolve per-environment server tool URLs, he
 ```python
 "prompt": {
     "prompt": "You are a helpful assistant that can check the weather.",
-    "llm": "gemini-2.0-flash",
+    "llm": "gemini-2.5-flash",
     "tools": [
         # Webhook: server-side API call
         {"type": "webhook", "name": "get_weather", "description": "Get weather",

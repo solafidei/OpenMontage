@@ -11,12 +11,12 @@ Everything you need to know about every provider in OpenMontage — setup instru
 | Step | Cost | What to set up | What it unlocks |
 |------|------|----------------|-----------------|
 | 1 | **$0** | Pexels + Pixabay | Stock photos and videos — enough to produce basic videos |
-| 2 | **$0** | Google API key | TTS with 700+ voices (1M chars/month free) + $300 new account credit |
+| 2 | **$0** | Google API key | TTS with 700+ voices (1M Chirp 3: HD / 4M Standard chars per month free) + $300 new account credit |
 | 3 | **$0** | ElevenLabs | Premium TTS + music + SFX (10K chars/month free) |
 | 4 | **$0** | Piper (local install) | Fully offline TTS — no API key, no cost, no network |
 | 5 | **~$0.03/image** | fal.ai | FLUX images + Kling/Veo/MiniMax video + Recraft — broad single-key image + video coverage |
 | 6 | **~$0.05/image** | OpenAI | GPT Image 2 images + OpenAI TTS |
-| 7 | **~$0.04/image** | Google Imagen | Imagen 4 images (shares the Google API key) |
+| 7 | **~$0.067/image** | Google Imagen | Nano Banana 2 (`gemini-3.1-flash-image`, 1K) images — Imagen 4 was shut down 2026-08-17 (shares the Google API key) |
 | 8 | **pay-as-you-go** | Kling Official | Official direct Kling video, image, TTS, avatar, and lip-sync API, separate from fal.ai Kling |
 | 9 | **pay-as-you-go** | Volcengine Ark | Official direct Seedance 2.0 Standard/Fast/Mini API |
 | 10 | **$12/month** | Runway | Gen-4 video — highest quality AI video |
@@ -36,7 +36,7 @@ PEXELS_API_KEY=              # Stock photos + videos
 PIXABAY_API_KEY=             # Stock photos + videos
 
 # GOOGLE (one key, multiple tools, generous TTS free tier)
-GOOGLE_API_KEY=              # Google TTS + Imagen + Lyria music + Gemini Omni/Veo video
+GOOGLE_API_KEY=              # Google TTS + Gemini image models (Nano Banana 2, via google_imagen) + Lyria music + Gemini Omni/Veo video
 
 # VOICE + MUSIC
 ELEVENLABS_API_KEY=          # TTS, music, sound effects (10K chars/month free)
@@ -90,9 +90,9 @@ speculative model strings.
 
 | Model | Direct provider | fal.ai | Runway | ComfyUI Partner Nodes | Local ComfyUI |
 |-------|-----------------|--------|--------|-----------------------|---------------|
-| **Gemini Omni Flash** | Google `gemini_omni_video` | `gemini_omni_fal` (T2V, I2V, references, editing) | `runway_video` model `gemini_omni_flash` | `GeminiVideoOmni` (hosted, paid credits) | Not available as local weights |
+| **Gemini Omni 1.1 Flash** | Google `gemini_omni_video` (`gemini-omni-1.1-flash`; `gemini-omni-flash-preview` shuts down 2026-09-30) | `gemini_omni_fal` (T2V, I2V, references, editing — still on the legacy 1.0 `google/gemini-omni-flash/*` endpoints, token-billed ≈$0.125/sec; fal's current `google/gemini-omni-flash/v1.1/*` endpoints, published 2026-08-27 at $0.10/sec 720p, are not yet wired) | `runway_video` model `gemini_omni_flash` | `GeminiVideoOmni` (hosted, paid credits) | Not available as local weights |
 | **Seedance 2.5** | Volcengine `seedance_ark` model variant `2.5` | `seedance_video` model version `2.5` | `runway_video` model `seedance2_5` | `ByteDance2TextToVideoNode` (hosted, paid credits) | Not available as local weights |
-| **MiniMax H3** | `minimax_video` model `MiniMax-H3` | `minimax_fal_video` (`hailuo-03`) | `runway_video` model `hailuo3` | `MinimaxHailuo03TextToVideoNode` (hosted, paid credits) | Supported with official open weights and an exported API workflow |
+| **MiniMax H3** | `minimax_video` model `MiniMax-H3` | `minimax_fal_video` (calls `fal-ai/minimax/hailuo-03/*`, a legacy alias of fal's catalog id `minimax/h3/*`) | `runway_video` model `hailuo3` | `MinimaxHailuo03TextToVideoNode` (hosted, paid credits) | Supported with official open weights and an exported API workflow |
 
 ComfyUI Partner Nodes run inside the ComfyUI graph but call hosted services;
 they require network access, a logged-in Comfy account, and prepaid credits.
@@ -314,7 +314,7 @@ reference-image inputs are normalized to the provider's `images` array.
 
 **Tools unlocked:** `flux_image`, `recraft_image`, `seedream_image`,
 `kling_video`, `veo_video`, `seedance_video`, `gemini_omni_fal`,
-`minimax_fal_video`, `fal_elevenlabs_tts`, `fal_elevenlabs_music`
+`minimax_fal_video`, `fal_elevenlabs_tts`, `fal_elevenlabs_music`, `fal_3d`
 **Env var:** `FAL_KEY`
 
 #### Setup
@@ -332,22 +332,39 @@ No subscription — pure pay-as-you-go, no minimum spend.
 
 | Model | Price | Per $1 |
 |-------|-------|--------|
-| FLUX Pro v1.1 | $0.05/image | 20 images |
-| FLUX Dev | $0.03/image | 33 images |
-| Recraft v3 | ~$0.04/image | 25 images |
-| Seedream 5 Pro (up to 1536x1536) | $0.0675/image | ~14 images |
+| FLUX Pro v1.1 (`fal-ai/flux-pro/v1.1`, `flux_image` default) | $0.04 per megapixel, rounded up | 25 × 1MP images |
+| FLUX Dev (`fal-ai/flux/dev`) | $0.025 per megapixel, rounded up | 40 × 1MP images |
+| FLUX.2 Pro (`fal-ai/flux-2-pro`) | $0.03 for the first output megapixel + $0.015 per extra megapixel of input and output, rounded up | 33 × 1MP images |
+| Recraft v4 (`fal-ai/recraft/v4/text-to-image`, `recraft_image` default) / Recraft v3 | $0.04/image (v3 vector style $0.08) | 25 images |
+| Seedream 5 Pro (up to 1536x1536) (`bytedance/seedream/v5/pro/text-to-image`) | $0.0675/image | ~14 images |
 | Seedream 5 Pro (up to 2048x2048) | $0.135/image | ~7 images |
+
+Newer fal.ai endpoints in the same families, not yet wired into the tools above: Recraft v4.1 (`fal-ai/recraft/v4.1/text-to-image`), Seedream 5 Lite (`bytedance/seedream/v5/lite/text-to-image`, $0.035/image), Nano Banana 2 (`fal-ai/nano-banana-2`, $0.08/image; 0.5K ×0.75, 2K ×1.5, 4K ×2) and Nano Banana Pro (`fal-ai/nano-banana-pro`, $0.15/image; 4K ×2).
 
 **Video generation:**
 
-| Model | Price | Per $1 |
-|-------|-------|--------|
-| Kling 2.5 Turbo Pro | $0.07/sec | 14 seconds |
-| Seedance 2.5 | endpoint-dependent | 4–30 seconds |
-| Gemini Omni Flash | endpoint-dependent | 3–10 seconds |
-| MiniMax H3 (`hailuo-03`) | endpoint-dependent | 4–15 seconds |
-| Veo 3 | $0.40/sec | 2.5 seconds |
-| WAN 2.5 | $0.05/sec | 20 seconds |
+| Model | Price | Clip length |
+|-------|-------|-------------|
+| Kling 3.0 Standard (`fal-ai/kling-video/v3/standard/*`, `kling_video` default) | $0.084/sec audio off · $0.126/sec audio on (fal default `generate_audio: true`) | 3–15 s |
+| Kling 3.0 Pro (`v3/pro`) | $0.112/sec audio off · $0.168/sec audio on | 3–15 s |
+| Kling O3 Standard / Pro (`o3/standard`, `o3/pro`) | $0.084 / $0.112 per sec audio off · $0.112 / $0.14 audio on | 3–15 s |
+| Kling 3.0 Turbo Standard / Pro (`v3/turbo/standard`, `v3/turbo/pro`) | $0.112 / $0.14 per sec | 3–15 s |
+| Kling 3.0 / O3 4K (`v3/4k`, `o3/4k`) | $0.42/sec | 3–15 s |
+| Kling 2.5 Turbo Pro (`v2.5-turbo/pro`) | $0.35 per 5 s + $0.07 per extra sec | 5 or 10 s |
+| Kling 2.1 Standard / Pro / Master (`v2.1/*`, legacy; Standard and Pro are image-to-video only on fal) | $0.28 / $0.49 / $1.40 per 5 s (+$0.056 / $0.098 / $0.28 per extra sec) | 5 or 10 s |
+| Seedance 2.5 (`bytedance/seedance-2.5/*`) | $0.2205/sec 480p · $0.4730/sec 720p · $1.164/sec 1080p | 4–30 s |
+| Seedance 2.0 / 2.0 Fast (`bytedance/seedance-2.0/*`, `.../fast/*`) | $0.3034/sec 720p, $0.682/sec 1080p · Fast $0.2419/sec 720p | 4–15 s |
+| Seedance 2.0 Mini (`bytedance/seedance-2.0/mini/*`) | $0.0721/sec 480p · $0.1547/sec 720p | 4–15 s |
+| Gemini Omni 1.1 Flash (`google/gemini-omni-flash/v1.1/*`) | $0.03/sec 360p · $0.10/sec 720p · $0.15/sec 1080p · $0.30/sec 4K | 3–10 s |
+| Gemini Omni Flash 1.0 (`google/gemini-omni-flash/*`, legacy) | token-billed, ≈$0.125/sec at 720p | 3–10 s |
+| MiniMax H3 (`minimax/h3/*`; `fal-ai/minimax/hailuo-03/*` is the legacy alias) | $0.05/sec 480p · $0.06/sec 768p · $0.13/sec 2K · $0.16/sec 4K | 5–15 s |
+| MiniMax H3 Max / H3 Max Turbo (`minimax/h3-max/*`, `minimax/h3-max-turbo/*`) | list $0.05 / $0.08 / $0.16 per sec (480p/768p/1080p); Turbo $0.025 / $0.04 / $0.08 — 75% launch discount until 2026-09-14 | 5–15 s |
+| Veo 3.1 (`fal-ai/veo3.1`) | $0.20/sec audio off · $0.40/sec audio on (720p/1080p); 4K $0.40 / $0.60 | 4, 6 or 8 s |
+| Veo 3.1 Fast (`fal-ai/veo3.1/fast`) | $0.10/sec audio off · $0.15/sec audio on; 4K $0.30 / $0.35 | 4, 6 or 8 s |
+| Veo 3.1 Lite (`fal-ai/veo3.1/lite`) | $0.03 / $0.05 per sec at 720p (audio off / on) · $0.05 / $0.08 at 1080p | 4, 6 or 8 s |
+| WAN 2.5 (`fal-ai/wan-25-preview/*`) | $0.05/sec 480p · $0.10/sec 720p · $0.15/sec 1080p (WAN 2.6 / 2.7: $0.10/sec 720p, $0.15/sec 1080p) | 5 or 10 s |
+
+Veo 3 and Veo 2 are no longer in fal's public catalog (Google shut down `veo-3.0-*` and `veo-2.0-*` on 2026-06-30; the old `fal-ai/veo3` / `fal-ai/veo2` ids only resolve as legacy aliases) — only the `veo3.1` family is listed.
 
 **Free tier:** None — but $0 to start, you only pay for what you use.
 
@@ -760,9 +777,9 @@ costs about $0.015. OpenMontage estimates cost from character count. See
 
 ---
 
-### Google — TTS + Imagen + Music + Video (Shared Key)
+### Google — TTS + Gemini Images + Music + Video (Shared Key)
 
-> **One key, five tools.** Google Cloud TTS has 700+ voices in 50+ languages — the strongest localization option. `google_imagen` supports both Imagen 4 and Gemini 2.5 Flash Image, including projects without Imagen catalog access. Google Lyria generates high-quality background music. Gemini Omni Flash supports conversational video editing, and direct Veo generation covers premium short video clips.
+> **One key, five tools.** Google Cloud TTS has 700+ voices in 50+ languages — the strongest localization option. `google_imagen` generates through the Gemini image models — `gemini-3.1-flash-image` (Nano Banana 2), `gemini-3.1-flash-lite-image` (Nano Banana 2 Lite) and `gemini-3-pro-image` (Nano Banana Pro) via `generate_content`; the Imagen 4 predict endpoints were shut down on 2026-08-17 and the legacy `gemini-2.5-flash-image` shuts down on 2026-10-02. Google Lyria generates high-quality background music. Gemini Omni Flash supports conversational video editing, and direct Veo 3.1 generation covers premium short video clips.
 
 **Tools unlocked:** `google_tts`, `google_imagen`, `google_music`, `gemini_omni_video`, `veo_video`
 **Env var:** `GOOGLE_API_KEY` (or `GEMINI_API_KEY` — either works; `GEMINI_API_KEY` takes precedence)
@@ -780,7 +797,7 @@ costs about $0.015. OpenMontage estimates cost from character count. See
 2. Click **Enable**
 3. Make sure your API key's restrictions allow the Text-to-Speech API
 
-**For Imagen, Lyria Music, Gemini Omni video, and direct Veo video**, enable the Generative Language API:
+**For Gemini image generation, Lyria Music, Gemini Omni video, and direct Veo video**, enable the Generative Language API:
 1. Visit [console.cloud.google.com/apis/library/generativelanguage.googleapis.com](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com)
 2. Click **Enable**
 
@@ -788,47 +805,53 @@ costs about $0.015. OpenMontage estimates cost from character count. See
 
 | Voice Type | Free tier | Paid (per 1M chars) | Notes |
 |-----------|-----------|---------------------|-------|
-| **Standard** | 1M chars/month | $4.00 | Basic quality, fast |
-| **WaveNet** | 1M chars/month | $16.00 | Natural-sounding |
-| **Neural2** | 1M chars/month | $16.00 | Best quality |
-| **Studio** | — | $24.00 | Professional studio voices |
-| **Chirp** | — | $4.00 | Conversational style |
+| **Chirp 3: HD** | 1M chars/month | $30.00 | Current premium tier (30 voices, 50+ locales) — the `google_tts` default |
+| **Standard** | 4M chars/month | $4.00 | Basic quality, fast |
+| **WaveNet** | 4M chars/month | $4.00 | Legacy tier, now priced with Standard |
+| **Neural2** | 1M chars/month | $16.00 | Natural-sounding (legacy) |
+| **Studio** | 1M chars/month | $160.00 | Professional studio voices (legacy) |
+| **Instant custom voice** | — | $60.00 | Voice cloning |
 
-The free tiers apply *independently* — you get 1M Standard AND 1M WaveNet AND 1M Neural2 characters per month free. That's roughly 250+ minutes of narration per month at zero cost.
+The free tiers apply *per SKU* — 4M Standard + WaveNet characters (one shared SKU), 1M Neural2, 1M Studio and 1M Chirp 3: HD characters per month free. That's well over 250 minutes of narration per month at zero cost.
 
-#### Google Imagen Pricing
+#### Google Image Generation Pricing
 
-| Model | Price per image |
-|-------|----------------|
-| Imagen 4 Fast | $0.02 |
-| Imagen 4 Standard | $0.04 |
-| Imagen 4 Ultra | $0.06 |
-| Gemini 2.5 Flash Image (`gemini-2.5-flash-image`) | $0.039 |
+| Model | Price per image | Status |
+|-------|----------------|--------|
+| Nano Banana 2 (`gemini-3.1-flash-image`) | $0.045 (0.5K) · $0.067 (1K) · $0.101 (2K) · $0.151 (4K); $0.50/1M input, $60/1M image-output tokens; batch half price | GA 2026-05-28 — current default |
+| Nano Banana 2 Lite (`gemini-3.1-flash-lite-image`) | $0.0336 (1K only); $0.25/1M input, $30/1M image-output tokens; batch half price | GA 2026-06-30 |
+| Nano Banana Pro (`gemini-3-pro-image`) | $0.134 (1K/2K) · $0.24 (4K); $2.00/1M input, $120/1M image-output tokens; batch half price | GA 2026-05-28 |
+| Gemini 2.5 Flash Image (`gemini-2.5-flash-image`) | $0.039 | **Deprecated — shuts down 2026-10-02** |
+| Imagen 4 Fast / Standard / Ultra (`imagen-4.0-*`) | — | **Shut down 2026-08-17** on the Gemini API (deprecated 2026-06-15) |
 
-**Free tier for Imagen:** None. Paid tier only.
+**Free tier for image generation:** None. Paid tier only.
 
-To select the Gemini backend through the governed `image_selector`, pass
+To pick a specific Gemini image model through the governed `image_selector`, pass
 `preferred_provider: "google_imagen"` and
-`model_name: "gemini-2.5-flash-image"`. The selector maps its neutral
+`model_name: "gemini-3.1-flash-image"` (or `gemini-3.1-flash-lite-image` /
+`gemini-3-pro-image`). The selector maps its neutral
 `model_name` field to the provider's `model` input.
 
 #### Gemini Omni Video Pricing
 
 | Model | Price | Notes |
 |-------|-------|-------|
-| `gemini-omni-flash-preview` | ~$0.10 per second of video | Billed as 5,792 output tokens/sec of 720p video at $17.50/1M tokens |
+| `gemini-omni-1.1-flash` | ~$0.10 per second of 720p video | $17.50/1M video output tokens + $1.50/1M input tokens; GA 2026-08-27 — current model |
+| `gemini-omni-flash-preview` | ~$0.10 per second of video | **Deprecated — shuts down 2026-09-30.** Migrate to `gemini-omni-1.1-flash` |
 
-Generates 3–10 second clips at 720p/24fps with synthesized audio, plus stateful conversational editing (`edit_video` via `previous_interaction_id`). **Paid tier only — no free tier.** A typical 8-second clip costs ~$0.80; each edit turn generates a new clip and bills again.
+Generates 3–10 second clips (360p, 720p default, 1080p and 4K upscaled; 16:9 or 9:16) with synthesized audio, plus stateful conversational editing (`edit_video` via `previous_interaction_id`; input videos ≤10 s). The API's `extend` task (adds 3–10 s, up to 40 s total) is not yet exposed by `gemini_omni_video`. **Paid tier only — no free tier.** A typical 8-second 720p clip costs ~$0.80; each edit turn generates a new clip and bills again.
 
 #### Google Music (Lyria) Pricing
 
-| Model | Price per generation request |
-|-------|-----------------------------|
-| `lyria-3-pro-preview` | $0.08 (flat rate, up to 184s duration) |
+| Model | Price per generation request | Status |
+|-------|-----------------------------|--------|
+| `lyria-3.5` | $0.08 per full song (a couple of minutes, prompt-controllable; MP3 default or WAV; vocals or instrumental; up to 10 image inputs) | Released 2026-09-03, listed as stable — current flagship |
+| `lyria-3-pro-preview` | $0.08 (flat rate, up to 184s duration) | Deprecated in favour of `lyria-3.5` (no shutdown date announced) |
+| `lyria-3-clip-preview` | $0.04 per fixed 30 s clip | Preview |
 
 **Free tier for Music:** None. Paid tier only.
 
-**New account bonus:** Google Cloud offers **$300 in free credits** for new accounts (90-day trial), applicable to TTS, Imagen, Music, Gemini Omni video, and direct Veo video.
+**New account bonus:** Google Cloud offers **$300 in free credits** for new accounts (90-day trial), applicable to TTS, Gemini image generation, Music, Gemini Omni video, and direct Veo video.
 
 #### Google TTS Voice Types
 
@@ -836,12 +859,12 @@ Google TTS offers 700+ voices across 50+ languages. Voice names follow the patte
 
 | Type | Example | Quality | Cost |
 |------|---------|---------|------|
-| **Chirp 3 HD** | `en-US-Chirp3-HD-Orus` | **Best (2024, most natural)** | **Mid — default** |
-| Standard | `en-US-Standard-A` | Good | Cheapest |
-| WaveNet | `en-US-WaveNet-D` | Very good | Mid |
-| Neural2 | `en-US-Neural2-D` | Excellent | Mid |
-| Studio | `en-US-Studio-O` | Professional | Highest |
-| Journey | `en-US-Journey-D` | Conversational (long-form) | Mid |
+| **Chirp 3 HD** | `en-US-Chirp3-HD-Orus` | **Best (most natural; 30 voices, 50+ locales)** | **$30/1M — default** |
+| Standard | `en-US-Standard-A` | Good | Cheapest ($4/1M) |
+| WaveNet | `en-US-WaveNet-D` | Very good | Cheapest ($4/1M, legacy) |
+| Neural2 | `en-US-Neural2-D` | Excellent | Mid ($16/1M) |
+| Studio | `en-US-Studio-O` | Professional | Highest ($160/1M) |
+| Journey | `en-US-Journey-D` | Conversational (long-form) | Legacy — no longer listed on the pricing page |
 
 **Recommended voices:** `en-US-Chirp3-HD-Orus` (male, rich/cinematic), `en-US-Chirp3-HD-Aoede` (female, warm). These are Google's newest tier — most natural-sounding, uses the v1beta1 endpoint automatically.
 
@@ -1419,7 +1442,7 @@ These tools require only FFmpeg or Python packages — no GPU, no API key.
 | **Google** | `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | `google_tts`, `google_imagen`, `google_music`, `gemini_omni_video`, `veo_video` | Free tier (TTS) + paid |
 | **ElevenLabs** | `ELEVENLABS_API_KEY` | `elevenlabs_tts`, `music_gen` | Free tier + paid |
 | **fish.audio** | `FISH_AUDIO_API_KEY` | `fish_audio_tts` | Free tier (s2.1-pro-free) + paid |
-| **fal.ai** | `FAL_KEY` | `flux_image`, `recraft_image`, `kling_video`, `veo_video`, `seedance_video`, `gemini_omni_fal`, `minimax_fal_video` | Pay-as-you-go |
+| **fal.ai** | `FAL_KEY` | `flux_image`, `recraft_image`, `seedream_image`, `kling_video`, `veo_video`, `seedance_video`, `gemini_omni_fal`, `minimax_fal_video`, `fal_elevenlabs_tts`, `fal_elevenlabs_music`, `fal_3d` | Pay-as-you-go |
 | **Atlas Cloud** | `ATLASCLOUD_API_KEY` | `atlas_image`, `atlas_video` | Pay-as-you-go |
 | **Kling Official** | `KLING_API_KEY` | `kling_official_video`, `kling_official_image`, `kling_tts`, `kling_avatar`, `kling_lip_sync` | Pay-as-you-go |
 | **Volcengine Ark** | `ARK_API_KEY` | `seedance_ark` | Pay-as-you-go |
@@ -1444,7 +1467,7 @@ How many providers cover each capability:
 
 | Capability | Cloud Providers | Local Providers | Free Options |
 |-----------|----------------|-----------------|--------------|
-| **Image Generation** | FLUX, Kling Official, Grok, Google Imagen, GPT Image 2, Recraft | Local Diffusion | Pexels, Pixabay (stock) |
+| **Image Generation** | FLUX, Kling Official, Grok, Google Gemini image (Nano Banana 2), GPT Image 2, Recraft | Local Diffusion | Pexels, Pixabay (stock) |
 | **Video Generation** | Grok, Kling Official, fal.ai, Seedance via Volcengine Ark, Runway, Veo, Gemini Omni, Higgsfield, MiniMax, HeyGen, Tencent Hunyuan, ComfyUI Partner Nodes | WAN, Hunyuan, CogVideo, LTX, ComfyUI WAN, ComfyUI MiniMax H3 | Pexels, Pixabay (stock) |
 | **Text-to-Speech** | Azure AI Speech, ElevenLabs, fish.audio, Google TTS, Kling Official, OpenAI | Piper | Piper, Google free tier, ElevenLabs free tier, Azure free tier, fish.audio s2.1-pro-free |
 | **Music Generation** | ElevenLabs, Suno, Google Lyria | — | ElevenLabs free tier |
@@ -1470,7 +1493,7 @@ A: fal.ai (`FAL_KEY`) is one pay-as-you-go option with broad single-key coverage
 A: Set `VIDEO_GEN_LOCAL_ENABLED=true` and install `diffusers`. You get WAN 2.1, Hunyuan, CogVideo, and LTX video generation plus Stable Diffusion image generation — all free, all offline.
 
 **Q: Which TTS provider should I use?**
-A: For quality → ElevenLabs. For localization (50+ languages) → Google TTS. For budget → Google free tier (1M chars/month). For offline → Piper.
+A: For quality → ElevenLabs. For localization (50+ languages) → Google TTS. For budget → Google free tier (1M Chirp 3: HD or 4M Standard chars/month). For offline → Piper.
 
 **Q: Do I need all these providers?**
 A: No. Start with what you have. The selector pattern auto-routes to whatever's available. Missing a provider? The system falls through to the next one automatically.

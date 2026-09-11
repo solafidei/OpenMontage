@@ -11,12 +11,12 @@ Seedance 2.0 (ByteDance Seed team, released Feb 2026) is OpenMontage's **preferr
 - multi-shot generation inside a single prompt,
 - director-level camera control,
 - lip-sync from quoted dialogue,
-- reference-conditioned generation with up to 9 images + 3 video clips + 3 audio clips,
+- reference-conditioned generation with up to 9 images + 3 video clips + 3 audio clips (at most 12 files in total on 2.0; `model_version="2.5"` raises this to 30 images + 10 videos + 10 audio clips, at most 50 files),
 - consistent character identity across shots.
 
 Elo 1269 on Artificial Analysis as of release — ahead of Veo 3, Sora 2, Runway Gen-4.5.
 
-Switch off Seedance 2.0 only when there is a real reason: strict budget (use the `fast` variant or LTX), explicit user preference (VEO/Sora/Kling), or a stylistic fit another model does better (VEO for photoreal landscape, Kling for anime).
+Switch off Seedance 2.0 only when there is a real reason: strict budget (use the `fast` variant or LTX), explicit user preference (VEO/Sora/Kling), a stylistic fit another model does better (VEO for photoreal landscape, Kling for anime), or a shot that needs more than 15 s or a large reference set (step up to Seedance 2.5 via `model_version="2.5"` - see the cheat sheet).
 
 ## Seedance 2.0 8-Component Prompt Structure
 
@@ -96,11 +96,12 @@ Sokka, half a step behind, replies: "Then we fight."
 
 | Parameter | Guidance |
 |---|---|
-| `duration` | `5`–`8` s hero, `10`–`12` s multi-shot scenes, `4` s inserts. `auto` when unsure. |
+| `duration` | `5`–`8` s hero, `10`–`12` s multi-shot scenes, `4` s inserts. `auto` when unsure. Range `4`–`15` on 2.0; `4`–`30` on 2.5. |
 | `aspect_ratio` | `21:9` trailers, `16:9` broadcast, `9:16` Reels/Shorts/TikTok |
-| `resolution` | `720p` default. `480p` for cost-capped previews only. |
+| `resolution` | `720p` default. `480p` for cost-capped previews only. `seedance_video`'s enum is `480p`/`720p`/`1080p`/`4k`: `1080p` on 2.0 `standard` ($0.682/s) and on 2.5 ($1.164/s), `4k` on 2.0 `standard` only (~$1.5552/s), `fast`/`mini` stay `480p`/`720p`. |
 | `generate_audio` | Keep `true` — sync audio is the moat. Strip in compose if unused. |
-| `model_variant` | `standard` for hero + multi-shot + camera-heavy. `fast` for b-roll, previews, latency-capped jobs. |
+| `model_variant` | `standard` for hero + multi-shot + camera-heavy. `fast` for b-roll, previews, latency-capped jobs. `mini` for the cheapest previews/batch work (`fast` and `mini` are 2.0 only - fal has no 2.5 fast or mini endpoint). |
+| `model_version` | `"2.0"` (default) or `"2.5"`. 2.5 = 4-30 s, 30 img + 10 vid + 10 audio references, $0.4730/s at 720p ($0.2205/s at 480p); use it for long single takes or big reference sets, keep 2.0 for the fast tier and cost. Layer 3: `.agents/skills/seedance-2-5/`. |
 | `seed` | Lock once a shot composition reads; iterate variants with the same seed. |
 | `prompt length` | 200–400 words for hero shots; 80–150 for inserts. Seedance is one of the few models that rewards long, structured 5-aspect prompts. |
 
@@ -129,7 +130,7 @@ Sokka, half a step behind, replies: "Then we fight."
 - **Cinematic pipeline:** Seedance 2.0 is the default. 21:9, multi-shot for montage, reference-to-video when the brief has a visual bible.
 - **Animated explainer:** Use Seedance 2.0 only for establishing / mood / cold-open clips — core motion graphics stay in Remotion.
 - **Screen demo / podcast / clip factory:** Not the right default. Only for stylized cold-opens.
-- **Cost check:** `standard` at 10 s ≈ $3.03 / clip on fal.ai. `fast` at 5 s ≈ $1.21. Budget in the proposal stage.
+- **Cost check (fal.ai, 720p):** 2.0 `standard` at 10 s ≈ $3.03 / clip ($0.3034/s; 1080p $0.682/s). 2.0 `fast` at 5 s ≈ $1.21 ($0.2419/s). 2.0 `mini` at 5 s ≈ $0.77 ($0.1547/s; $0.0721/s at 480p) via `model_variant: "mini"`. 2.5 at 10 s ≈ $4.73 ($0.4730/s; 480p $0.2205/s). Budget in the proposal stage.
 
 ## Example — Airbender trailer hero beat (60 s total trailer, this is shot 3 of 7)
 

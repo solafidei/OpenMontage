@@ -329,7 +329,7 @@ def test_ark_local_reference_routes_without_fal_upload(rankings, monkeypatch, tm
 # The shipped probe table (verified by execution against the live registry):
 #
 #     allowed_providers=None              -> $1.5200   (seedance standard default)
-#     allowed_providers=["kling"]         -> $0.1000
+#     allowed_providers=["kling"]         -> $0.6300   (kling 3.0 standard, 5 s, native audio on)
 #     allowed_providers=["gemini_omni"]   -> $0.5000
 #     allowed_providers=["fal"]           -> $0.0000   <- no-candidate branch
 #     allowed_providers=["typo_provider"] -> $0.0000
@@ -345,7 +345,7 @@ def _probe_providers() -> list[_StubTool]:
     """Stand-ins priced at the live probe figures."""
     return [
         _StubTool("seedance_video", "seedance", cost=1.52),
-        _StubTool("kling_video", "kling", cost=0.10),
+        _StubTool("kling_video", "kling", cost=0.63),
         _StubTool("gemini_omni_video", "gemini_omni", cost=0.50),
     ]
 
@@ -371,7 +371,7 @@ def test_live_probe_prices_are_pinned():
     from tools.video.gemini_omni_video import GeminiOmniVideo
 
     five_seconds = {"prompt": "gym b-roll", "duration": "5"}
-    assert KlingVideo().estimate_cost(five_seconds) == pytest.approx(0.10)
+    assert KlingVideo().estimate_cost(five_seconds) == pytest.approx(0.63)
     assert GeminiOmniVideo().estimate_cost(five_seconds) == pytest.approx(0.50)
     assert SeedanceVideo().estimate_cost(five_seconds) == pytest.approx(1.52)
 
@@ -385,7 +385,7 @@ def test_pinned_estimates_price_the_pinned_provider(probe_selector):
     """A resolvable pin prices that provider, not the top-ranked one."""
     assert probe_selector.estimate_cost(
         {"prompt": "x", "allowed_providers": ["kling"]}
-    ) == pytest.approx(0.10)
+    ) == pytest.approx(0.63)
     assert probe_selector.estimate_cost(
         {"prompt": "x", "allowed_providers": ["gemini_omni"]}
     ) == pytest.approx(0.50)
@@ -424,13 +424,14 @@ def test_unpinned_estimate_with_no_providers_still_returns_zero():
 # --- D3: the estimate/execute split ---------------------------------------
 
 def test_execute_flags_divergence_from_the_estimated_pin(probe_selector):
-    """D3 — pricing with ["kling"] then executing unpinned is a 15x under-price.
+    """D3 — pricing with ["kling"] then executing unpinned is a ~2.4x under-price.
 
-    It slips both approval guards ($0.10 < $0.50), so the selector records the
-    divergence on the result where a reviewer (and this test) can see it.
+    The $0.63 quote is what the approval guards weigh; the $1.52 that actually goes
+    out is not, so the selector records the divergence on the result where a reviewer
+    (and this test) can see it.
     """
     gate_inputs = {"prompt": "x", "allowed_providers": ["kling"]}
-    assert probe_selector.estimate_cost(gate_inputs) == pytest.approx(0.10)
+    assert probe_selector.estimate_cost(gate_inputs) == pytest.approx(0.63)
 
     result = probe_selector.execute({"prompt": "x"})  # pin dropped
 
@@ -438,7 +439,7 @@ def test_execute_flags_divergence_from_the_estimated_pin(probe_selector):
     divergence = result.data["estimate_divergence"]
     assert divergence["estimated_provider"] == "kling"
     assert divergence["executed_provider"] == "seedance"
-    assert divergence["estimated_usd"] == pytest.approx(0.10)
+    assert divergence["estimated_usd"] == pytest.approx(0.63)
     assert divergence["executed_estimate_usd"] == pytest.approx(1.52)
     assert divergence["estimated_routing"]["allowed_providers"] == ["kling"]
     assert divergence["executed_routing"]["allowed_providers"] == []
@@ -511,8 +512,15 @@ def test_pinning_actually_redirects_the_real_scorer():
 
 
 @pytest.mark.skipif(not _kling_is_live(), reason="kling_video not credentialed here")
-def test_five_reel_shortfall_costs_fifty_cents():
-    """Spec §5.3: a full five-reel pool shortfall is 5 x $0.10 = $0.50."""
+def test_five_reel_shortfall_costs_three_dollars_fifteen():
+    """Spec §5.3: a full five-reel pool shortfall is 5 x $0.63 = $3.15.
+
+    kling 3.0 standard (fal-ai/kling-video/v3/standard/text-to-video) lists at
+    $0.084/s with audio off and $0.126/s with audio on. fal's own schema defaults
+    generate_audio to true on the v3 endpoints, so that is what the route has
+    billed all along; the tool now sends true explicitly to keep the estimate and
+    the bill equal. A 5 s clip is $0.63 and five of them are $3.15.
+    """
     sel = _live_selector()
     clip = {
         "prompt": "gym atmosphere",
@@ -520,7 +528,7 @@ def test_five_reel_shortfall_costs_fifty_cents():
         "aspect_ratio": "9:16",
         "allowed_providers": ["kling"],
     }
-    assert sum(sel.estimate_cost(dict(clip)) for _ in range(5)) == pytest.approx(0.50)
+    assert sum(sel.estimate_cost(dict(clip)) for _ in range(5)) == pytest.approx(3.15)
 
 
 def test_rank_operation_still_prices_free_under_an_unresolvable_pin():
@@ -548,12 +556,12 @@ def test_rank_operation_still_prices_free_under_an_unresolvable_pin():
 def test_divergence_is_warned_into_the_run_log(probe_selector, caplog):
     """The result payload is only seen by a caller who inspects it; the log is not.
 
-    An operator reading the run log must see the 15x under-price even when
+    An operator reading the run log must see the ~2.4x under-price even when
     nobody opens result.data — that is the whole reason the warning exists.
     """
     assert probe_selector.estimate_cost(
         {"prompt": "x", "allowed_providers": ["kling"]}
-    ) == pytest.approx(0.10)
+    ) == pytest.approx(0.63)
 
     with caplog.at_level("WARNING", logger="tools.video.video_selector"):
         result = probe_selector.execute({"prompt": "x"})  # pin dropped
@@ -566,7 +574,7 @@ def test_divergence_is_warned_into_the_run_log(probe_selector, caplog):
     assert warnings, "a divergence must reach the run log, not only result.data"
     message = warnings[0]
     assert "kling" in message and "seedance" in message
-    assert "0.1000" in message and "1.52" in message
+    assert "0.6300" in message and "1.52" in message
 
 
 def test_matching_routing_logs_no_divergence_warning(probe_selector, caplog):
@@ -642,8 +650,8 @@ class _FailingStub(_StubTool):
         return ToolResult(success=False, error="provider blew up")
 
 
-def _two_provider_selector(rankings, *, kling_cost: float | None = 0.10):
-    """seedance (top-ranked, $1.52) + kling ($0.10), with handles on both."""
+def _two_provider_selector(rankings, *, kling_cost: float | None = 0.42):
+    """seedance (top-ranked, $1.52) + kling ($0.42), with handles on both."""
     seedance = _StubTool("seedance_video", "seedance", cost=1.52)
     kling = _StubTool("kling_video", "kling", cost=kling_cost)
     rankings.extend([
@@ -661,14 +669,14 @@ def test_divergence_flagged_when_the_world_reroutes_identical_inputs(rankings, c
     """ONE dict, priced and executed — and the money still moves.
 
     kling goes UNAVAILABLE between the quote and the call, so the same inputs
-    route to seedance at 15x. Comparing the request finds nothing to compare:
+    route to seedance at ~3.6x. Comparing the request finds nothing to compare:
     the routing slices here are equal, which is exactly why the comparison has
     to be on the executed provider and the executed price.
     """
     sel, _seedance, kling = _two_provider_selector(rankings)
     inputs = {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.5}
 
-    assert sel.estimate_cost(inputs) == pytest.approx(0.10)
+    assert sel.estimate_cost(inputs) == pytest.approx(0.42)
     kling._status = ToolStatus.UNAVAILABLE  # the world changes, the inputs do not
 
     with caplog.at_level("WARNING", logger="tools.video.video_selector"):
@@ -678,7 +686,7 @@ def test_divergence_flagged_when_the_world_reroutes_identical_inputs(rankings, c
     divergence = result.data["estimate_divergence"]
     assert divergence["estimated_provider"] == "kling"
     assert divergence["executed_provider"] == "seedance"
-    assert divergence["estimated_usd"] == pytest.approx(0.10)
+    assert divergence["estimated_usd"] == pytest.approx(0.42)
     assert divergence["executed_estimate_usd"] == pytest.approx(1.52)
     assert divergence["estimated_routing"] == divergence["executed_routing"], (
         "the request never changed — a request-only guard has nothing to fire on"
@@ -715,7 +723,7 @@ def test_changing_only_the_preference_gap_is_flagged(rankings):
     quoted = sel.estimate_cost(
         {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.5}
     )
-    assert quoted == pytest.approx(0.10)
+    assert quoted == pytest.approx(0.42)
 
     result = sel.execute(
         {"prompt": "x", "preferred_provider": "kling", "preferred_provider_gap": 0.0}
@@ -757,10 +765,10 @@ def test_every_clip_of_a_batch_is_flagged_against_the_one_quote(rankings, caplog
     """reel-batch's real shape: price one cutaway, generate five.
 
     Consuming the quote on the first execute flagged [True, False, False, False,
-    False] while $7.60 went out against a $0.10 quote — 4 of 5 paid calls unwarned.
+    False] while $7.60 went out against a $0.42 quote — 4 of 5 paid calls unwarned.
     """
     sel, _seedance, _kling = _two_provider_selector(rankings)
-    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.10)
+    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.42)
 
     with caplog.at_level("WARNING", logger="tools.video.video_selector"):
         results = [sel.execute({"prompt": f"clip {i}"}) for i in range(5)]
@@ -774,7 +782,7 @@ def test_every_clip_of_a_batch_is_flagged_against_the_one_quote(rankings, caplog
 def test_a_failed_execute_does_not_consume_the_quote(rankings):
     """A call that spent nothing must not disarm the guard for the next one."""
     seedance = _StubTool("seedance_video", "seedance", cost=1.52)
-    kling = _StubTool("kling_video", "kling", cost=0.10)
+    kling = _StubTool("kling_video", "kling", cost=0.42)
     broken = _FailingStub("broken_video", "broken", cost=0.0)
     rankings.extend([
         _ScoreStub("broken_video", "broken", 0.99),
@@ -784,7 +792,7 @@ def test_a_failed_execute_does_not_consume_the_quote(rankings):
     sel = VideoSelector()
     sel._providers = lambda: [seedance, kling, broken]  # type: ignore[assignment]
 
-    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.10)
+    assert sel.estimate_cost({"prompt": "x", "allowed_providers": ["kling"]}) == pytest.approx(0.42)
     assert sel.execute({"prompt": "x"}).success is False  # top-ranked provider fails
 
     broken._status = ToolStatus.UNAVAILABLE
@@ -812,13 +820,13 @@ def test_duplicate_pin_prices_and_routes_identically_and_is_not_flagged(rankings
     sel, _seedance, _kling = _two_provider_selector(rankings)
     assert sel.estimate_cost(
         {"prompt": "x", "allowed_providers": ["kling", "kling"]}
-    ) == pytest.approx(0.10)
+    ) == pytest.approx(0.42)
 
     with caplog.at_level("WARNING", logger="tools.video.video_selector"):
         result = sel.execute({"prompt": "x", "allowed_providers": ["kling"]})
 
     assert result.data["selected_provider"] == "kling"
-    assert result.data["executed_estimate_usd"] == pytest.approx(0.10)
+    assert result.data["executed_estimate_usd"] == pytest.approx(0.42)
     assert "estimate_divergence" not in result.data
     assert not [r for r in caplog.records if "divergence" in r.getMessage()]
 

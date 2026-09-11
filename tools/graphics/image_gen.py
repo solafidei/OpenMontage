@@ -15,6 +15,7 @@ install instructions when no provider is configured.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -123,7 +124,10 @@ class ImageGen(BaseTool):
         if provider == "openai":
             return 0.053  # gpt-image-2 medium at 1024x1024 (call uses auto quality)
         if provider == "flux":
-            return 0.03
+            # fal-ai/flux/dev bills $0.025 per output megapixel, rounded up
+            # (1 MP = 1024x1024).
+            pixels = int(inputs.get("width", 1024)) * int(inputs.get("height", 1024))
+            return round(0.025 * max(1, math.ceil(pixels / 1_048_576)), 4)
         return 0.0  # local
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -229,7 +233,7 @@ class ImageGen(BaseTool):
             },
             artifacts=[str(output_path)],
             seed=data.get("seed"),
-            model="flux-dev",
+            model="fal-ai/flux/dev",
         )
 
     def _generate_local(self, inputs: dict[str, Any]) -> ToolResult:

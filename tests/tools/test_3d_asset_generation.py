@@ -60,6 +60,9 @@ def test_fal_cost_matrix_and_input_validation(monkeypatch, tmp_path):
     assert tool.estimate_cost({"operation": "reconstruct_objects"}) == 0.02
     assert tool.estimate_cost({"operation": "image_to_3d", "enable_pbr": False}) == 0.225
     assert tool.estimate_cost({"operation": "image_to_3d", "enable_pbr": True}) == 0.375
+    # Hunyuan 3D v3.1 Pro tier: $0.375 per generation, PBR adds $0.15.
+    assert tool.estimate_cost({"operation": "text_to_3d_pro", "enable_pbr": False}) == 0.375
+    assert tool.estimate_cost({"operation": "image_to_3d_pro", "enable_pbr": True}) == 0.525
     result = tool.execute({"operation": "text_to_3d", "output_path": str(tmp_path / "asset.glb")})
     assert not result.success
 

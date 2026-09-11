@@ -184,7 +184,7 @@ SUNO_API_KEY=your-key          # 完整的歌曲、伴奏，涵盖任何流派
 ELEVENLABS_API_KEY=your-key    # 顶级 TTS、AI 音乐、音效
 OPENAI_API_KEY=your-key        # OpenAI TTS、GPT Image 2 图像
 XAI_API_KEY=your-key           # xAI Grok 图像编辑/生成 + Grok 视频生成
-GOOGLE_API_KEY=your-key        # Google Imagen 图像、Google TTS（700+ 种声音）
+GOOGLE_API_KEY=your-key        # Google Gemini 图像模型(Nano Banana 2)、Lyria 音乐、Gemini Omni/Veo 视频、Google TTS（700+ 种声音）
 
 # 更多视频提供商:
 ARK_API_KEY=your-key           # 火山方舟直连 — Seedance 2.0 Standard/Fast/Mini
@@ -425,7 +425,7 @@ OpenMontage/
 | **Kling** | 云端 API | 高质量，速度快 |
 | **Seedance 2.0（火山方舟）** | 云端 API | 独立的 `seedance_ark` 官方直连接口 |
 | **Runway Gen-4** | 云端 API | 电影级质量，Gen-3 Alpha Turbo / Gen-4 Turbo / Gen-4 Aleph |
-| **Google Veo 3** | 云端 API | 长篇幅，电影级。通过 fal.ai 或 HeyGen 接入。 |
+| **Google Veo 3.1** | 云端 API | 电影级质量。通过 Google GenAI、fal.ai 或 HeyGen 接入(Veo 3 / Veo 2 已于 2026-06-30 在 Gemini API 停服)。 |
 | **Grok Imagine Video** | 云端 API | 强大的基于参考图的视频和 xAI 原生短视频生成 |
 | **Higgsfield** | 云端 API | 带 Soul ID 以实现角色一致性的多模型编排器 |
 | **MiniMax** | 云端 API | 极具成本效益 |
@@ -446,7 +446,7 @@ OpenMontage/
 | 提供商 | 类型 | 备注 |
 |----------|------|-------|
 | **FLUX** | 云端 API | 业界顶尖质量 |
-| **Google Imagen** | 云端 API | Imagen 4 — 高质量、多种长宽比 |
+| **Google Imagen** | 云端 API | Gemini 图像模型(Nano Banana 2 `gemini-3.1-flash-image`、Nano Banana 2 Lite `gemini-3.1-flash-lite-image`、Nano Banana Pro `gemini-3-pro-image`);Imagen 4 已于 2026-08-17 在 Gemini API 停服 |
 | **Grok Imagine Image** | 云端 API | 强大的图像编辑、风格转换和多图合成 |
 | **GPT Image 2** | 云端 API | OpenAI 的图像模型 |
 | **Recraft** | 云端 API | 专注于设计的生成 |

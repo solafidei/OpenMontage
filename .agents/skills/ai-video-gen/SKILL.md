@@ -20,7 +20,7 @@ Generate AI videos from text prompts. Supports multiple providers via four API p
 
 | Gateway | Env Variable | Providers | Tool |
 |---------|-------------|-----------|------|
-| **fal.ai** | `FAL_KEY` | **Seedance 2.0** (standard + fast), Kling v3/v2.1, MiniMax, VEO | `seedance_video`, `kling_video`, `minimax_video`, `veo_video` |
+| **fal.ai** | `FAL_KEY` | **Seedance 2.5 / 2.0** (2.0 standard + fast), Kling v3/v2.1, MiniMax H3, Veo 3.1 (standard + fast), Gemini Omni Flash | `seedance_video`, `kling_video`, `minimax_fal_video`, `veo_video`, `gemini_omni_fal` |
 | **HeyGen** | `HEYGEN_API_KEY` | VEO 3.1, Kling Pro, Sora v2, Runway Gen-4, Seedance Pro / Lite (1.x) | `heygen_video` |
 | **Kling Official** | `KLING_API_KEY` | Kling official Classic, Turbo, and basic Omni video | `kling_official_video` |
 | **Gemini API** | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini Omni Flash (generation + conversational editing) | `gemini_omni_video` |
@@ -36,7 +36,7 @@ Generate AI videos from text prompts. Supports multiple providers via four API p
 Use whichever configured gateway best matches the user's available providers and cost/quality goals.
 
 - **HeyGen:** Set `HEYGEN_API_KEY` to access the multi-model gateway.
-- **fal.ai:** Set `FAL_KEY` to access Kling, MiniMax, and Veo through fal.ai.
+- **fal.ai:** Set `FAL_KEY` to access Seedance, Kling, MiniMax H3, Veo 3.1, and Gemini Omni Flash through fal.ai.
 - **Kling Official:** Set `KLING_API_KEY` to access Kling's official direct API via `provider="kling_official"`.
 - **Gemini API:** Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` to access Gemini Omni video generation and conversational editing.
 
@@ -82,9 +82,9 @@ curl -X POST "https://api.heygen.com/v1/workflows/executions" \
 |----------|-------|-------------|
 | VEO 3.1 | `"veo_3_1"` | Google VEO 3.1 (default, highest quality) |
 | VEO 3.1 Fast | `"veo_3_1_fast"` | Faster VEO 3.1 variant |
-| VEO 3 | `"veo3"` | Google VEO 3 |
-| VEO 3 Fast | `"veo3_fast"` | Faster VEO 3 variant |
-| VEO 2 | `"veo2"` | Google VEO 2 |
+| VEO 3 | `"veo3"` | Google VEO 3 — legacy: Google shut down veo-3.0-generate-001 on 2026-06-30; prefer `veo_3_1` |
+| VEO 3 Fast | `"veo3_fast"` | Faster VEO 3 variant — legacy: Google shut down veo-3.0-fast-generate-001 on 2026-06-30; prefer `veo_3_1_fast` |
+| VEO 2 | `"veo2"` | Google VEO 2 — legacy: Google shut down veo-2.0-generate-001 on 2026-06-30; prefer `veo_3_1` |
 | Kling Pro | `"kling_pro"` | Kling Pro model |
 | Kling V2 | `"kling_v2"` | Kling V2 model |
 | Sora V2 | `"sora_v2"` | OpenAI Sora V2 |
@@ -325,7 +325,7 @@ curl -X POST "https://api.heygen.com/v1/workflows/executions" \
 ## Best Practices
 
 1. **Be descriptive in prompts** — include camera movement, lighting, style, and mood details
-2. **Default to Seedance 2.0 (via `seedance_video`) for cinematic and motion-led work** when `FAL_KEY` is set — single-pass synced audio, multi-shot, lip-sync, director-level camera. Use VEO 3.1 / Sora V2 Pro when the user specifically wants Google or OpenAI motion character; use `ltx_distilled` or `veo3_fast` only when speed is the hard constraint
+2. **Default to Seedance 2.0 (via `seedance_video`) for cinematic and motion-led work** when `FAL_KEY` is set — single-pass synced audio, multi-shot, lip-sync, director-level camera. Use VEO 3.1 / Sora V2 Pro when the user specifically wants Google or OpenAI motion character; use `ltx_distilled` or `veo_3_1_fast` only when speed is the hard constraint
 3. **Use reference images** for image-to-video generation — great for animating product photos or still images
 4. **Video generation is the slowest workflow** — allow up to 5 minutes, poll every 10 seconds
 5. **Aspect ratio matters** — use `9:16` for social media stories/reels, `16:9` for landscape, `1:1` for square

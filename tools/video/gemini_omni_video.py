@@ -1,14 +1,16 @@
 """Google Gemini Omni Flash video generation and conversational editing.
 
 Calls the Gemini Interactions API (``POST /v1beta/interactions``) directly with
-the project's Google API key — the same key that unlocks Imagen images and
-Cloud TTS. Gemini Omni Flash generates 3-10 second 720p/24fps clips with
-synthesized audio, and is the only provider in the fleet with stateful
+the project's Google API key — the same key that unlocks the Gemini image
+models and Cloud TTS. Gemini Omni 1.1 Flash generates 3-10 second 24fps clips
+with synthesized audio at 720p by default (360p, or upscaled 1080p/4K via
+``resolution``), and is the only provider in the fleet with stateful
 conversational editing: pass ``previous_interaction_id`` and describe only the
 delta ("Make the violin invisible. Keep everything else the same.").
 
 Reference images bind to roles via inline prompt tags (``<FIRST_FRAME>``,
-``<IMAGE_REF_N>``) and beats can be scheduled with timecode syntax
+``<LAST_FRAME>``, ``<IMAGE_REF_N>``; the model's ``<VIDEO_REF_N>`` reference-clip
+tag is not exposed by this tool) and beats can be scheduled with timecode syntax
 (``[0-3s] ... [3-6s] ...``). See the Layer 3 skill ``gemini-omni`` for the
 authoritative prompting guide — read it before writing prompts.
 """
@@ -37,10 +39,23 @@ from tools.base_tool import (
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
-_DEFAULT_MODEL = "gemini-omni-flash-preview"
+# gemini-omni-flash-preview (the launch model) is deprecated — shutdown
+# 2026-09-30; gemini-omni-1.1-flash is the GA replacement (2026-08-27), same
+# Interactions API and same per-second price.
+_DEFAULT_MODEL = "gemini-omni-1.1-flash"
 # Billed at 5,792 output tokens per second of 720p video, $17.50/1M tokens
 # (ai.google.dev/gemini-api/docs/pricing) — effectively ~$0.10 per second.
+# Google bills Omni purely by tokens and publishes no per-resolution ladder;
+# the 360p/1080p/4K figures below are fal.ai's gateway prices for the same
+# model (google/gemini-omni-flash/v1.1/*), used here only as an upper-bound
+# proxy. Treat non-720p Gemini-API costs as unquoted.
 _COST_PER_SECOND = 0.10
+_COST_PER_SECOND_BY_RESOLUTION = {
+    "360p": 0.03,
+    "720p": _COST_PER_SECOND,
+    "1080p": 0.15,
+    "4k": 0.30,
+}
 _DEFAULT_DURATION_SECONDS = 8
 _POLL_INTERVAL_SECONDS = 5
 _MAX_POLL_SECONDS = 900
@@ -61,7 +76,10 @@ class GeminiOmniVideo(BaseTool):
     install_instructions = (
         "Set GEMINI_API_KEY or GOOGLE_API_KEY to a Google AI Studio API key.\n"
         "  Get one at https://aistudio.google.com/apikey\n"
-        "  Gemini Omni Flash is paid-tier only (no free tier); ~$0.10 per second of video."
+        "  Gemini Omni 1.1 Flash is paid-tier only (no free tier). Google bills by\n"
+        "  tokens and publishes only the 720p rate, ~$0.10 per second; the 360p\n"
+        "  $0.03/s, 1080p $0.15/s, and 4K $0.30/s figures used below are fal.ai's\n"
+        "  gateway prices for the same model, borrowed as an upper-bound proxy."
     )
     agent_skills = ["gemini-omni", "ai-video-gen"]
 
@@ -75,7 +93,12 @@ class GeminiOmniVideo(BaseTool):
         "native_audio": True,
         "text_rendering": True,
         "timecode_control": True,
-        # Preview limitations — no sampler controls of any kind.
+        # No sampler controls wired: negative prompts are documented as
+        # unsupported (put negatives in the prompt itself), and the Omni guide
+        # documents no seed control. The model does interpolate between
+        # <FIRST_FRAME>/<LAST_FRAME>-tagged images in reference_image_paths, but
+        # this tool has no first_last_frame_to_video operation or last-frame
+        # input, so that flag stays False until it is wired.
         "seed": False,
         "negative_prompt": False,
         "first_last_frame_to_video": False,
@@ -86,13 +109,14 @@ class GeminiOmniVideo(BaseTool):
         "fast 3-10s clips with synced audio, rendered text, and timecoded beats from one Google key",
     ]
     not_good_for = [
-        "clips longer than 10 seconds or above 720p",
+        "clips longer than 10 seconds per generation, or native detail above 720p (1080p/4K outputs are upscales)",
         "seed-reproducible output or negative-prompt control",
         "offline generation",
     ]
     fallback_tools = ["veo_video", "sora_video", "kling_video", "minimax_video"]
-    # Conversational editing + native audio are unique in the fleet, but preview
-    # output is capped at 720p/10s — below seedance (0.95) and grok/runway (0.9)
+    # Conversational editing + native audio are unique in the fleet, but output
+    # is 720p-native (1080p/4K upscaled) and <=10s per generation — below
+    # seedance (0.95) and grok/runway (0.9)
     # on raw generation fidelity. Without a quality_score the scorer would only
     # count supports/stability flags and bury the editing capability entirely.
     # See lib/scoring.py.
@@ -106,7 +130,7 @@ class GeminiOmniVideo(BaseTool):
                 "type": "string",
                 "description": (
                     "Video description, or for edit_video the change to apply. "
-                    "Supports <FIRST_FRAME>/<IMAGE_REF_N> tags and [0-3s] timecodes — "
+                    "Supports <FIRST_FRAME>/<LAST_FRAME>/<IMAGE_REF_N> tags and [0-3s] timecodes — "
                     "see the gemini-omni skill."
                 ),
             },
@@ -119,6 +143,15 @@ class GeminiOmniVideo(BaseTool):
                 "type": "string",
                 "enum": ["16:9", "9:16"],
                 "default": "16:9",
+            },
+            "resolution": {
+                "type": "string",
+                "enum": ["360p", "720p", "1080p", "4k"],
+                "default": "720p",
+                "description": (
+                    "Output resolution. 720p is native; 1080p and 4k are upscaled and "
+                    "billed higher. Omit to let the API default to 720p."
+                ),
             },
             "duration": {
                 "type": "string",
@@ -166,7 +199,13 @@ class GeminiOmniVideo(BaseTool):
         cpu_cores=1, ram_mb=512, vram_mb=0, disk_mb=500, network_required=True
     )
     retry_policy = RetryPolicy(max_retries=1, retryable_errors=["rate_limit", "timeout"])
-    idempotency_key_fields = ["prompt", "operation", "aspect_ratio", "previous_interaction_id"]
+    idempotency_key_fields = [
+        "prompt",
+        "operation",
+        "aspect_ratio",
+        "resolution",
+        "previous_interaction_id",
+    ]
     side_effects = [
         "writes video file to output_path",
         "calls the Gemini Interactions API",
@@ -198,7 +237,9 @@ class GeminiOmniVideo(BaseTool):
         return max(3, min(10, seconds))
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        return _COST_PER_SECOND * self._duration_hint(inputs)
+        resolution = str(inputs.get("resolution") or "720p").lower()
+        rate = _COST_PER_SECOND_BY_RESOLUTION.get(resolution, _COST_PER_SECOND)
+        return rate * self._duration_hint(inputs)
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return 180.0
@@ -391,6 +432,8 @@ class GeminiOmniVideo(BaseTool):
                 "delivery": "uri",
             },
         }
+        if inputs.get("resolution"):
+            payload["response_format"]["resolution"] = str(inputs["resolution"]).lower()
         if previous_interaction_id:
             payload["previous_interaction_id"] = previous_interaction_id
         if inputs.get("store") is False:
@@ -440,6 +483,7 @@ class GeminiOmniVideo(BaseTool):
                 "operation": operation,
                 "output": str(output_path),
                 "aspect_ratio": aspect_ratio,
+                "resolution": str(inputs.get("resolution") or "720p").lower(),
                 "has_audio": True,
                 # Feed this back as previous_interaction_id to edit this clip.
                 "interaction_id": interaction_id,

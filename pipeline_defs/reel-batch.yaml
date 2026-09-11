@@ -23,13 +23,19 @@ orchestration:
   # typical one. Under spec R8 cutaways are free-first: flash accents come from the
   # operator's own pool, and AI fires only when the idea gate measures the pool cannot
   # cover N reels x cuts per reel. A typical sitting spends $0.00. A full five-reel
-  # shortfall is 5 x $0.10 = $0.50 on the pinned kling_video route via video_selector.
+  # shortfall is 5 x $0.42 = $2.10 on the pinned kling_video route via video_selector.
+  # That $0.42 is fal's audio-OFF rate for a 5s v3/standard clip ($0.084/s): the pin sends
+  # generate_audio: false because the sub-second trim discards the audio. Leaving it on
+  # would cost $0.126/s -> $0.63/clip -> $3.15 a sitting, which this cap does NOT cover.
   # Recompute from those two numbers rather than guessing if either changes.
   budget_default_usd: 2.00
   budget_per_output_minute_usd: 0.75
   max_revisions_per_stage: 3
   max_send_backs: 3
-  max_wall_time_minutes: 20
+  # A cold-index first sitting alone measured 1171.8s (~19.5 min, decision #11) on the
+  # operator's 67-file pool — 20 left no room for idea/script/scene/asset/edit/compose/
+  # publish on top of it. 45 covers a cold-index sitting end to end.
+  max_wall_time_minutes: 45
 
 extensions:
   custom_scripts: true

@@ -340,7 +340,10 @@ TRADEOFF: TTS Provider
 └── Free: Piper local ($0.00) — robotic but works offline
 
 TRADEOFF: Visual Assets
-├── Premium: AI video clips ($0.10-0.50/clip) — motion, dynamic
+├── Premium: AI video clips ($0.50-3.20/clip at current provider rates —
+│   Gemini Omni Flash 5s 720p ≈ $0.50, Veo 3.1 8s 720p with audio ≈ $3.20
+│   (4/6/8s only — Veo has no 5s option), Seedance 2.0 10s 720p ≈ $3.03;
+│   price every clip with the tool's own estimate_cost) — motion, dynamic
 ├── Standard: AI images ($0.02-0.04/image) — static, reliable
 └── Free: Diagrams/code ($0.00) — text-based, technical feel
 
@@ -358,7 +361,7 @@ Also present **alternative production paths** — complete packages at different
 
 | Path | Quality | Cost | What Changes |
 |------|---------|------|-------------|
-| Premium | Best TTS + video clips + music | ~$1.50-2.50 | Full production value |
+| Premium | Best TTS + video clips + music | ~$1.30-1.40 with two Gemini Omni Flash 5s clips ($0.50 each); ~$6.35-6.50 with two Seedance 2.0 10s clips ($3.03 each) | Full production value |
 | Standard | Good TTS + images + music | ~$0.50-1.00 | Static visuals, still professional |
 | Budget | Local TTS + images | ~$0.05-0.15 | Robotic voice, image-only |
 | Free | Local TTS + diagrams | $0.00 | Functional but minimal |
@@ -668,7 +671,7 @@ If you encounter a generation technique, provider behavior, or prompting pattern
 
 This is especially important for:
 - **Video generation prompting** — models respond to specific vocabularies that change with each version
-- **Image model parameters** — optimal settings for FLUX, GPT Image, Imagen differ and evolve
+- **Image model parameters** — optimal settings for FLUX, GPT Image, Nano Banana 2 (`gemini-3.1-flash-image`; Imagen 4 shut down on the Gemini API 2026-08-17) differ and evolve
 - **Audio provider quirks** — voice cloning, music generation, and TTS each have model-specific best practices
 - **Remotion component patterns** — new composition techniques emerge as the framework evolves
 

@@ -1,6 +1,6 @@
 """Generate music using Google Lyria via Google GenAI SDK.
 
-Generate background music and audio tracks for video production using lyria-3-pro-preview.
+Generate background music and audio tracks for video production using lyria-3.5.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class GoogleMusic(BaseTool):
                 "minimum": 5,
                 "maximum": 184,
                 "default": 30,
-                "description": "Target duration in seconds (model hard limit is 184s)",
+                "description": "Target duration in seconds (tool cap; lyria-3.5 publishes no hard maximum and controls length by prompt)",
             },
             "image_url": {
                 "type": "string",
@@ -127,7 +127,7 @@ class GoogleMusic(BaseTool):
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
         """Estimate the generation cost in USD."""
-        # Lyria 3 Pro is a flat $0.08 per generation request
+        # Lyria 3.5 is a flat $0.08 per full song (lyria-3-pro-preview was the same)
         return 0.08
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
@@ -170,13 +170,13 @@ class GoogleMusic(BaseTool):
                 import logging
 
                 logging.getLogger(__name__).warning(
-                    "Lyria 3 Pro requires a minimum duration of 5 seconds. Coercing duration_seconds to 5.0."
+                    "google_music enforces a minimum duration of 5 seconds (tool floor; lyria-3.5 publishes no hard minimum). Coercing duration_seconds to 5.0."
                 )
                 duration = 5.0
             else:
                 return ToolResult(
                     success=False,
-                    error="lyria-3-pro-preview minimum duration is 5 seconds.",
+                    error="google_music minimum duration is 5 seconds (tool floor; lyria-3.5 publishes none).",
                 )
 
         # Cap at 184 seconds
@@ -185,13 +185,13 @@ class GoogleMusic(BaseTool):
                 import logging
 
                 logging.getLogger(__name__).warning(
-                    "Lyria 3 Pro supports up to 184 seconds of audio. Coercing duration_seconds to 184."
+                    "google_music caps duration at 184 seconds (tool ceiling; lyria-3.5 publishes no hard maximum and controls length by prompt). Coercing duration_seconds to 184."
                 )
                 duration = 184.0
             else:
                 return ToolResult(
                     success=False,
-                    error="lyria-3-pro-preview maximum duration is 184 seconds.",
+                    error="google_music maximum duration is 184 seconds (tool ceiling; lyria-3.5 publishes none).",
                 )
 
         # Helper to load reference image bytes + mime type
@@ -233,7 +233,7 @@ class GoogleMusic(BaseTool):
                 error=f"Failed to load visual conditioning image: {e}",
             )
 
-        model_name = "lyria-3-pro-preview"
+        model_name = "lyria-3.5"
 
         try:
             # Create parent dirs if needed

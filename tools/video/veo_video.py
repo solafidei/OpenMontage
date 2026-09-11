@@ -99,7 +99,14 @@ class VeoVideo(BaseTool):
             "model_variant": {
                 "type": "string",
                 "default": "veo3.1",
-                "description": "Model variant for FAL (e.g. veo3.1) or custom model for Google",
+                "description": (
+                    "veo3.1 (standard), veo3.1/fast or veo3.1/lite. On fal this is the endpoint "
+                    "prefix (fal-ai/<variant>/...); on Google it selects veo-3.1-[fast-|lite-]"
+                    "generate-preview (Gemini API) or veo-3.1-[fast-|lite-]generate-001 (Vertex). "
+                    "Legacy 'veo3' / 'veo3/fast' alias to the 3.1 tiers (Veo 3.0 shut down "
+                    "2026-06-30). Lite has no 4k, no reference_to_video and no video extension. "
+                    "Any other string is passed to Google as a custom model name."
+                ),
             },
             "duration": {
                 "type": "string",
@@ -202,27 +209,34 @@ class VeoVideo(BaseTool):
         except ValueError:
             duration = 8
 
-        if backend == "google":
-            # Standard Google Veo is $0.40 per second
-            return round(duration * 0.40, 4)
-
-        # FAL cost estimation
         variant = inputs.get("model_variant", "veo3.1")
-        resolution = inputs.get("resolution", "1080p")
+        resolution = str(inputs.get("resolution", "1080p")).lower()
         generate_audio = bool(inputs.get("generate_audio", True))
+        tier = "lite" if "lite" in variant else ("fast" if "fast" in variant else "standard")
 
-        if "fast" in variant:
-            base_per_second = 0.10
-            audio_per_second = 0.20
-        else:
-            if resolution == "4k":
-                base_per_second = 0.40
-                audio_per_second = 0.60
-            else:
-                base_per_second = 0.20
-                audio_per_second = 0.40
+        if backend == "google":
+            # Gemini API list prices per output second (ai.google.dev/gemini-api/docs/pricing):
+            # veo-3.1-generate-preview $0.40 (720p/1080p) / $0.60 (4K);
+            # veo-3.1-fast-generate-preview $0.10 / $0.12 / $0.30;
+            # veo-3.1-lite-generate-preview $0.05 (720p) / $0.08 (1080p), no 4K.
+            google_rates = {
+                "standard": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
+                "fast": {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
+                "lite": {"720p": 0.05, "1080p": 0.08},
+            }[tier]
+            return round(duration * google_rates.get(resolution, google_rates["720p"]), 4)
 
-        return (audio_per_second if generate_audio else base_per_second) * duration
+        # fal.ai list prices per output second, (audio off, audio on):
+        # fal-ai/veo3.1 $0.20 / $0.40 at 720p-1080p, $0.40 / $0.60 at 4k;
+        # fal-ai/veo3.1/fast $0.10 / $0.15, $0.30 / $0.35 at 4k;
+        # fal-ai/veo3.1/lite $0.03 / $0.05 at 720p, $0.05 / $0.08 at 1080p (no 4k).
+        fal_rates = {
+            "standard": {"720p": (0.20, 0.40), "1080p": (0.20, 0.40), "4k": (0.40, 0.60)},
+            "fast": {"720p": (0.10, 0.15), "1080p": (0.10, 0.15), "4k": (0.30, 0.35)},
+            "lite": {"720p": (0.03, 0.05), "1080p": (0.05, 0.08)},
+        }[tier]
+        base_per_second, audio_per_second = fal_rates.get(resolution, fal_rates["720p"])
+        return round((audio_per_second if generate_audio else base_per_second) * duration, 4)
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         """Estimate the expected runtime in seconds."""
@@ -313,12 +327,20 @@ class VeoVideo(BaseTool):
         model_variant = inputs.get("model_variant", "veo3.1")
         auto_fix = inputs.get("auto_fix", True)
 
-        # Map to the official preview model unless a custom model name is provided
-        if model_variant in {"veo3", "veo3/fast", "veo3.1", "veo3.1/fast"}:
-            if is_vertex:
-                model_name = "veo-3.1-generate-001"
-            else:
-                model_name = "veo-3.1-generate-preview"
+        # Map the tool's variant names to the current Google model ids. Veo 3.0 and
+        # Veo 2 were shut down on 2026-06-30, so the legacy "veo3" / "veo3/fast" names
+        # are aliases for their 3.1 tiers. Anything else is a custom model name.
+        _google_models = {
+            "veo3.1": ("veo-3.1-generate-001", "veo-3.1-generate-preview"),
+            "veo3.1/fast": ("veo-3.1-fast-generate-001", "veo-3.1-fast-generate-preview"),
+            "veo3.1/lite": ("veo-3.1-lite-generate-001", "veo-3.1-lite-generate-preview"),
+        }
+        canonical_variant = {"veo3": "veo3.1", "veo3/fast": "veo3.1/fast"}.get(
+            model_variant, model_variant
+        )
+        if canonical_variant in _google_models:
+            vertex_id, gemini_id = _google_models[canonical_variant]
+            model_name = vertex_id if is_vertex else gemini_id
         else:
             model_name = model_variant
 
@@ -330,6 +352,24 @@ class VeoVideo(BaseTool):
 
         aspect_ratio = inputs.get("aspect_ratio", "16:9")
         resolution = inputs.get("resolution", "1080p")
+
+        # Veo 3.1 Lite (Gemini API and Vertex) has no 4K output, no reference
+        # images and no video extension; it does support image-to-video and
+        # first/last-frame interpolation (lastFrame is accepted for Lite).
+        if "lite" in str(model_name):
+            if resolution == "4k":
+                return ToolResult(
+                    success=False,
+                    error="Veo 3.1 Lite has no 4K output; use resolution='720p' or '1080p'.",
+                )
+            if operation == "reference_to_video":
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "reference_to_video is not available for Veo 3.1 Lite on Google; "
+                        "use model_variant='veo3.1' or 'veo3.1/fast'."
+                    ),
+                )
 
         # Validate/Auto-Fix duration based on 1080p/4K or reference-to-video rules
         needs_8s = (resolution in {"1080p", "4k"}) or (
@@ -556,14 +596,31 @@ class VeoVideo(BaseTool):
         start = time.time()
         operation = inputs.get("operation", "text_to_video")
         variant = inputs.get("model_variant", "veo3.1")
+        # fal-ai/veo3 and fal-ai/veo3/fast are no longer in the fal catalog (Veo 3.0
+        # shut down 2026-06-30); the legacy names alias to their 3.1 endpoints.
+        variant = {"veo3": "veo3.1", "veo3/fast": "veo3.1/fast"}.get(variant, variant)
         duration = inputs.get("duration", "8s")
+        resolution = inputs.get("resolution")
 
-        # Current fal Veo 3.1 image-guided endpoints only accept 8-second clips.
-        if (
-            variant == "veo3.1"
-            and operation in {"reference_to_video", "first_last_frame_to_video"}
-            and duration != "8s"
-        ):
+        # veo3.1/lite has no reference-to-video endpoint and no 4k output on fal.
+        if "lite" in variant and operation == "reference_to_video":
+            return ToolResult(
+                success=False,
+                error="reference_to_video is not available for veo3.1/lite on fal.ai; use veo3.1 or veo3.1/fast",
+            )
+        if "lite" in variant and resolution == "4k":
+            return ToolResult(
+                success=False,
+                error="veo3.1/lite supports only 720p and 1080p on fal.ai; received resolution='4k'",
+            )
+
+        # fal's reference-to-video endpoints (veo3.1, veo3.1/fast) and the lite
+        # first-last-frame endpoint take only 8-second clips; every other veo3.1
+        # endpoint enumerates duration 4s / 6s / 8s.
+        eight_second_only = operation == "reference_to_video" or (
+            operation == "first_last_frame_to_video" and "lite" in variant
+        )
+        if eight_second_only and duration != "8s":
             return ToolResult(
                 success=False,
                 error=(

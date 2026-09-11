@@ -37,8 +37,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--density", type=float, default=0.5, help="0-1, higher = fuller mix.")
     p.add_argument(
         "--scale",
-        default="MAJOR",
-        help="MAJOR / MINOR / PENTATONIC / etc. — see google.genai.types.Scale. Pass empty string for none.",
+        default="SCALE_UNSPECIFIED",
+        help="A google.genai.types.Scale name — SCALE_UNSPECIFIED (the documented default: the model "
+        "decides) or a key / relative-minor pair such as C_MAJOR_A_MINOR, G_MAJOR_E_MINOR, "
+        "A_MAJOR_G_FLAT_MINOR, D_MAJOR_B_MINOR (no bare MAJOR / MINOR / PENTATONIC). "
+        "Pass empty string for none.",
     )
     return p.parse_args()
 
@@ -53,7 +56,7 @@ async def generate_bgm(args: argparse.Namespace) -> dict:
 
     client = genai.Client(
         api_key=api_key,
-        http_options={"api_version": "v1alpha"},
+        http_options={"api_version": "v1beta"},
     )
 
     out_path = Path(args.output)

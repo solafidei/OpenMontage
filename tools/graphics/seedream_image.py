@@ -77,7 +77,7 @@ class SeedreamImage(BaseTool):
                 "num_images": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 4,
+                    "maximum": 6,
                     "default": 1,
                 },
                 "output_format": {
@@ -160,11 +160,11 @@ class SeedreamImage(BaseTool):
         num_images = inputs.get("num_images", 1)
         if isinstance(num_images, bool) or not isinstance(num_images, int):
             return ToolResult(
-                success=False, error="num_images must be an integer from 1 to 4."
+                success=False, error="num_images must be an integer from 1 to 6."
             )
-        if not 1 <= num_images <= 4:
+        if not 1 <= num_images <= 6:
             return ToolResult(
-                success=False, error="num_images must be between 1 and 4."
+                success=False, error="num_images must be between 1 and 6."
             )
         submit_url = "https://queue.fal.run/bytedance/seedream/v5/pro/text-to-image"
         payload: dict[str, Any] = {
@@ -271,5 +271,5 @@ class SeedreamImage(BaseTool):
             artifacts=output_paths,
             cost_usd=self.estimate_cost(inputs),
             duration_seconds=round(time.time() - start, 2),
-            model="fal-ai/bytedance/seedream/v5",
+            model="bytedance/seedream/v5/pro/text-to-image",
         )

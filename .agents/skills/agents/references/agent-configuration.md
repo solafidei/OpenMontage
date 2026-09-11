@@ -13,7 +13,7 @@ agent = client.conversational_ai.agents.create(
             "language": "en",
             "prompt": {           # LLM, system prompt, tools, and knowledge base
                 "prompt": "You are helpful.",
-                "llm": "gemini-2.0-flash",
+                "llm": "gemini-2.5-flash",
                 "tools": [...],
                 "built_in_tools": {...}
             }
@@ -43,7 +43,7 @@ conversation_config={
         "disable_first_message_interruptions": False,
         "prompt": {
             "prompt": "You are a helpful assistant.",
-            "llm": "gemini-2.0-flash",
+            "llm": "gemini-2.5-flash",
             "temperature": 0.7
         }
     }
@@ -156,7 +156,7 @@ conversation_config={
     "agent": {
         "prompt": {
             "prompt": "You are a helpful customer service agent...",
-            "llm": "gemini-2.0-flash",
+            "llm": "gemini-2.5-flash",
             "temperature": 0.7,
             "max_tokens": 500,
             "tools": [...],
@@ -198,7 +198,7 @@ to resolve per-environment auth connections at runtime.
 |----------|-----------|
 | OpenAI | `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo` |
 | Anthropic | `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-haiku-4-5`, `claude-3-7-sonnet`, `claude-3-5-sonnet`, `claude-3-haiku` |
-| Google | `gemini-3.1-flash-lite-preview`, `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.0-flash`, `gemini-2.0-flash-lite` |
+| Google | `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | ElevenLabs | `glm-45-air-fp8`, `qwen3-30b-a3b`, `gpt-oss-120b` (hosted, ultra-low latency) |
 | Custom | `custom-llm` (requires custom_llm config) |
 
@@ -376,7 +376,7 @@ agent = client.conversational_ai.agents.create(
         "agent": {
             "prompt": {
                 "prompt": "You are a support agent. Use the knowledge base to answer questions.",
-                "llm": "gemini-2.0-flash",
+                "llm": "gemini-2.5-flash",
                 "knowledge_base": [
                     {"type": "file", "id": "doc-id", "name": "Product Guide", "usage_mode": "auto"}
                 ],
@@ -567,7 +567,7 @@ agent = client.conversational_ai.agents.create(
             "language": "en",
             "prompt": {
                 "prompt": "You are a customer support agent. Be helpful, professional, concise.",
-                "llm": "gemini-2.0-flash",
+                "llm": "gemini-2.5-flash",
                 "temperature": 0.5,
                 "built_in_tools": {
                     "end_call": {},
@@ -594,7 +594,7 @@ agent = client.conversational_ai.agents.create(
             "first_message": "Hey! What do you need?",
             "prompt": {
                 "prompt": "Fast, efficient assistant. Brief answers.",
-                "llm": "gemini-2.0-flash",
+                "llm": "gemini-2.5-flash",
                 "temperature": 0.3,
                 "max_tokens": 100
             }

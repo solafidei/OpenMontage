@@ -17,12 +17,15 @@ operator's own footage; this tool fires only for the shortfall the ``idea`` gate
 measured, at most one cutaway per reel, trimmed to a sub-second flash accent. Called
 with no prompts it costs $0.00 and makes no provider call at all.
 
-Route: ``kling_video``, PINNED via ``allowed_providers`` — 5s at $0.10 (its duration
-enum ``["5", "10"]`` is a hard floor). Unpinned the same shortfall routes to seedance at
-$1.52/clip, 15x, for footage trimmed to half a second. The pinned inputs dict is built
-ONCE per prompt and the identical dict is handed to ``estimate_cost`` and ``execute``
-(spec §6, defect D3); an unresolvable pin raises ``ProviderPinUnresolvedError`` from
-Wave 1 rather than estimating an unguardable $0.00.
+Route: ``kling_video``, PINNED via ``allowed_providers`` — ``v3/standard`` at 5s. fal lists
+that endpoint at $0.084/s with ``generate_audio`` off or $0.126/s with it on (fal's default).
+The trim discards the audio, so this payload sends ``generate_audio: false`` explicitly and
+takes the audio-off rate: **$0.42 per 5s clip**. ``kling_video.estimate_cost`` quotes that
+same $0.42 — the figure the approval guards and the ledger compare against — and its duration
+schema accepts 3-15s, matching fal. Unpinned the same shortfall routes to seedance at
+$1.52/clip — ~3.6x what the selector estimated — for footage trimmed to half a second. The pinned inputs dict is built ONCE per prompt and the identical dict is
+handed to ``estimate_cost`` and ``execute`` (spec §6, defect D3); an unresolvable pin raises
+``ProviderPinUnresolvedError`` from Wave 1 rather than estimating an unguardable $0.00.
 
 Trimming is MANDATORY on every route: generator durations are hints on some routes and
 the model chooses the actual length, so no code here depends on getting 5 seconds back.
@@ -60,12 +63,20 @@ from tools.base_tool import (
 )
 from tools.video.video_selector import VideoSelector
 
-# The pin. Spec §5: kling standard is $0.10 for its 5s floor; the alternatives are
-# 3x the price (gemini_omni) or minutes of dead time per clip (the local routes).
+# The pin. Spec R8 chose kling standard and §5.2 priced it at $0.10 for what it took to be a
+# 5s floor; that figure is superseded. On fal ``v3/standard`` lists at $0.084/s (audio off)
+# or $0.126/s (audio on, fal's default), and fal accepts 3-15s rather than a 5/10 pair. This
+# pin sends ``generate_audio: false`` — the trim discards the audio, so paying the audio-on
+# rate bought nothing — which puts the clip at $0.42 and ``kling_video.estimate_cost`` quotes
+# exactly that. The alternatives are seedance at $1.52/clip, gemini_omni at ~$0.10/s ($0.30 at
+# its 3s hint, $0.50 per 5s), or minutes of dead time per clip (the local routes).
 CUTAWAY_PROVIDER_PIN = ["kling"]
 CUTAWAY_MODEL_VARIANT = "v3/standard"
 CUTAWAY_CLIP_SECONDS = "5"
 CUTAWAY_ASPECT_RATIO = "9:16"
+# The trim keeps well under a second and discards the audio track; fal bills $0.126/s with
+# audio on and $0.084/s with it off, so sending it on would pay 50% more for nothing.
+CUTAWAY_GENERATE_AUDIO = False
 
 DEFAULT_FLASH_SECONDS = 0.6
 MAX_FLASH_SECONDS = 2.0
@@ -326,7 +337,13 @@ class CutawayGen(BaseTool):
 
         Deterministic in (prompt, cache_dir) so ``estimate_cost`` and ``execute``
         cannot construct different dicts: pricing a pinned route and then executing
-        an unpinned one is a 15x under-price that slips both approval guards.
+        an unpinned one bills seedance's $1.52 against the $0.42 the guards approved —
+        a ~3.6x under-price that slips both approval guards.
+
+        ``generate_audio`` is pinned false along with the route. It is not cosmetic:
+        it halves fal's rate ($0.084/s against $0.126/s) for audio the sub-second trim
+        throws away, and it is part of ``kling_video``'s idempotency key, so leaving it
+        unset would let the cache answer with a clip priced on the other rate.
         """
         payload: dict[str, Any] = {
             "prompt": prompt,
@@ -336,6 +353,7 @@ class CutawayGen(BaseTool):
             "model_variant": CUTAWAY_MODEL_VARIANT,
             "duration": CUTAWAY_CLIP_SECONDS,
             "aspect_ratio": CUTAWAY_ASPECT_RATIO,
+            "generate_audio": CUTAWAY_GENERATE_AUDIO,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -422,6 +440,7 @@ class CutawayGen(BaseTool):
                         success=False,
                         error=f"Cutaway {index + 1}/{len(prompts)} failed: {result.error}",
                         data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                        cost_usd=round(total_cost, 4),
                     )
                 produced = Path(result.data.get("output_path") or result.data.get("output") or source)
                 if produced != source:
@@ -429,9 +448,20 @@ class CutawayGen(BaseTool):
                 cost = float(result.data.get("executed_estimate_usd") or result.cost_usd or priced)
                 provider = str(result.data.get("selected_provider") or CUTAWAY_PROVIDER_PIN[0])
 
+            # Booked the moment it's known, not at the bottom of the loop: money
+            # already spent on the pinned route must survive a guard below failing,
+            # not report as $0.00 because the clip that was paid for never shipped.
+            total_cost += cost
+
             try:
                 probed = _probe(source)
             except Exception as exc:
+                if cached:
+                    # The cache accepted this file on size alone; the probe just
+                    # proved it unusable. Left in place, every retry would hit the
+                    # same refusal forever while pricing $0.00. Discard it so the
+                    # next run regenerates instead of trusting a poisoned entry.
+                    source.unlink(missing_ok=True)
                 # Fail closed: unmeasured, the trim below would skip the 9:16 crop
                 # and clamp against a duration of zero. Refuse the sitting instead.
                 # Not just ProbeFailedError: _probe parses whatever ffprobe printed,
@@ -440,15 +470,24 @@ class CutawayGen(BaseTool):
                 # raw traceback — a crash where the contract promises a ToolResult.
                 return ToolResult(
                     success=False,
-                    error=f"Cutaway {index + 1}/{len(prompts)} could not be measured: {exc}",
+                    error=(
+                        f"Cutaway {index + 1}/{len(prompts)} could not be measured: {exc}"
+                        + (" (discarded the poisoned cache entry)" if cached else "")
+                    ),
                     data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                    cost_usd=round(total_cost, 4),
                 )
             output_dir.mkdir(parents=True, exist_ok=True)
             trimmed = output_dir / f"{source.stem}_flash.mp4"
             try:
                 self._trim_to_flash(source, trimmed, probed, flash_start, flash)
             except Exception as exc:  # ffmpeg failure is not silently a cutaway
-                return ToolResult(success=False, error=f"Cutaway trim failed: {exc}")
+                return ToolResult(
+                    success=False,
+                    error=f"Cutaway trim failed: {exc}",
+                    data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                    cost_usd=round(total_cost, 4),
+                )
 
             try:
                 trimmed_probe = _probe(trimmed)
@@ -460,14 +499,16 @@ class CutawayGen(BaseTool):
                     success=False,
                     error=f"Trimmed cutaway {trimmed} could not be measured: {exc}",
                     data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                    cost_usd=round(total_cost, 4),
                 )
             if trimmed_probe.get("has_audio"):
                 return ToolResult(
                     success=False,
                     error=f"Trimmed cutaway {trimmed} carries an audio track; cutaways must be silent.",
+                    data={"cutaways": cutaways, "total_cost_usd": round(total_cost, 4)},
+                    cost_usd=round(total_cost, 4),
                 )
 
-            total_cost += cost
             cutaways.append({
                 "prompt": prompt,
                 "provider": provider,

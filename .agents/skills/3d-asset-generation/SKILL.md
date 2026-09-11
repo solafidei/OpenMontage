@@ -27,11 +27,12 @@ everything in Blender from a semantic specification.
 
 Before every first provider call, state the exact provider, model, operation,
 estimated unit cost, and number of requested outputs. Generate one sample before
-a batch. As of 2026-08-13:
+a batch. As of 2026-08-13 (fal lines re-verified 2026-09-08 against the fal catalog; Atlas not re-checked):
 
 - Atlas Tripo H3.1: $0.22 untextured; $0.33 standard textures; $0.44 HD
   textures; detailed geometry adds $0.22; quad mesh adds $0.055.
 - fal Hunyuan 3D v3.1 Rapid: $0.225 per generation; PBR adds $0.15.
+- fal Hunyuan 3D v3.1 Pro (`fal-ai/hunyuan-3d/v3.1/pro/{image,text}-to-3d`; exposed by `fal_3d` as operations `text_to_3d_pro` / `image_to_3d_pro`; optional multi-view images on image-to-3D only and custom `face_count` (40,000-1,500,000, default 500,000) are not wrapped, call the endpoint directly for those): $0.375 per generation; PBR, multi-view images, and a custom face count each add $0.15.
 - fal SAM 3D Objects: $0.02 per reconstruction.
 
 Pricing changes. Confirm the provider page before quoting or running a batch.

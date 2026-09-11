@@ -15,9 +15,11 @@ from tools.base_tool import ToolResult, ToolStatus
 HEYGEN_PROVIDERS = {
     "veo_3_1": {"name": "Google VEO 3.1", "quality": "highest", "speed": "slow"},
     "veo_3_1_fast": {"name": "Google VEO 3.1 Fast", "quality": "high", "speed": "medium"},
-    "veo3": {"name": "Google VEO 3", "quality": "high", "speed": "slow"},
-    "veo3_fast": {"name": "Google VEO 3 Fast", "quality": "high", "speed": "medium"},
-    "veo2": {"name": "Google VEO 2", "quality": "medium", "speed": "medium"},
+    # LEGACY: Google shut down Veo 3.0 and Veo 2 on 2026-06-30. These HeyGen provider
+    # strings are kept for compatibility only; prefer veo_3_1 / veo_3_1_fast.
+    "veo3": {"name": "Google VEO 3 (legacy)", "quality": "high", "speed": "slow"},
+    "veo3_fast": {"name": "Google VEO 3 Fast (legacy)", "quality": "high", "speed": "medium"},
+    "veo2": {"name": "Google VEO 2 (legacy)", "quality": "medium", "speed": "medium"},
     "kling_pro": {"name": "Kling Pro", "quality": "high", "speed": "medium"},
     "kling_v2": {"name": "Kling v2", "quality": "medium", "speed": "fast"},
     "sora_v2": {"name": "Sora v2", "quality": "high", "speed": "slow"},

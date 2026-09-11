@@ -94,7 +94,7 @@ def test_fal_gemini_omni_and_minimax_h3_are_discovered_and_submit(
         }
     )
     assert gemini.success, gemini.error
-    assert calls["posts"][0][0].endswith("/google/gemini-omni-flash/image-to-video")
+    assert calls["posts"][0][0].endswith("/google/gemini-omni-flash/v1.1/image-to-video")
 
     calls = _queue_mocks(monkeypatch)
     edited = GeminiOmniFalVideo().execute(
@@ -106,7 +106,7 @@ def test_fal_gemini_omni_and_minimax_h3_are_discovered_and_submit(
         }
     )
     assert edited.success, edited.error
-    assert calls["posts"][0][0].endswith("/google/gemini-omni-flash/edit")
+    assert calls["posts"][0][0].endswith("/google/gemini-omni-flash/v1.1/edit")
     assert calls["posts"][0][1] == {
         "prompt": "Remove the sign",
         "video_url": "https://video-input",
@@ -121,7 +121,7 @@ def test_fal_gemini_omni_and_minimax_h3_are_discovered_and_submit(
         }
     )
     assert minimax.success, minimax.error
-    assert calls["posts"][0][0].endswith("/fal-ai/minimax/hailuo-03/text-to-video")
+    assert calls["posts"][0][0].endswith("/minimax/h3/text-to-video")
 
 
 def test_runway_supports_all_three_current_model_identifiers(monkeypatch, tmp_path):

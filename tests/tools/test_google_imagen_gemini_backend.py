@@ -1,9 +1,11 @@
 """Tests for the Gemini image backend in google_imagen.
 
-Models named `gemini-*` (e.g. gemini-2.5-flash-image) are not served by the
-Imagen `:predict` endpoint — they generate images through generate_content
-with an image_config. This backend matters on Vertex projects that have no
-Imagen catalog access, where it is the only working Google image path.
+Models named `gemini-*` (gemini-3.1-flash-image / Nano Banana 2 is the default;
+gemini-2.5-flash-image is the legacy id, shutting down 2026-10-02) are not served
+by the Imagen `:predict` endpoint — they generate images through generate_content
+with an image_config. Since Imagen 4 was shut down on the Gemini API (2026-08-17)
+this is the only Google image path for API-key users, not just for Vertex
+projects without Imagen catalog access.
 """
 
 import sys
@@ -114,13 +116,30 @@ def test_image_selector_maps_model_name_to_google_model(
     assert result.data["model"] == "gemini-2.5-flash-image"
 
 
-def test_gemini_cost_estimate_is_per_image():
+@pytest.mark.parametrize(
+    "model,per_image",
+    [
+        ("gemini-3.1-flash-image", 0.067),
+        ("gemini-3.1-flash-lite-image", 0.0336),
+        ("gemini-3-pro-image", 0.134),
+        ("gemini-2.5-flash-image", 0.039),  # legacy, shutdown 2026-10-02
+    ],
+)
+def test_gemini_cost_estimate_is_per_image(model, per_image):
     from tools.graphics.google_imagen import GoogleImagen
 
     tool = GoogleImagen()
     assert tool.estimate_cost(
-        {"model": "gemini-2.5-flash-image", "number_of_images": 2}
-    ) == pytest.approx(0.039 * 2)
+        {"model": model, "number_of_images": 2}
+    ) == pytest.approx(per_image * 2)
+
+
+def test_default_model_is_nano_banana_2_and_prices_at_its_rate():
+    from tools.graphics.google_imagen import GoogleImagen
+
+    tool = GoogleImagen()
+    assert tool.input_schema["properties"]["model"]["default"] == "gemini-3.1-flash-image"
+    assert tool.estimate_cost({"number_of_images": 1}) == pytest.approx(0.067)
 
 
 def test_text_only_response_is_a_clear_error(monkeypatch, tmp_path):

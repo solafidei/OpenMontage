@@ -100,6 +100,10 @@ def test_gemini_omni_cost_estimate_clamps_duration_hint(gemini_env):
     assert tool.estimate_cost({"prompt": "x"}) == pytest.approx(0.80)
     assert tool.estimate_cost({"prompt": "x", "duration": "5s"}) == pytest.approx(0.50)
     assert tool.estimate_cost({"prompt": "x", "duration": "30"}) == pytest.approx(1.00)
+    # Resolution tiers (360p $0.03/s, 720p $0.10/s, 1080p $0.15/s, 4k $0.30/s).
+    assert tool.estimate_cost({"prompt": "x", "duration": "5s", "resolution": "360p"}) == pytest.approx(0.15)
+    assert tool.estimate_cost({"prompt": "x", "duration": "5s", "resolution": "1080p"}) == pytest.approx(0.75)
+    assert tool.estimate_cost({"prompt": "x", "duration": "5s", "resolution": "4k"}) == pytest.approx(1.50)
 
 
 def test_gemini_omni_text_to_video_via_uri_delivery(monkeypatch, tmp_path, gemini_env):
@@ -131,7 +135,7 @@ def test_gemini_omni_text_to_video_via_uri_delivery(monkeypatch, tmp_path, gemin
     assert result.data["editable"] is True
 
     payload = calls["post"][0]["json"]
-    assert payload["model"] == "gemini-omni-flash-preview"
+    assert payload["model"] == "gemini-omni-1.1-flash"
     assert payload["input"] == "A marble rolling on a track, single continuous shot."
     assert payload["response_format"] == {"type": "video", "aspect_ratio": "9:16", "delivery": "uri"}
     assert calls["post"][0]["headers"]["x-goog-api-key"] == "test-gemini-key"

@@ -252,7 +252,7 @@ class TestGoogleMusic:
             res = tool.execute(inputs)
             assert res.success is True
             assert res.data["provider"] == "google"
-            assert res.data["model"] == "lyria-3-pro-preview"
+            assert res.data["model"] == "lyria-3.5"
             assert res.data["output"] == str(output_file)
             assert output_file.read_bytes() == b"my_fake_google_lyria_audio"
 

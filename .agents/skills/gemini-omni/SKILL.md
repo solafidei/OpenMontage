@@ -1,7 +1,7 @@
 ---
 name: gemini-omni
 description: |
-  Generate and conversationally edit short videos with Google Gemini Omni Flash (`gemini-omni-flash-preview`). Use when: (1) iterating on a clip with natural-language edits instead of regenerating ("make the phone invisible, keep everything else the same"), (2) generating 3-10s 720p clips with synthesized audio, rendered on-screen text, or timecoded beats, (3) binding reference images to roles with <FIRST_FRAME>/<IMAGE_REF_N> prompt tags, (4) editing an existing uploaded video. Accessed via the `gemini_omni_video` tool using the project's GEMINI_API_KEY/GOOGLE_API_KEY — the same key as Imagen and Google TTS.
+  Generate and conversationally edit short videos with Google Gemini Omni Flash (`gemini-omni-1.1-flash`; the original preview id `gemini-omni-flash-preview` shuts down 2026-09-30). Use when: (1) iterating on a clip with natural-language edits instead of regenerating ("make the phone invisible, keep everything else the same"), (2) generating 3-10s clips at 360p-4K (720p default; the model's `extend` task reaches 40s, but `gemini_omni_video` does not expose it yet) with synthesized audio, rendered on-screen text, or timecoded beats, (3) binding reference images to roles with <FIRST_FRAME>/<LAST_FRAME>/<IMAGE_REF_N> prompt tags, (4) editing an existing uploaded video. Accessed via the `gemini_omni_video` tool using the project's GEMINI_API_KEY/GOOGLE_API_KEY — the same key as `google_imagen` (Gemini image models; Imagen 4 shut down 2026-08-17) and Google TTS.
 allowed-tools: Bash, Read, Write
 metadata:
   openclaw:
@@ -13,16 +13,16 @@ metadata:
 
 # Gemini Omni Flash (Google DeepMind)
 
-Gemini Omni is Google DeepMind's video generation **and editing** model family, announced at I/O 2026. The first model, **Gemini Omni Flash** (`gemini-omni-flash-preview`, developer access since June 30, 2026), generates 3-10 second clips at 720p/24fps with synthesized audio via the Gemini **Interactions API**. Its differentiator in the OpenMontage fleet is **stateful conversational editing**: each generation returns an `interaction_id`, and a follow-up call with `previous_interaction_id` edits that video in place — no other wrapped provider can refine a clip without regenerating it.
+Gemini Omni is Google DeepMind's video generation **and editing** model family, announced at I/O 2026. The current model, **Gemini Omni Flash** (`gemini-omni-1.1-flash`, stable since 2026-08-27), generates 3-10 second clips at 24fps in 360p, 720p (default), 1080p or 4K (1080p/4K are upscaled) with synthesized audio via the Gemini **Interactions API** (`video_config` tasks: text_to_video, image_to_video, reference_to_video, edit, extend; extension adds 3-10 s per step up to 40 s total). The original `gemini-omni-flash-preview` (developer access June 30, 2026) is deprecated and **shuts down 2026-09-30** — do not pin it. Its differentiator in the OpenMontage fleet is **stateful conversational editing**: each generation returns an `interaction_id`, and a follow-up call with `previous_interaction_id` edits that video in place — no other wrapped provider can refine a clip without regenerating it.
 
-OpenMontage wraps it as `gemini_omni_video` (native Gemini API, no gateway). It shares `GOOGLE_API_KEY`/`GEMINI_API_KEY` with `google_imagen` and `google_tts` — one key, three capabilities. Paid tier only: ~$0.10 per second of output video (billed as 5,792 output tokens/sec at $17.50/1M).
+OpenMontage wraps it as `gemini_omni_video` (native Gemini API, no gateway). It shares `GOOGLE_API_KEY`/`GEMINI_API_KEY` with `google_imagen` and `google_tts` — one key, three capabilities. Paid tier only: $1.50/1M input tokens and $17.50/1M video output tokens; Google publishes only the 720p rate (5,792 output tokens per second of 720p video ≈ $0.10/s). 360p, 1080p and 4K bill by their own token counts, which Google's pricing page does not list — the only published per-resolution ladder is fal's for the same model ($0.03 / $0.10 / $0.15 / $0.30 per second at 360p / 720p / 1080p / 4K), so treat non-720p Google costs as unquoted.
 
 Other documented routes are available when the direct Google key is not the
 chosen provider:
 
 | Route | OpenMontage call | Important limitation |
 |-------|------------------|----------------------|
-| fal.ai | `gemini_omni_fal` | T2V, I2V, reference video, and edit endpoints; no Google interaction ID is returned |
+| fal.ai | `gemini_omni_fal` | T2V, I2V, reference video, and edit endpoints; no Google interaction ID is returned. The tool calls **Gemini Omni Flash 1.1**'s `google/gemini-omni-flash/v1.1/{text-to-video,image-to-video,reference-to-video,edit}` endpoints (published 2026-08-27), billed per second of output by resolution — $0.03 / $0.10 / $0.15 / $0.30 at 360p / 720p / 1080p / 4k — and carries `reference_video_urls` (up to 3 clips, ≤3s each) on the reference-to-video endpoint. The legacy unversioned `google/gemini-omni-flash/*` endpoints (token-billed, ≈$0.125-0.13/s at 720p) back the preview model that retires 2026-09-30 and are no longer used here |
 | Runway | `runway_video`, `model: "gemini_omni_flash"` | T2V/I2V/V2V; video edits accept up to five image references |
 | ComfyUI Partner Node | `comfyui_video`, `model_family: "gemini_omni_flash"` | Hosted paid node; requires network, Comfy login, and credits |
 
@@ -36,9 +36,9 @@ by feeding each output video URL into the next edit call.
 | Use it for | Prefer another provider for |
 |---|---|
 | Iterative refinement — generate, review, then edit the same clip in layers | One-shot cinematic hero clips (→ Seedance 2.0, see `seedance-2-0`) |
-| Editing an existing/uploaded clip (restyle, add/remove objects, change text) | Clips longer than 10s or above 720p |
+| Editing an existing/uploaded clip (restyle, add/remove objects, change text) | Clips longer than 10s per generation (the model's `extend` task reaches 40s in 3-10s steps, but `gemini_omni_video` does not expose it yet), or native (non-upscaled) 1080p/4K |
 | On-screen rendered text and word-by-word text beats | Seed-reproducible generations (no seed support) |
-| Reference-image-bound subjects/styles via prompt tags | First/last-frame interpolation (→ `veo_video`) |
+| Reference-image-bound subjects/styles and first/last-frame pinning via prompt tags (`<FIRST_FRAME>`, `<LAST_FRAME>`, `<IMAGE_REF_N>`) | Reference-video inputs via `gemini_omni_video` (`<VIDEO_REF_N>`: the model takes up to three ≤3s clips, but `gemini_omni_video` takes images only — use `gemini_omni_fal`'s `reference_video_urls` input instead) and scene extension (the model's `extend` task and Veo 3.1's 20 × 7s extensions are exposed by neither `gemini_omni_video` nor `veo_video`; for a single clip over 10s → `seedance_video` or `kling_video`) |
 | Timecode-scheduled multi-beat clips from one prompt | Non-English narration (English only fully supported) |
 
 Route through `video_selector` for generation operations. **Editing (`edit_video`) is a direct-tool operation** — call `gemini_omni_video` from the registry, because the multi-turn interaction state lives outside the selector's model.
@@ -84,6 +84,8 @@ holding <IMAGE_REF_1> [3-6s] Then we see the man <IMAGE_REF_2> holding <IMAGE_RE
 ```
 
 - `<FIRST_FRAME>` makes an image the opening frame: `<FIRST_FRAME> a woman is walking`.
+- `<LAST_FRAME>` pins the closing frame to transition to and **must be used together with `<FIRST_FRAME>`** — supply that image in `reference_image_paths` like any other reference.
+- `<VIDEO_REF_N>` binds a reference video as a character/object likeness (up to three, each ≤3 s; any audio in it is ignored): `the person in <VIDEO_REF_0> is playing the violin`. `gemini_omni_video` takes images only and does not expose this tag; use `gemini_omni_fal`'s `reference_video_urls` input (up to 3 clips, ≤3 s each) on the v1.1 `reference-to-video` endpoint instead.
 - Use high-resolution images; describe the intended motion specifically rather than "make it move."
 - Say what each image *is* (product / character / style / background reference) — the model decides usage from context.
 
@@ -109,13 +111,13 @@ Other working edit prompts: "Make this video anime" / "Put a fashionable hat on 
 
 **Editing uploaded videos:** pass `input_video_path` instead of `previous_interaction_id`; the tool uploads it via the Files API. Unavailable in the EEA, Switzerland, and the UK (editing *generated* videos works everywhere).
 
-## Hard limitations (preview)
+## Hard limitations (`gemini-omni-1.1-flash`, stable since 2026-08-27)
 
-- Output: 3-10s, 720p, 24fps, MP4 with audio; aspect ratio `16:9` or `9:16`. All output carries an invisible SynthID watermark.
+- Output: 3-10s per generation (extendable in 3-10s steps to 40s total), 360p / 720p (default) / 1080p / 4K (1080p and 4K are upscaled), 24fps, MP4 with audio, delivered inline as base64 by default (videos under 4MB) or via `delivery="uri"` for larger payloads; aspect ratio `16:9` or `9:16`. All output carries an invisible SynthID watermark.
 - No seed, negative prompt, temperature, top_p, or system instructions.
-- No video extension or first/last-frame interpolation; no voice editing.
-- Audio reference inputs unsupported. Video references ≤3s are accepted by the schema but **not processed correctly** — don't rely on them.
-- Multi-video prompting unsupported; may degrade output.
+- No voice editing. The model's `extend` task (3-10s per step, 40s total) exists but only appends to the end of a clip, and `<FIRST_FRAME>`/`<LAST_FRAME>` (which must be used together) pin the opening/closing frames — there is no Veo-style 20-step extension. `gemini_omni_video` exposes no `extend` operation yet (enum: text_to_video, image_to_video, reference_to_video, edit_video).
+- Audio reference inputs unsupported. The model accepts up to three reference videos of ≤3s each (`<VIDEO_REF_N>`, likenesses only, their audio ignored); `gemini_omni_video` takes images only and does not carry them, but `gemini_omni_fal` does via its `reference_video_urls` input on the v1.1 `reference-to-video` endpoint. Input videos for edit/extend must be ≤10s when uploaded.
+- Referencing or reasoning across multiple videos is unsupported; multi-video prompting may degrade output.
 - English fully supported; other languages untested.
 - Images of minors (EEA/CH/UK) and certain recognizable people are blocked for upload/editing.
 

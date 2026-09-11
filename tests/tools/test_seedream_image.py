@@ -154,7 +154,7 @@ class TestCostEstimation:
         cost = seedream_tool.estimate_cost({"image_size": size, "num_images": 1})
         assert cost == pytest.approx(expected)
 
-    @pytest.mark.parametrize("n", [1, 2, 3, 4])
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 6])
     def test_cost_scales_with_num_images(self, seedream_tool, n):
         cost = seedream_tool.estimate_cost({"image_size": "auto_2K", "num_images": n})
         assert cost == pytest.approx(round(0.135 * n, 4))
@@ -205,7 +205,7 @@ class TestAsyncPolling:
 # ========== Validation & Error Handling ==========
 
 class TestValidation:
-    @pytest.mark.parametrize("value", [0, 5, 1.5, True])
+    @pytest.mark.parametrize("value", [0, 7, 1.5, True])
     def test_num_images_rejects_invalid_values(
         self, seedream_tool, mock_requests, value
     ):
@@ -261,7 +261,7 @@ class TestMetadata:
         result = seedream_tool.execute({"prompt": "m", "output_path": str(tmp_path / "m.png")})
         assert result.data["provider"] == "seedream"
         assert result.data["model"] == "seedream_v5"
-        assert result.model == "fal-ai/bytedance/seedream/v5"
+        assert result.model == "bytedance/seedream/v5/pro/text-to-image"
 
     def test_cost_matches_estimate(self, seedream_tool, tmp_path, mock_requests):
         mock_post, mock_get = mock_requests

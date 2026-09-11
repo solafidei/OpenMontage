@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from pathlib import Path
@@ -41,33 +42,65 @@ class FluxImage(BaseTool):
 
     capabilities = ["generate_image", "generate_illustration", "text_to_image"]
     supports = {
-        "negative_prompt": True,
+        "negative_prompt": False,
         "seed": True,
         "custom_size": True,
     }
     best_for = [
         "photorealistic images",
         "general-purpose image generation",
-        "high quality at low cost (~$0.03/image)",
+        "high quality at low cost (flux-pro/v1.1 $0.04 per output megapixel, rounded up; $0.003-$0.05/MP across the model enum; 1024x1024 is 1 MP)",
     ]
     not_good_for = ["text rendering in images", "offline generation"]
+
+    # fal price per output megapixel as (first megapixel, each additional
+    # megapixel). fal rounds the output area UP to a whole megapixel
+    # (1 MP = 1024x1024; 1920x1080 bills as 2 MP, 512x512 as 1 MP).
+    _PRICE_PER_MEGAPIXEL = {
+        "flux-pro/v1.1": (0.04, 0.04),  # https://fal.ai/models/fal-ai/flux-pro/v1.1
+        "flux/dev": (0.025, 0.025),  # https://fal.ai/models/fal-ai/flux/dev
+        "flux/schnell": (0.003, 0.003),  # https://fal.ai/models/fal-ai/flux/schnell
+        "flux-2-pro": (0.03, 0.015),  # catalog: $0.03 first MP + $0.015 per extra MP
+        "flux-2": (0.012, 0.012),  # https://fal.ai/models/fal-ai/flux-2
+        "flux-pro": (0.05, 0.05),  # legacy FLUX.1 [pro] v1; https://fal.ai/models/fal-ai/flux-pro ($0.05/MP; absent from the public catalog JSON)
+    }
 
     input_schema = {
         "type": "object",
         "required": ["prompt"],
         "properties": {
             "prompt": {"type": "string"},
-            "negative_prompt": {"type": "string", "default": ""},
+            "negative_prompt": {
+                "type": "string",
+                "default": "",
+                "description": "Accepted for image_selector compatibility only; fal FLUX endpoints have no negative_prompt input, so it is not sent.",
+            },
             "width": {"type": "integer", "default": 1024},
             "height": {"type": "integer", "default": 1024},
             "model": {
                 "type": "string",
-                "enum": ["flux-pro/v1.1", "flux/dev", "flux-pro"],
+                # fal ids under fal-ai/. "flux-pro" is the legacy FLUX.1 [pro] v1
+                # route: it still resolves on the fal OpenAPI but is absent from
+                # the public catalog; prefer flux-pro/v1.1 or flux-2-pro.
+                "enum": [
+                    "flux-pro/v1.1",
+                    "flux/dev",
+                    "flux/schnell",
+                    "flux-2-pro",
+                    "flux-2",
+                    "flux-pro",
+                ],
                 "default": "flux-pro/v1.1",
             },
             "seed": {"type": "integer"},
-            "num_inference_steps": {"type": "integer"},
-            "guidance_scale": {"type": "number"},
+            "num_inference_steps": {
+                "type": "integer",
+                "description": "Honoured by flux/dev (1-50, default 28), flux/schnell (1-12, default 4), flux-2 (4-50, default 28) and legacy flux-pro (1-50, default 28); flux-pro/v1.1 and flux-2-pro expose no steps/guidance inputs and ignore it.",
+            },
+            "guidance_scale": {
+                "type": "number",
+                "description": "Honoured by flux/dev, flux/schnell and legacy flux-pro (1-20, default 3.5) and flux-2 (0-20, default 2.5); ignored by flux-pro/v1.1 and flux-2-pro.",
+            },
             "output_path": {"type": "string"},
         },
     }
@@ -89,10 +122,14 @@ class FluxImage(BaseTool):
         return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
+        # fal bills FLUX text-to-image per output megapixel, rounded UP to
+        # the nearest whole megapixel (1 MP = 1024x1024).
         model = inputs.get("model", "flux-pro/v1.1")
-        if "pro" in model:
-            return 0.05
-        return 0.03  # dev tier
+        width = int(inputs.get("width", 1024))
+        height = int(inputs.get("height", 1024))
+        megapixels = max(1, math.ceil((width * height) / 1_048_576))
+        first, extra = self._PRICE_PER_MEGAPIXEL.get(model, (0.04, 0.04))
+        return round(first + extra * (megapixels - 1), 4)
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         api_key = self._get_api_key()
@@ -120,8 +157,8 @@ class FluxImage(BaseTool):
             payload["num_inference_steps"] = inputs["num_inference_steps"]
         if inputs.get("guidance_scale"):
             payload["guidance_scale"] = inputs["guidance_scale"]
-        if inputs.get("negative_prompt"):
-            payload["negative_prompt"] = inputs["negative_prompt"]
+        # negative_prompt is deliberately not forwarded: no fal FLUX endpoint
+        # (flux-pro/v1.1, flux/dev, flux/schnell, flux-2, flux-2-pro) has one.
 
         try:
             response = requests.post(

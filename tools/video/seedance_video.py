@@ -84,9 +84,9 @@ class SeedanceVideo(BaseTool):
             },
             "model_variant": {
                 "type": "string",
-                "enum": ["standard", "fast"],
+                "enum": ["standard", "fast", "mini"],
                 "default": "standard",
-                "description": "standard = highest quality, fast = lower latency and cost",
+                "description": "standard = highest quality; fast = lower latency and cost; mini = Seedance 2.0 Mini (bytedance/seedance-2.0/mini/*, cheapest tier, 480p/720p, 4-15 s, same 9/3/3 reference caps). fast and mini exist for model_version 2.0 only.",
             },
             "model_version": {
                 "type": "string",
@@ -127,7 +127,7 @@ class SeedanceVideo(BaseTool):
                     "30",
                 ],
                 "default": "5",
-                "description": "Duration in seconds. 'auto' lets the model decide.",
+                "description": "Duration in seconds. 'auto' lets the model decide. Seedance 2.0 routes (standard/fast/mini) accept 4-15; only Seedance 2.5 accepts 16-30.",
             },
             "aspect_ratio": {
                 "type": "string",
@@ -136,8 +136,9 @@ class SeedanceVideo(BaseTool):
             },
             "resolution": {
                 "type": "string",
-                "enum": ["480p", "720p"],
+                "enum": ["480p", "720p", "1080p", "4k"],
                 "default": "720p",
+                "description": "480p/720p on every route. 1080p on 2.0 standard ($0.682/s) and 2.5 (~$1.164/s); 4k on 2.0 standard only. fast and mini are 480p/720p.",
             },
             "generate_audio": {
                 "type": "boolean",
@@ -211,28 +212,37 @@ class SeedanceVideo(BaseTool):
             return ToolStatus.AVAILABLE
         return ToolStatus.UNAVAILABLE
 
+    # fal.ai per-second output prices (pricingInfoOverride, 2026-09-09), keyed by
+    # (model_version, model_variant) -> resolution. Where fal publishes no
+    # per-second figure for a tier (2.0 standard/fast at 480p) the 720p rate is
+    # charged, which over- rather than under-quotes. 2.0 standard 4k is derived
+    # from fal's own token formula: 3840*2160*24/1024 = 194,400 tokens/s at
+    # $0.008 per 1k tokens. 2.5 with video references bills input + output
+    # seconds at 0.6x (~$0.2838/s at 720p) - not modelled here.
+    _COST_PER_SECOND = {
+        ("2.0", "standard"): {"480p": 0.3034, "720p": 0.3034, "1080p": 0.682, "4k": 1.5552},
+        ("2.0", "fast"): {"480p": 0.2419, "720p": 0.2419},
+        ("2.0", "mini"): {"480p": 0.0721, "720p": 0.1547},
+        ("2.5", "standard"): {"480p": 0.2205, "720p": 0.4730, "1080p": 1.164},
+    }
+
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        if inputs.get("model_version", "2.0") == "2.5":
-            return round(
-                0.30
-                * (
-                    5
-                    if inputs.get("duration", "5") == "auto"
-                    else int(inputs.get("duration", "5"))
-                ),
-                2,
-            )
-        variant = inputs.get("model_variant", "standard")
+        model_version = str(inputs.get("model_version", "2.0"))
+        variant = "standard" if model_version == "2.5" else inputs.get("model_variant", "standard")
         duration = inputs.get("duration", "5")
         secs = 5 if duration == "auto" else int(duration)
-        rate = 0.2419 if variant == "fast" else 0.3034
+        table = self._COST_PER_SECOND.get(
+            (model_version, variant), self._COST_PER_SECOND[("2.0", "standard")]
+        )
+        resolution = str(inputs.get("resolution", "720p")).lower()
+        rate = table.get(resolution, table["720p"])
         return round(rate * secs, 2)
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         if inputs.get("model_version", "2.0") == "2.5":
             return 150.0
         variant = inputs.get("model_variant", "standard")
-        return 60.0 if variant == "fast" else 120.0
+        return 60.0 if variant in ("fast", "mini") else 120.0
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         api_key = self._get_api_key()
@@ -251,16 +261,37 @@ class SeedanceVideo(BaseTool):
         operation_path = operation.replace("_", "-")
 
         if model_version == "2.5":
-            if variant == "fast":
+            if variant in ("fast", "mini"):
                 return ToolResult(
                     success=False,
-                    error="Seedance 2.5 on fal.ai has no fast endpoint; use model_variant='standard'.",
+                    error=f"Seedance 2.5 on fal.ai has no {variant} endpoint; use model_variant='standard'.",
                 )
             model_path = f"bytedance/seedance-2.5/{operation_path}"
-        elif variant == "fast":
-            model_path = f"bytedance/seedance-2.0/fast/{operation_path}"
+        elif variant in ("fast", "mini"):
+            model_path = f"bytedance/seedance-2.0/{variant}/{operation_path}"
         else:
             model_path = f"bytedance/seedance-2.0/{operation_path}"
+
+        # fal per-route limits: 2.0 routes stop at 15 s; fast/mini are 480p/720p
+        # only; 4k exists on 2.0 standard only; 2.5 tops out at 1080p.
+        requested_duration = str(inputs.get("duration", "5"))
+        if model_version != "2.5" and requested_duration != "auto" and int(requested_duration) > 15:
+            return ToolResult(
+                success=False,
+                error=f"Seedance 2.0 ({variant}) on fal.ai accepts 4-15 s; got {requested_duration}. Use model_version='2.5' for 16-30 s.",
+            )
+        requested_resolution = str(inputs.get("resolution", "720p")).lower()
+        if model_version == "2.5":
+            allowed_resolutions = ("480p", "720p", "1080p")
+        elif variant == "standard":
+            allowed_resolutions = ("480p", "720p", "1080p", "4k")
+        else:
+            allowed_resolutions = ("480p", "720p")
+        if requested_resolution not in allowed_resolutions:
+            return ToolResult(
+                success=False,
+                error=f"Seedance {model_version} {variant} on fal.ai supports {', '.join(allowed_resolutions)}; got {requested_resolution}.",
+            )
 
         payload: dict[str, Any] = {"prompt": inputs["prompt"]}
 
@@ -313,18 +344,30 @@ class SeedanceVideo(BaseTool):
                     success=False,
                     error=f"Seedance {model_version} reference_to_video accepts at most {max_audios} reference audio clips; got {len(ref_audio_urls)}",
                 )
+            max_files = 50 if model_version == "2.5" else 12
+            total_files = len(ref_image_urls) + len(ref_video_urls) + len(ref_audio_urls)
+            if total_files > max_files:
+                return ToolResult(
+                    success=False,
+                    error=f"Seedance {model_version} reference_to_video accepts at most {max_files} reference files in total; got {total_files}",
+                )
+            if not ref_image_urls and not ref_video_urls:
+                return ToolResult(
+                    success=False,
+                    error="Seedance reference_to_video needs at least one reference image or video (audio cannot be the only reference)",
+                )
+            # Every fal Seedance reference route (2.0, 2.0/fast, 2.0/mini, 2.5)
+            # takes image_urls / video_urls / audio_urls, cited in the prompt as
+            # @Image1, @Video1, @Audio1. The reference_* keys previously sent to
+            # the 2.0 routes are not in their schema, so the references were
+            # dropped and fal failed with "at least one reference image or video
+            # is required".
             if ref_image_urls:
-                payload[
-                    "image_urls" if model_version == "2.5" else "reference_image_urls"
-                ] = ref_image_urls
+                payload["image_urls"] = ref_image_urls
             if ref_video_urls:
-                payload[
-                    "video_urls" if model_version == "2.5" else "reference_video_urls"
-                ] = ref_video_urls
+                payload["video_urls"] = ref_video_urls
             if ref_audio_urls:
-                payload[
-                    "audio_urls" if model_version == "2.5" else "reference_audio_urls"
-                ] = ref_audio_urls
+                payload["audio_urls"] = ref_audio_urls
 
         headers = {
             "Authorization": f"Key {api_key}",

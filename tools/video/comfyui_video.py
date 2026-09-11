@@ -664,6 +664,11 @@ class ComfyUIVideo(BaseTool):
         if not custom_workflow:
             return {
                 "wan2.2": "wan2.2-14b-fp8-4step",
+                # ComfyUI's GeminiVideoOmni "Omni Flash" option still resolves to
+                # gemini-omni-flash-preview, which Google shuts down 2026-09-30. The
+                # successor is the GeminiVideoOmniV2 node's "Omni Flash 1.1" option
+                # (gemini-omni-1.1-flash), whose model dict also needs task_type,
+                # resolution, aspect_ratio and an in-model seed.
                 "gemini_omni_flash": "gemini-omni-flash-preview (ComfyUI Partner Node)",
                 "seedance_2.5": "Seedance 2.5 (ComfyUI Partner Node)",
                 "minimax_h3_api": "MiniMax-H3 (ComfyUI Partner Node)",

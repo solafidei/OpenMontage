@@ -6,7 +6,7 @@ The capture pipeline downloads the site and extracts structured data for the res
 
 No API keys required for the base capture. However, before running, ask the user:
 
-> "For the best results, it is recommended to set a Gemini API key — it gives me AI-powered descriptions of every captured image, which helps me choose the right assets for each scene. It costs about $0.001 per image. You can skip this if you want, but the video quality will be better with it. To set it up: add `GEMINI_API_KEY=your-key` to a `.env` file in the project root. You can get a free key at ai.google.dev."
+> "For the best results, it is recommended to set a Gemini API key — it gives me AI-powered descriptions of every captured image, which helps me choose the right assets for each scene. It costs about $0.001 per image. You can skip this if you want, but the video quality will be better with it. To set it up: add `GEMINI_API_KEY=your-key` and `HYPERFRAMES_GEMINI_MODEL=gemini-3.1-flash-lite` to a `.env` file in the project root (hyperframes 0.8.31 otherwise defaults to `gemini-3.1-flash-lite-preview`, which Google shut down on 2026-05-25). You can get a free key at ai.google.dev."
 
 If the user provides the key or already has one set, proceed. If they skip it, proceed anyway — the capture works without it, but `asset-descriptions.md` will have DOM-context descriptions only (position, size, alt text) instead of AI vision descriptions.
 

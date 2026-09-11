@@ -27,7 +27,7 @@ Seedance 2.0 is the ByteDance Seed team's unified multimodal video+audio model (
 | Reference conditioning | Up to 9 images + 3 video clips + 3 audio clips | 12-asset multimodal |
 | Character identity consistency | Yes | Face/subject stable across shots |
 | Max shot duration | 15 s | auto / 4–15 s |
-| Resolution ceiling | 1080p on some endpoints (720p default on fal.ai) | Provider-dependent |
+| Resolution ceiling | 4k on fal.ai `standard` endpoints (480p / 720p default / 1080p / 4k); `fast` and `mini` stop at 720p | fal bills 720p at $0.3034/s and 1080p at $0.682/s; 4k is token-billed at $0.008 per 1k tokens |
 | Elo (Artificial Analysis) | 1269 (#1 as of Feb 2026) | Beat Veo 3, Sora 2, Runway Gen-4.5 |
 
 Switch away only for a specific reason: strict budget (use the `fast` variant or LTX), user-preferred provider (VEO/Sora/Kling), or a stylistic fit that favors another model.
@@ -36,7 +36,7 @@ Switch away only for a specific reason: strict budget (use the `fast` variant or
 
 | Surface | Env | OpenMontage tool | Status | Notes |
 |---|---|---|---|---|
-| **fal.ai** (primary) | `FAL_KEY` | `seedance_video` | ✅ wrapped | Model IDs below. Supports T2V, I2V, reference-to-video; `standard` and `fast` variants. Default in OpenMontage. |
+| **fal.ai** (primary) | `FAL_KEY` | `seedance_video` | ✅ wrapped | Model IDs below. Supports T2V, I2V, reference-to-video; `standard`, `fast`, and `mini` variants (plus `model_version: "2.5"`, see the `seedance-2-5` skill). `seedance_video` wraps the cheaper **Seedance 2.0 Mini** tier via `model_variant: "mini"` (`bytedance/seedance-2.0/mini/*`, 480p/720p only, ~$0.0721/s at 480p, $0.1547/s at 720p). Default in OpenMontage. |
 | **Replicate** | `REPLICATE_API_TOKEN` | `seedance_replicate` | ✅ wrapped | `bytedance/seedance-2.0` + `bytedance/seedance-2.0-fast`. Standard Replicate prediction API. |
 | **Runway** | `RUNWAY_API_KEY` | `runway_video` (model: `seedance_2.0`) | ✅ wrapped | Third-party Seedance 2.0 model inside Runway. **Unlimited/Enterprise plans, non-US only**. Selected via `model` param. |
 | **Higgsfield** | `HIGGSFIELD_API_KEY` + `_SECRET` | `higgsfield_video` (model: `seedance_2.0`) | ✅ wrapped | Seedance 2.0 is the default model on this tool. Emphasis on character identity + long-form chaining. |
@@ -54,9 +54,12 @@ bytedance/seedance-2.0/reference-to-video        # 9 img + 3 vid + 3 audio
 bytedance/seedance-2.0/fast/text-to-video
 bytedance/seedance-2.0/fast/image-to-video
 bytedance/seedance-2.0/fast/reference-to-video
+bytedance/seedance-2.0/mini/text-to-video        # mini tier (model_variant: "mini"): 480p/720p only
+bytedance/seedance-2.0/mini/image-to-video
+bytedance/seedance-2.0/mini/reference-to-video   # 9 img + 3 vid + 3 audio, 12 files max
 ```
 
-Pricing (fal.ai, 720p): standard $0.3034 / s (T2V), $0.3024 / s (I2V). Fast $0.2419 / s across endpoints.
+Pricing (fal.ai, 720p): standard $0.3034 / s across T2V, I2V and reference-to-video ($0.682 / s at 1080p; token-billed at $0.014 per 1k tokens for 480p/720p/1080p, $0.008 per 1k for 4k). Fast $0.2419 / s across endpoints. Mini ≈ $0.1547 / s at 720p, $0.0721 / s at 480p. Reference-to-video with video inputs bills input + output seconds at 0.6× (at 720p ≈ $0.1814 / s standard, $0.14515 / s fast, $0.0928 / s mini).
 The `fast` variant trades some camera/motion fidelity for latency and cost — do **not** route slow-mo, multi-shot, or dolly-heavy prompts to `fast` on the first try.
 
 ## Calling Seedance 2.0 inside OpenMontage
@@ -73,7 +76,7 @@ result = selector.execute({
     "operation": "text_to_video",       # or image_to_video / reference_to_video
     "aspect_ratio": "21:9",             # 21:9 / 16:9 / 9:16 / 4:3 / 1:1 / 3:4
     "duration": "10",                   # auto / 4..15
-    "resolution": "720p",               # 480p / 720p
+    "resolution": "720p",               # 480p / 720p / 1080p / 4k (seedance_video enum; 1080p and 4k are 2.0 standard-only, fast and mini stay 480p/720p)
     "output_path": "projects/<proj>/assets/video/clip_01.mp4",
 })
 ```
@@ -236,7 +239,7 @@ Shot 3 (extreme close-up, rack focus): hero's eyes open, wind whipping.
 |---|---|
 | `duration` | `5`–`8` for hero shots, `10`–`12` for full scenes with multi-shot cuts, `4` for quick inserts. `auto` when unsure. |
 | `aspect_ratio` | `21:9` for cinematic trailers, `16:9` for broadcast / YouTube, `9:16` for Reels/Shorts/TikTok |
-| `resolution` | `720p` default. Drop to `480p` for cost-capped batch previews, not for finals |
+| `resolution` | `720p` default. Drop to `480p` for cost-capped batch previews, not for finals. `1080p` ($0.682/s) and `4k` are already selectable via `resolution` on 2.0 `standard`; `fast`/`mini` stop at 720p |
 | `generate_audio` | Keep **on** unless you have a specific reason to mute — Seedance's moat is synced audio. Strip audio downstream in compose if needed. |
 | `model_variant` | `standard` for hero/cinematic shots; `fast` only for b-roll, previews, or when latency is the hard constraint |
 | `seed` | Set a seed before iterating variants of a chosen shot — everything else held constant |

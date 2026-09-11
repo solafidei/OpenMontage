@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["operation", "output_path"],
   "properties": {
-    "operation": {"type": "string", "enum": ["text_to_3d", "image_to_3d", "reconstruct_objects"]},
+    "operation": {"type": "string", "enum": ["text_to_3d", "image_to_3d", "text_to_3d_pro", "image_to_3d_pro", "reconstruct_objects"]},
     "prompt": {"type": "string"},
     "image_url": {"type": "string"},
     "image_path": {"type": "string"},

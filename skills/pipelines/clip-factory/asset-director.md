@@ -47,7 +47,7 @@ estimated_usd = subtitle_gen.estimate_cost(inputs)          # 0.0 — local tool
 entry_id = tracker.estimate("subtitle_gen", "subtitles x 12 clips", estimated_usd)
 tracker.reserve(entry_id, user_approved=True)  # this batch fulfills the plan approved at idea
 
-result = run_subtitle_batch(inputs)   # the whole batch, all clips
+result = subtitle_gen.execute(inputs)   # the whole batch, all clips
 
 # Book what actually happened, never what was hoped.
 reported = result.cost_usd or 0.0   # ToolResult defaults cost_usd to 0.0
@@ -138,7 +138,7 @@ If you encounter a generation technique, provider behavior, or prompting pattern
 
 This is especially important for:
 - **Video generation prompting** — models respond to specific vocabularies that change with each version
-- **Image model parameters** — optimal settings for FLUX, GPT Image, Imagen differ and evolve
+- **Image model parameters** — optimal settings for FLUX, GPT Image, Nano Banana 2 (`gemini-3.1-flash-image`; Imagen 4 shut down 2026-08-17) differ and evolve
 - **Audio provider quirks** — voice cloning, music generation, and TTS each have model-specific best practices
 - **Remotion component patterns** — new composition techniques emerge as the framework evolves
 

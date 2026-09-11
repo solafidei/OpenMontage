@@ -74,8 +74,23 @@ class GeminiOmniFalVideo(BaseTool):
             },
             "image_url": {"type": "string"},
             "image_path": {"type": "string"},
-            "reference_image_urls": {"type": "array", "items": {"type": "string"}},
+            "reference_image_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 10,
+                "description": "Up to 10 reference images for reference_to_video.",
+            },
             "reference_image_paths": {"type": "array", "items": {"type": "string"}},
+            "reference_video_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 3,
+                "description": "Up to 3 reference videos for reference_to_video, each at most 3 seconds long.",
+            },
+            "end_image_url": {
+                "type": "string",
+                "description": "Optional end frame for image_to_video; the model interpolates from image_url to it.",
+            },
             "video_url": {
                 "type": "string",
                 "description": "Source clip for edit_video",
@@ -84,6 +99,12 @@ class GeminiOmniFalVideo(BaseTool):
                 "type": "string",
                 "enum": ["16:9", "9:16"],
                 "default": "16:9",
+            },
+            "resolution": {
+                "type": "string",
+                "enum": ["360p", "720p", "1080p", "4k"],
+                "default": "720p",
+                "description": "Output resolution; billed per second at $0.03 / $0.10 / $0.15 / $0.30. Omitted -> fal's 720p default.",
             },
             "duration": {"type": "integer", "minimum": 3, "maximum": 10, "default": 8},
             "output_path": {"type": "string"},
@@ -100,7 +121,10 @@ class GeminiOmniFalVideo(BaseTool):
         "operation",
         "aspect_ratio",
         "duration",
+        "resolution",
         "reference_image_urls",
+        "reference_video_urls",
+        "end_image_url",
     ]
     side_effects = ["writes video file to output_path", "calls fal.ai API"]
     user_visible_verification = ["Watch the clip and listen for synchronized audio"]
@@ -112,8 +136,15 @@ class GeminiOmniFalVideo(BaseTool):
     def get_status(self) -> ToolStatus:
         return ToolStatus.AVAILABLE if self._api_key() else ToolStatus.UNAVAILABLE
 
+    # fal.ai google/gemini-omni-flash/v1.1/* bill per second of output video by
+    # resolution (720p is the endpoint default): 360p $0.03, 720p $0.10,
+    # 1080p $0.15, 4K $0.30. The 1.0 endpoints were token-billed (~$0.13/s).
+    _COST_PER_SECOND = {"360p": 0.03, "720p": 0.10, "1080p": 0.15, "4k": 0.30}
+
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        return round(0.13 * int(inputs.get("duration", 8)), 2)
+        resolution = str(inputs.get("resolution", "720p")).lower()
+        rate = self._COST_PER_SECOND.get(resolution, self._COST_PER_SECOND["720p"])
+        return round(rate * int(inputs.get("duration", 8)), 2)
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return 90.0
@@ -135,17 +166,39 @@ class GeminiOmniFalVideo(BaseTool):
             urls.insert(0, inputs["image_url"])
         elif inputs.get("image_path"):
             urls.insert(0, upload_image_fal(inputs["image_path"]))
-        if operation in {"image_to_video", "reference_to_video"} and not urls:
+        ref_videos = list(inputs.get("reference_video_urls") or [])
+        if operation == "image_to_video" and not urls:
             return ToolResult(
                 success=False,
-                error=f"{operation} requires at least one reference image",
+                error="image_to_video requires at least one reference image",
+            )
+        if operation == "reference_to_video" and not urls and not ref_videos:
+            return ToolResult(
+                success=False,
+                error="reference_to_video requires at least one reference image or reference video",
+            )
+        if operation == "reference_to_video" and len(urls) > 10:
+            return ToolResult(
+                success=False,
+                error=f"reference_to_video accepts at most 10 reference images; got {len(urls)}",
+            )
+        if len(ref_videos) > 3:
+            return ToolResult(
+                success=False,
+                error=f"reference_to_video accepts at most 3 reference videos (each at most 3 s); got {len(ref_videos)}",
             )
 
+        # Gemini Omni Flash 1.1 endpoints (published on fal 2026-08-27, billed per
+        # second by resolution). The unversioned google/gemini-omni-flash,
+        # /image-to-video, /reference-to-video and /edit paths are the 1.0
+        # endpoints: still listed, token-billed (~$0.13/s at 720p), published
+        # 2026-06-30 alongside Google's gemini-omni-flash-preview, which Google
+        # shuts down on 2026-09-30 (replacement: gemini-omni-1.1-flash).
         endpoints = {
-            "text_to_video": "google/gemini-omni-flash",
-            "image_to_video": "google/gemini-omni-flash/image-to-video",
-            "reference_to_video": "google/gemini-omni-flash/reference-to-video",
-            "edit_video": "google/gemini-omni-flash/edit",
+            "text_to_video": "google/gemini-omni-flash/v1.1/text-to-video",
+            "image_to_video": "google/gemini-omni-flash/v1.1/image-to-video",
+            "reference_to_video": "google/gemini-omni-flash/v1.1/reference-to-video",
+            "edit_video": "google/gemini-omni-flash/v1.1/edit",
         }
         if operation not in endpoints:
             return ToolResult(
@@ -164,12 +217,22 @@ class GeminiOmniFalVideo(BaseTool):
         }
         if operation == "image_to_video":
             payload["image_url"] = urls[0]
+            if inputs.get("end_image_url"):
+                payload["end_image_url"] = inputs["end_image_url"]
         elif operation == "reference_to_video":
-            payload["image_urls"] = urls
+            if urls:
+                payload["image_urls"] = urls
+            if ref_videos:
+                payload["reference_video_urls"] = ref_videos
         elif operation == "edit_video":
             if not inputs.get("video_url"):
                 return ToolResult(success=False, error="edit_video requires video_url")
             payload = {"prompt": inputs["prompt"], "video_url": inputs["video_url"]}
+        if inputs.get("resolution"):
+            # 360p / 720p (fal default) / 1080p / 4k. Only sent when the caller
+            # chose one, so an omitted resolution keeps fal's 720p default, which
+            # is the tier estimate_cost prices.
+            payload["resolution"] = str(inputs["resolution"]).lower()
         headers = {
             "Authorization": f"Key {api_key}",
             "Content-Type": "application/json",

@@ -231,9 +231,14 @@ Use this structure for each variant:
 - Composition: [Remotion (default when available) / FFmpeg (fallback only)]
 - Motion: [video gen clips / Remotion spring animations on stills / etc.]
 - Clip duration strategy: [maximize clip duration to minimize API calls and cost.
-  Most providers support 5s and 10s clips. Prefer 10s clips and consolidate
-  adjacent scenes into single clips where narratively coherent. A 60s video
-  needs 6×10s clips, not 12×5s — half the cost, fewer cuts, smoother motion.]
+  Ceilings differ by provider: Veo 3.1 tops out at 8 s (4/6/8), Gemini Omni Flash
+  3-10 s, Seedance 2.0 4-15 s (2.5: 4-30 s; `seedance_video` exposes both), Kling 3
+  3-15 s on fal and `kling_video` accepts that full range (the legacy v2.1 lines are 5 or
+  10 s only). Prefer the longest clip the
+  chosen tool allows and consolidate adjacent scenes into single clips where
+  narratively coherent. A 60s video needs 6×10s clips, not 12×5s — fewer cuts and
+  smoother motion; under per-second billing the cost is about the same either way,
+  so the win is continuity, not price.]
 
 **Audio plan:**
 - Audio architecture: [single narrator / character dialogue / narrator + characters]
@@ -253,7 +258,9 @@ Present a provider comparison table so the user can choose:
 ```
 Provider        Quality    Speed      Cost (N clips)    Total
 ─────────      ────────   ─────      ──────────────    ─────
+Seedance 2.0   Highest    Medium     $X.XX             $X.XX
 VEO 3.1        Highest    Slow       $X.XX             $X.XX
+Gemini Omni    High       Medium     $X.XX             $X.XX
 Kling Pro      High       Medium     $X.XX             $X.XX
 Sora V2        High       Medium     $X.XX             $X.XX
 LTX Distilled  Lower      Fastest    $X.XX             $X.XX

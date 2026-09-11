@@ -94,7 +94,11 @@ class FalElevenLabsTTS(BaseTool):
         "properties": {
             "text": {
                 "type": "string",
-                "description": "Text to speak. Eleven v3 supports inline tags such as [whispers].",
+                "description": (
+                    "Text to speak. Eleven v3 supports inline tags such as [whispers]. "
+                    "fal caps eleven-v3 input at 5000 characters per request; "
+                    "multilingual-v2 and turbo-v2.5 declare no cap."
+                ),
             },
             "voice": {
                 "type": "string",
@@ -132,6 +136,11 @@ class FalElevenLabsTTS(BaseTool):
                 "default": 1.0,
                 "minimum": 0.7,
                 "maximum": 1.2,
+                "description": (
+                    "Honoured by multilingual-v2 and turbo-v2.5 (0.7-1.2). The fal "
+                    "eleven-v3 endpoint has no speed, similarity_boost or style "
+                    "input, so they are not sent for it."
+                ),
             },
             "language_code": {
                 "type": "string",
@@ -149,23 +158,20 @@ class FalElevenLabsTTS(BaseTool):
             "output_format": {
                 "type": "string",
                 "default": "mp3_44100_128",
-                "enum": [
-                    "mp3_22050_32",
-                    "mp3_44100_64",
-                    "mp3_44100_96",
-                    "mp3_44100_128",
-                    "mp3_44100_192",
-                    "pcm_16000",
-                    "pcm_24000",
-                    "pcm_44100",
-                    "pcm_48000",
-                    "opus_48000_64",
-                    "opus_48000_96",
-                    "opus_48000_128",
-                    "opus_48000_192",
-                ],
+                "enum": ["mp3_44100_128"],
+                "description": (
+                    "Not a fal input: fal's ElevenLabs TTS endpoints expose no "
+                    "output_format and always return an MP3 file. Kept for "
+                    "tts_selector pass-through only."
+                ),
             },
-            "seed": {"type": "integer"},
+            "seed": {
+                "type": "integer",
+                "description": (
+                    "Accepted for tts_selector compatibility but not forwarded: no "
+                    "fal ElevenLabs TTS endpoint has a seed input."
+                ),
+            },
             "output_path": {"type": "string"},
         },
     }
@@ -191,7 +197,6 @@ class FalElevenLabsTTS(BaseTool):
         "style",
         "speed",
         "language_code",
-        "seed",
     ]
     side_effects = [
         "writes an audio file to output_path",
@@ -258,21 +263,29 @@ class FalElevenLabsTTS(BaseTool):
         if not 0.7 <= speed <= 1.2:
             return ToolResult(success=False, error="speed must be between 0.7 and 1.2")
 
-        output_format = inputs.get("output_format", "mp3_44100_128")
+        # fal's ElevenLabs TTS endpoints have no output_format input and always
+        # return MP3, whatever the caller asked for.
+        output_format = "mp3_44100_128"
         voice = inputs.get("voice") or inputs.get("voice_id") or "Rachel"
         payload: dict[str, Any] = {
             "text": text,
             "voice": voice,
             "stability": stability,
-            "similarity_boost": similarity_boost,
-            "speed": speed,
             "timestamps": bool(inputs.get("timestamps", False)),
             "apply_text_normalization": inputs.get("apply_text_normalization", "auto"),
-            "output_format": output_format,
         }
-        for optional in ("language_code", "seed", "style"):
-            if inputs.get(optional) is not None:
-                payload[optional] = inputs[optional]
+        if model_name != "eleven-v3":
+            # Only multilingual-v2 and turbo-v2.5 expose these on fal; the
+            # eleven-v3 input is text, voice, stability, timestamps,
+            # language_code and apply_text_normalization only.
+            payload["similarity_boost"] = similarity_boost
+            payload["speed"] = speed
+            if inputs.get("style") is not None:
+                payload["style"] = inputs["style"]
+        if inputs.get("language_code") is not None:
+            payload["language_code"] = inputs["language_code"]
+        # seed is not a fal input on any of the three TTS endpoints, so it is
+        # not forwarded either.
 
         import requests
 
@@ -341,8 +354,8 @@ class FalElevenLabsTTS(BaseTool):
             "voice": voice,
             "text_length": len(text),
             "stability": stability,
-            "similarity_boost": similarity_boost,
-            "speed": speed,
+            "similarity_boost": payload.get("similarity_boost"),
+            "speed": payload.get("speed"),
             "output": str(output_path),
             "format": output_format,
         }

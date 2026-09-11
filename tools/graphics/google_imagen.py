@@ -1,4 +1,4 @@
-"""Google Imagen image generation via Gemini API."""
+"""Google image generation via the Gemini API (Nano Banana models; legacy Imagen 4 ids)."""
 
 from __future__ import annotations
 
@@ -97,13 +97,27 @@ class GoogleImagen(BaseTool):
         "properties": {
             "prompt": {
                 "type": "string",
-                "description": "Image description (max 480 tokens)",
+                "description": "Image description. (The 480-token cap applied "
+                "to the legacy Imagen 4 :predict path only.)",
             },
             "aspect_ratio": {
                 "type": "string",
-                "enum": ["1:1", "3:4", "4:3", "9:16", "16:9"],
+                "enum": [
+                    "1:1",
+                    "3:2",
+                    "2:3",
+                    "3:4",
+                    "4:3",
+                    "4:5",
+                    "5:4",
+                    "9:16",
+                    "16:9",
+                    "21:9",
+                ],
                 "default": "1:1",
-                "description": "Aspect ratio of generated image",
+                "description": "Aspect ratio of generated image. The Gemini image "
+                "models accept all ten; the legacy imagen-4.0-* ids accept only "
+                "1:1, 3:4, 4:3, 9:16, 16:9.",
             },
             "width": {
                 "type": "integer",
@@ -116,15 +130,22 @@ class GoogleImagen(BaseTool):
             "model": {
                 "type": "string",
                 "enum": [
+                    "gemini-3.1-flash-image",
+                    "gemini-3.1-flash-lite-image",
+                    "gemini-3-pro-image",
+                    "gemini-2.5-flash-image",
                     "imagen-4.0-generate-001",
                     "imagen-4.0-fast-generate-001",
                     "imagen-4.0-ultra-generate-001",
-                    "gemini-2.5-flash-image",
                 ],
-                "default": "imagen-4.0-generate-001",
-                "description": "Imagen model variant, or a Gemini image model "
-                "(gemini-*) routed through generate_content. Use "
-                "gemini-2.5-flash-image when the project has no Imagen access.",
+                "default": "gemini-3.1-flash-image",
+                "description": "Gemini image model (gemini-*) routed through "
+                "generate_content: gemini-3.1-flash-image (Nano Banana 2, default), "
+                "gemini-3.1-flash-lite-image (cheapest, 1K only), gemini-3-pro-image "
+                "(highest fidelity). gemini-2.5-flash-image is deprecated (shutdown "
+                "2026-10-02). The imagen-4.0-* ids are legacy: shut down on the Gemini "
+                "API 2026-08-17 and deprecated on Vertex AI; kept only for the "
+                ":predict path on projects that still have them.",
             },
             "number_of_images": {
                 "type": "integer",
@@ -177,12 +198,24 @@ class GoogleImagen(BaseTool):
             return ToolStatus.AVAILABLE
         return ToolStatus.UNAVAILABLE
 
+    # Per-image list prices (ai.google.dev/gemini-api/docs/pricing, 2026-09):
+    # gemini-3.1-flash-image 1K = 1120 output tokens at $60/1M ($0.067; 0.5K
+    # $0.045, 2K $0.101, 4K $0.151); gemini-3.1-flash-lite-image 1K = 1120
+    # tokens at $30/1M ($0.0336); gemini-3-pro-image $0.134 (1K/2K), $0.24 (4K);
+    # legacy gemini-2.5-flash-image 1290 tokens at $30/1M ($0.039).
+    _GEMINI_IMAGE_COST = {
+        "gemini-3.1-flash-image": 0.067,
+        "gemini-3.1-flash-lite-image": 0.0336,
+        "gemini-3-pro-image": 0.134,
+        "gemini-2.5-flash-image": 0.039,
+    }
+
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        model = inputs.get("model", "imagen-4.0-generate-001")
+        model = inputs.get("model", "gemini-3.1-flash-image")
         n = inputs.get("number_of_images", 1)
         if model.startswith("gemini-"):
-            # ~1290 output tokens per image at $30/1M tokens
-            return 0.039 * n
+            return self._GEMINI_IMAGE_COST.get(model, 0.067) * n
+        # Legacy Imagen 4 list prices (shut down on the Gemini API 2026-08-17).
         if "ultra" in model:
             return 0.06 * n
         if "fast" in model:
@@ -207,11 +240,11 @@ class GoogleImagen(BaseTool):
         return "1:1"
 
     def _execute_gemini(self, inputs: dict[str, Any], model: str) -> ToolResult:
-        """Generate via a Gemini image model (e.g. gemini-2.5-flash-image).
+        """Generate via a Gemini image model (e.g. gemini-3.1-flash-image).
 
         These models use generate_content with an image_config instead of the
-        Imagen :predict endpoint, and work on both auth paths (API key and
-        Vertex service account) through the shared genai client.
+        (shut down) Imagen :predict endpoint, and work on both auth paths (API
+        key and Vertex service account) through the shared genai client.
         """
         start = time.time()
         try:
@@ -281,7 +314,7 @@ class GoogleImagen(BaseTool):
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         # Gemini image models go through generate_content via the shared genai
         # client, which resolves auth (API key or Vertex service account) itself.
-        model = inputs.get("model", "imagen-4.0-generate-001")
+        model = inputs.get("model", "gemini-3.1-flash-image")
         if model.startswith("gemini-"):
             return self._execute_gemini(inputs, model)
 

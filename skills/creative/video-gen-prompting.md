@@ -3,8 +3,9 @@
 ## When to Use
 
 When writing prompts for the video generation family (`video_selector`, `seedance_video`,
-`heygen_video`, `wan_video`, `hunyuan_video`, `ltx_video_local`, `ltx_video_modal`,
-`cogvideo_video`). This skill covers the universal prompt vocabulary that works across all
+`veo_video`, `gemini_omni_video`, `gemini_omni_fal`, `kling_video`, `heygen_video`, `wan_video`,
+`hunyuan_video`, `ltx_video_local`, `ltx_video_modal`, `cogvideo_video`). This skill covers the
+universal prompt vocabulary that works across all
 video generation models. For the **preferred premium default**, see the Seedance 2.0 row
 in the table below.
 
@@ -14,14 +15,15 @@ For model-specific tips, see the linked guides below.
 
 | Model | Guide | Key Insight |
 |-------|-------|-------------|
-| **Seedance 2.0 (standard / fast)** | `creative/prompting/seedance-prompting.md` + Layer 3 `.agents/skills/seedance-2-0/` | **Preferred premium default** when `FAL_KEY` or HeyGen is configured. Single-pass synced audio, multi-shot generation, director-level camera, lip-sync from quoted dialogue, reference-to-video (9 img + 3 vid + 3 audio). Elo 1269 (#1 on Artificial Analysis). |
+| **Seedance 2.0 (standard / fast) / Seedance 2.5** | `creative/prompting/seedance-prompting.md` + Layer 3 `.agents/skills/seedance-2-0/` (2.5: `.agents/skills/seedance-2-5/`) | **Preferred premium default** when `FAL_KEY` or HeyGen is configured. Single-pass synced audio, multi-shot generation, director-level camera, lip-sync from quoted dialogue, reference-to-video (2.0: 9 img + 3 vid + 3 audio, at most 12 files total, 4-15 s; 2.5 via `seedance_video` `model_version="2.5"`: 4-30 s, 30 img + 10 vid + 10 audio). 2.5 has no fast tier - `model_variant="fast"` is 2.0 only. Elo 1269 (#1 on Artificial Analysis at release). |
 | **Sora 2 / Sora 2 Pro** | [OpenAI Sora 2 Cookbook](https://developers.openai.com/cookbook/examples/sora/sora2_prompting_guide) | Richest structured template. Advanced fields: lenses, filtration, grade, diegetic sound, wardrobe, finishing. |
-| **VEO 3.1 / VEO 3** | [Vertex AI Prompt Guide](https://cloud.google.com/vertex-ai/generative-ai/docs/video/video-gen-prompt-guide) | Best vocabulary reference tables. 14-component prompt structure. |
+| **VEO 3.1 (standard / fast / lite)** | `creative/prompting/veo-prompting.md` + [Vertex AI Prompt Guide](https://cloud.google.com/vertex-ai/generative-ai/docs/video/video-gen-prompt-guide) | Best vocabulary reference tables. 14-component prompt structure. Veo 2 / 3.0 shut down 2026-06-30 - only `veo-3.1-*` (Gemini API / Vertex) and `fal-ai/veo3.1`, `/fast`, `/lite` are live. 4/6/8 s, 720p default, 1080p / 4K (not lite), 16:9 or 9:16, native audio on by default, negative prompt, up to 3 reference images. Google recommends Gemini Omni Flash by default; pick Veo 3.1 for scene extension, last-frame control, or legacy pipelines. |
+| **Gemini Omni Flash 1.1** | Layer 3 `.agents/skills/gemini-omni/` | Google's recommended default video model (`gemini-omni-1.1-flash`, GA 2026-08-27; fal `google/gemini-omni-flash/v1.1/*`). Tools: `gemini_omni_video` (native Gemini API; must target `gemini-omni-1.1-flash`) and `gemini_omni_fal` (calls the `google/gemini-omni-flash/v1.1/*` endpoints, billed per second of output by resolution). 3-10 s (extend to 40 s), 360p / 720p / 1080p / 4K, 16:9 or 9:16, synthesized audio, stateful conversational edits via `previous_interaction_id`, `<FIRST_FRAME>` / `<IMAGE_REF_N>` tags and `[0-3s]` timecodes. About $0.10/s at 720p. `gemini-omni-flash-preview` shuts down 2026-09-30. |
 | **Grok Imagine Video** | `creative/prompting/grok-prompting.md` | Best when prompts need reference-image placeholders like `<IMAGE_1>` and identity/product carryover. |
 | **LTX-2** | [LTX Prompting Guide](https://docs.ltx.video/api-documentation/prompting-guide) | 6-element structure. Audio/voice prompting. Strong "what to avoid" section. |
 | **HunyuanVideo 1.5** | [Tencent Prompt Handbook](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5/blob/main/assets/HunyuanVideo_1_5_Prompt_Handbook_EN.md) | Formula: Subject + Motion + Scene + [Shot] + [Camera] + [Lighting] + [Style] + [Atmosphere]. |
 | **Runway Gen-4** | [Runway Prompting Guide](https://help.runwayml.com/hc/en-us/articles/39789879462419-Gen-4-Video-Prompting-Guide) | "Focus on motion, not appearance." One scene per clip. Simplicity wins. |
-| **Kling 2.6** | [Kling Prompt Guide](https://fal.ai/learn/devs/kling-2-6-pro-prompt-guide) | 4-part structure. Supports `++emphasis++` syntax for key elements. |
+| **Kling 3 / O3 / 2.6 (fal.ai)** | [Kling 2.6 Pro Prompt Guide](https://fal.ai/learn/devs/kling-2-6-pro-prompt-guide) | 4-part structure. `++emphasis++` syntax is documented for 2.6. `kling_video` now defaults to `v3/standard`; fal also lists `v3/pro`, `v3/turbo` and `o3` (3-15 s, 16:9 / 9:16 / 1:1, native audio - on by default on v3, off on o3). Per second: $0.084-0.168 for the standard/pro/turbo tiers, $0.154-0.196 with voice control, $0.42 for the `v3/4k` and `o3/4k` endpoints. The 2.6 endpoints stay public as legacy (5 or 10 s only). |
 | **Kling Official** | Layer 3 `.agents/skills/kling-official/` | Direct official API. Use `provider="kling_official"` to distinguish it from fal.ai Kling. `api_family` selects Classic, Turbo, or Omni; Turbo image-to-video needs a URL reference image. |
 | **Wan 2.1 / CogVideoX** | Use this generic guide | No official prompt guide. Standard cinematographic vocabulary works well. |
 
@@ -265,7 +267,7 @@ The paper defines six explicit playback-speed primitives. Use the right one — 
 
 ## Audio Descriptions
 
-Models that support audio generation (LTX-2, Sora 2, VEO 3) respond to:
+Models that support audio generation (Seedance 2.0 / 2.5, VEO 3.1, Gemini Omni Flash, Kling 3, LTX-2, Sora 2) respond to:
 
 **Ambient**: wind, rain, traffic, crowd murmur, forest birds, mechanical hum
 **Diegetic sound**: footsteps, door creaking, glass clinking, keyboard typing

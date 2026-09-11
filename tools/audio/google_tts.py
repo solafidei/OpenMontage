@@ -1,7 +1,8 @@
 """Google Cloud Text-to-Speech provider tool.
 
-Google TTS offers 700+ voices across 50+ languages, including Standard,
-WaveNet, Neural2, Studio, and Journey voice types — strong for localization.
+Google TTS offers 700+ voices across 50+ languages, including Chirp 3 HD
+(the default), Neural2, Studio, WaveNet, and Standard voice types — strong
+for localization.
 """
 
 from __future__ import annotations
@@ -91,7 +92,7 @@ class GoogleTTS(BaseTool):
             "voice": {
                 "type": "string",
                 "default": "en-US-Chirp3-HD-Orus",
-                "description": "Voice name. Default tier is Chirp 3 HD (2024, most natural). Examples: en-US-Chirp3-HD-Orus (male, rich/cinematic), en-US-Chirp3-HD-Aoede (female, warm). Legacy tiers: en-US-Studio-O, en-US-Neural2-D, en-US-Journey-D.",
+                "description": "Voice name. Default tier is Chirp 3 HD (GA April 2025, most natural). Examples: en-US-Chirp3-HD-Orus (male, rich/cinematic), en-US-Chirp3-HD-Aoede (female, warm). Legacy tiers: en-US-Studio-O, en-US-Neural2-D, en-US-Wavenet-D (Journey voices were rebranded as Chirp HD in Feb 2025).",
             },
             "language_code": {
                 "type": "string",
@@ -180,8 +181,8 @@ class GoogleTTS(BaseTool):
             rate_per_char = 0.000160  # $160/1M chars
         elif "Neural2" in voice or "Journey" in voice:
             rate_per_char = 0.000016  # $16/1M chars
-        elif "WaveNet" in voice:
-            rate_per_char = 0.000016  # $16/1M chars
+        elif "Wavenet" in voice:
+            rate_per_char = 0.000004  # $4/1M chars (legacy SKU 9D01-5995-B545, same rate as Standard)
         else:
             rate_per_char = 0.000004  # $4/1M chars (Standard)
         return round(char_count * rate_per_char, 4)

@@ -256,7 +256,7 @@ SUNO_API_KEY=your-key          # Full songs, instrumentals, any genre
 ELEVENLABS_API_KEY=your-key    # Premium TTS, AI music, sound effects
 OPENAI_API_KEY=your-key        # OpenAI TTS, GPT Image 2 images
 XAI_API_KEY=your-key           # xAI Grok image edits/generation + Grok video generation
-GOOGLE_API_KEY=your-key        # Google Imagen images, Google TTS (700+ voices)
+GOOGLE_API_KEY=your-key        # Google Gemini image models (Nano Banana 2), Lyria music, Gemini Omni/Veo video, Google TTS (700+ voices)
 
 # More video providers:
 ARK_API_KEY=your-key           # Volcengine Ark direct — Seedance 2.0 Standard/Fast/Mini
@@ -523,7 +523,7 @@ Each tool declares which Layer 3 skills it relies on. The agent reads Layer 1 to
 | Provider | Type | Notes |
 |----------|------|-------|
 | **FLUX** | Cloud API | State-of-the-art quality |
-| **Google Imagen** | Cloud API | Imagen 4 — high-quality, multiple aspect ratios |
+| **Google Imagen** | Cloud API | Gemini image models via `google_imagen` — Nano Banana 2 (`gemini-3.1-flash-image`), Nano Banana 2 Lite (`gemini-3.1-flash-lite-image`), Nano Banana Pro (`gemini-3-pro-image`); Imagen 4 was shut down 2026-08-17 |
 | **Grok Imagine Image** | Cloud API | Strong image edits, style transfer, and multi-image compositing |
 | **GPT Image 2** | Cloud API | OpenAI's image model |
 | **Seedream 5.0** | Cloud API | High-fidelity text-to-image and image editing through supported gateways |

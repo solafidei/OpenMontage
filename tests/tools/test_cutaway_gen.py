@@ -8,7 +8,9 @@ bearing and each has a test that fails if the code is reverted:
    under an alternate key, or nested inside another structure.
 2. **The route is pinned.** One inputs dict is built per cutaway and the identical
    object is handed to ``estimate_cost`` and ``execute``; unpinned the same shortfall
-   routes to seedance at $1.52/clip instead of kling at $0.10.
+   routes to seedance at $1.52/clip instead of kling at $0.42 (5 s Kling v3/standard
+   on fal at $0.084/s, the audio-off rate the pin selects; $0.126/s = $0.63 with
+   ``generate_audio`` off).
 3. **Trimming is mandatory and the output is measured.** The generator's duration is a
    hint, so the flash is cut out of whatever length came back, silent and 9:16, and
    the result is probed rather than assumed.
@@ -68,7 +70,7 @@ def provider(monkeypatch) -> _Recorder:
     class _FakeSelector:
         def estimate_cost(self, inputs: dict[str, Any]) -> float:
             recorder.estimated.append(inputs)
-            return 0.10
+            return 0.42
 
         def execute(self, inputs: dict[str, Any]) -> ToolResult:
             recorder.executed.append(inputs)
@@ -80,9 +82,9 @@ def provider(monkeypatch) -> _Recorder:
                 data={
                     "output_path": str(out),
                     "selected_provider": "kling",
-                    "executed_estimate_usd": 0.10,
+                    "executed_estimate_usd": 0.42,
                 },
-                cost_usd=0.10,
+                cost_usd=0.42,
             )
 
     monkeypatch.setattr("tools.video.cutaway_gen.VideoSelector", _FakeSelector)
@@ -221,21 +223,21 @@ def test_prose_prompts_are_not_falsely_refused(tmp_path, provider):
 # ---------------------------------------------------------------------------
 
 
-def test_single_cutaway_estimates_ten_cents_on_the_pinned_route(tmp_path, provider):
-    assert CutawayGen().estimate_cost(_inputs(tmp_path)) == 0.10
+def test_single_cutaway_estimates_forty_two_cents_on_the_pinned_route(tmp_path, provider):
+    assert CutawayGen().estimate_cost(_inputs(tmp_path)) == 0.42
     payload = provider.estimated[0]
     assert payload.get("allowed_providers") == CUTAWAY_PROVIDER_PIN, (
         "the route is no longer pinned — the sitting now prices at whatever the "
         "selector ranks top for this prompt"
     )
-    assert payload["duration"] == "5"          # kling's hard floor
+    assert payload["duration"] == "5"          # CUTAWAY_CLIP_SECONDS, this tool's choice — not a floor: fal v3/standard takes "3".."15"
     assert payload["aspect_ratio"] == "9:16"
     assert payload["operation"] == "text_to_video"
 
 
-def test_five_reel_shortfall_estimates_fifty_cents(tmp_path, provider):
+def test_five_reel_shortfall_estimates_two_dollars_ten(tmp_path, provider):
     inputs = _inputs(tmp_path, prompts=[f"gym detail {i}" for i in range(5)])
-    assert CutawayGen().estimate_cost(inputs) == 0.50
+    assert CutawayGen().estimate_cost(inputs) == pytest.approx(2.10)
 
 
 def test_pool_sufficient_sitting_costs_nothing_and_makes_no_call(tmp_path, forbidden_provider):
@@ -250,7 +252,7 @@ def test_pool_sufficient_sitting_costs_nothing_and_makes_no_call(tmp_path, forbi
 
 
 def test_estimate_and_execute_receive_the_identical_dict(tmp_path, provider):
-    """Defect D3: pricing a pinned route and executing an unpinned one is a 15x
+    """Defect D3: pricing a pinned route and executing an unpinned one is a ~2.4x
     under-price that slips both approval guards. One dict, built once."""
     tool = CutawayGen()
     inputs = _inputs(tmp_path)
@@ -263,7 +265,7 @@ def test_estimate_and_execute_receive_the_identical_dict(tmp_path, provider):
     assert provider.executed[0] is provider.estimated[-1]
     # And the standalone estimate priced exactly what execute ran.
     assert provider.estimated[0] == provider.executed[0]
-    assert priced == result.cost_usd == 0.10
+    assert priced == result.cost_usd == 0.42
 
 
 def test_retry_of_a_generated_prompt_is_free(tmp_path, provider):
@@ -271,7 +273,7 @@ def test_retry_of_a_generated_prompt_is_free(tmp_path, provider):
     inputs = _inputs(tmp_path)
 
     first = tool.execute(inputs)
-    assert first.cost_usd == 0.10
+    assert first.cost_usd == 0.42
     assert len(provider.executed) == 1
 
     assert tool.estimate_cost(inputs) == 0.0, "a cached prompt must estimate $0.00"
@@ -321,11 +323,11 @@ def test_flash_survives_a_clip_shorter_than_the_flash_window(tmp_path, provider)
 
 
 # ---------------------------------------------------------------------------
-# 4. Live registry — the pin still prices at $0.10 against the real providers
+# 4. Live registry — the pin prices at $0.42 per clip against the real providers
 # ---------------------------------------------------------------------------
 
 
-def test_live_pin_prices_the_sitting_at_fifty_cents(tmp_path):
+def test_live_pin_prices_the_sitting_at_two_dollars_ten(tmp_path):
     from tools.video.video_selector import ProviderPinUnresolvedError
 
     tool = CutawayGen()
@@ -334,7 +336,7 @@ def test_live_pin_prices_the_sitting_at_fifty_cents(tmp_path):
         estimate = tool.estimate_cost(inputs)
     except ProviderPinUnresolvedError:
         pytest.skip("pinned kling route is not live on this machine")
-    assert estimate == 0.50, "the pinned route must price a five-reel shortfall at $0.50"
+    assert estimate == pytest.approx(2.10), "the pinned route must price a five-reel shortfall at $2.10"
 
 
 # ----------------------------------------------------------------------
@@ -473,6 +475,50 @@ def test_probe_raises_rather_than_reporting_a_file_as_silent_and_sizeless(tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# 5b. Money and cache integrity across a guard failure
+# ---------------------------------------------------------------------------
+
+
+def test_paid_spend_is_reported_even_when_a_later_guard_fails(tmp_path, provider, monkeypatch):
+    """A clip paid for on the pinned route, then refused by the probe, is still
+    a $0.42 spend — not a silent $0.00 because it never shipped as a cutaway.
+    """
+    _break_ffprobe_for(monkeypatch, "cutaway_")
+    result = CutawayGen().execute(_inputs(tmp_path))
+
+    assert not result.success
+    assert result.cost_usd == 0.42, "real spend must not book as $0.00 on a later guard failure"
+    assert result.data["total_cost_usd"] == 0.42
+
+
+def test_poisoned_cache_entry_self_heals_on_the_next_run(tmp_path, provider):
+    """A partially-written clip must not be a permanent cache hit.
+
+    `_cached()` only checks size, so a truncated download passes that gate,
+    fails the mandatory probe, and — without the fix — sits there forever:
+    every retry sees the same >1KB file, skips the provider, and estimates
+    $0.00 while refusing the sitting over and over.
+    """
+    tool = CutawayGen()
+    inputs = _inputs(tmp_path)
+    cache_dir = tool._cache_dir(inputs)
+    payload = tool._provider_inputs(inputs["prompts"][0], cache_dir)
+    poisoned = Path(payload["output_path"])
+    poisoned.parent.mkdir(parents=True, exist_ok=True)
+    poisoned.write_bytes(b"\x00" * 4096)  # >1KB: passes _cached(), fails ffprobe
+
+    first = tool.execute(inputs)
+    assert not first.success
+    assert "discarded the poisoned cache entry" in first.error
+    assert not poisoned.exists(), "the poisoned entry must be discarded, not kept forever"
+    assert len(provider.executed) == 0, "the cache hit must skip the provider on this run"
+
+    second = tool.execute(inputs)
+    assert second.success, second.error
+    assert len(provider.executed) == 1, "the next run must regenerate for real, not trust the poison"
+
+
+# ---------------------------------------------------------------------------
 # 6. The pin's EFFECT, with no credentials — the guard that used to self-disarm
 # ---------------------------------------------------------------------------
 
@@ -483,7 +529,7 @@ def live_routing(monkeypatch):
 
     Only ``get_status`` is faked. The pin check used to be a single test that
     skipped on ProviderPinUnresolvedError, so on every runner without FAL_KEY —
-    which is all of CI — the 15x guard was completely unpoliced. Availability is
+    which is all of CI — the pin-price guard was completely unpoliced. Availability is
     the ONLY thing credentials decide here, so forcing it is enough to exercise
     the real filter, the real ranking and the real per-provider pricing.
     """
@@ -500,18 +546,18 @@ def live_routing(monkeypatch):
     return VideoSelector
 
 
-def test_pin_prices_the_five_reel_sitting_at_fifty_cents_without_credentials(
+def test_pin_prices_the_five_reel_sitting_at_two_dollars_ten_without_credentials(
     tmp_path, live_routing
 ):
-    """The whole point of the pin, priced through the real selector."""
+    """The whole point of the pin, priced through the real selector: 5 x $0.42."""
     inputs = _inputs(tmp_path, prompts=[f"gym detail {i}" for i in range(5)])
-    assert CutawayGen().estimate_cost(inputs) == 0.50
+    assert CutawayGen().estimate_cost(inputs) == pytest.approx(2.10)
 
 
-def test_removing_the_pin_would_route_the_same_sitting_to_the_15x_provider(
+def test_removing_the_pin_would_route_the_same_sitting_to_the_pricier_provider(
     tmp_path, live_routing
 ):
-    """Prove the pin is what makes $0.50 $0.50, not the selector's own preference.
+    """Prove the pin is what makes $2.10 $2.10, not the selector's own preference.
 
     Price the dict cutaway_gen actually builds, then price the same dict with its
     routing pin dropped. If the second is not multiples of the first, the pin is
@@ -525,11 +571,11 @@ def test_removing_the_pin_would_route_the_same_sitting_to_the_15x_provider(
     unpinned_payload = {k: v for k, v in payload.items() if k != "allowed_providers"}
     unpinned = live_routing().estimate_cost(unpinned_payload)
 
-    assert pinned == 0.10
-    assert unpinned >= 10 * pinned, (
+    assert pinned == pytest.approx(0.42)
+    assert unpinned >= 2 * pinned, (
         f"unpinned routing priced {unpinned} against pinned {pinned}: the fixture no "
         "longer contains a materially more expensive alternative, so this test and "
-        "the five-cent-sitting test above police nothing"
+        "the three-dollars-fifteen sitting test above police nothing"
     )
 
 

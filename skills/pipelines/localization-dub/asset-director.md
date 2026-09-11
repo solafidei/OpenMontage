@@ -66,7 +66,7 @@ tracker.reconcile(entry_id, actual_usd, success=result.success)
 
 **Known-free routes book $0.00.** When the result itself shows the routed provider is free/local (e.g. the selector's `result.data` names a $0 route, or the entry was estimated at $0), a success reporting 0.0 IS the actual cost — book 0.0, not the estimate. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the shared rules.
 
-`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate. **A language added mid-run has no line item at all**, so its first dub call trips the first-paid-use guard: that is the guard working as designed. Do not reserve around it — surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers Explicitly" and take the language back to the idea gate. If a reservation is made but the call never runs (the hero sample is rejected), call `tracker.refund(entry_id)`.
+`user_approved=True` is for approved-plan work only — omit it for anything outside what the user approved at the idea gate. **A language added mid-run has no line item, but the first-paid-use guard does NOT catch it** — the guard keys on the tool name (`tts_selector`), and that name was already cleared by `approve_tool` at the idea gate for the languages approved there. An added language reserves and spends under that same armed name; nothing raises. The agent must recognize the gap itself: before dubbing any language outside the approved plan, take it back to the idea gate to be priced, itemized, and re-armed — do not spend against it on the assumption the guard will stop you. If a reservation is made but the call never runs (the hero sample is rejected), call `tracker.refund(entry_id)`.
 
 Free/local tools still get the same round trip with `0.0`, batched — one entry per logical batch, not one per artifact: `tracker.estimate("subtitle_gen", "subtitles x 2 locales", 0.0)` and, when lip sync actually runs, `tracker.estimate("lip_sync", "lip_sync x 6 shots", 0.0)`, each reserved and reconciled the same way so no entry reaches compose in `estimated`/`reserved` state.
 
@@ -126,7 +126,7 @@ If you encounter a generation technique, provider behavior, or prompting pattern
 
 This is especially important for:
 - **Video generation prompting** — models respond to specific vocabularies that change with each version
-- **Image model parameters** — optimal settings for FLUX, GPT Image, Imagen differ and evolve
+- **Image model parameters** — optimal settings for FLUX, GPT Image, Nano Banana (Gemini image; Imagen 4 shut down 2026-08-17) differ and evolve
 - **Audio provider quirks** — voice cloning, music generation, and TTS each have model-specific best practices
 - **Remotion component patterns** — new composition techniques emerge as the framework evolves
 

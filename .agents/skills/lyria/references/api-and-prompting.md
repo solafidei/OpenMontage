@@ -1,12 +1,12 @@
 # Lyria 3 API and Prompting Reference
 
-Last verified: 2026-07-18.
+Last verified: 2026-09-08.
 
 ## Provider Families
 
 ### Lyria 3 Clip
 
-- Model: `lyria-3-clip-preview`
+- Model: `lyria-3-clip-preview` — current short-clip model of the Lyria 3.5 family (the music-generation guide lists it beside `lyria-3.5`); models page badge: Preview; the deprecations page gives it no shutdown date and no recommended replacement
 - Best for: prompt iteration, previews, loops, short cues
 - Input: text or images
 - Output: MP3 audio plus text containing lyrics or song structure
@@ -15,12 +15,22 @@ Last verified: 2026-07-18.
 
 ### Lyria 3 Pro
 
-- Model: `lyria-3-pro-preview`
+- Model: `lyria-3-pro-preview` — previous-generation model (models page badge: Preview); the deprecations page names `lyria-3.5` as its recommended replacement, no shutdown date announced
 - Best for: full songs, vocals, verses, choruses, bridges, longer scores
 - Input: text or up to 10 images through the underlying API
 - Output: MP3 by default; the underlying Pro API can request audio/WAV response format
-- Duration: prompt-influenced, up to roughly three minutes; not an exact media contract
+- Duration: prompt-influenced, a couple of minutes; not an exact media contract
 - Gemini Developer API price: $0.08 per request; no free tier
+
+### Lyria 3.5
+
+- Model: `lyria-3.5`
+- Status: public preview since 2026-09-03; the models page badges it Stable and calls it the flagship music model, and the deprecations page names it the recommended replacement for `lyria-3-pro-preview` (the `lyria-3-clip-preview` row has no recommended replacement)
+- Best for: full-length songs (a couple of minutes, duration influenced by the prompt), vocals and lyrics by default or instrumental on request
+- Input: text or up to 10 images; single-turn (iterative editing or refining a generated clip is not supported)
+- Output: MP3 by default, or WAV by setting `response_format`
+- Gemini Developer API price: $0.08 per song; no free tier
+- Same Interactions API shape (`client.interactions.create()`) as Lyria 3 Pro; see "The OpenMontage adapter currently" below for the model `google_music` sends
 
 ### Lyria RealTime
 
@@ -38,7 +48,7 @@ from google import genai
 
 client = genai.Client()
 interaction = client.interactions.create(
-    model="lyria-3-pro-preview",
+    model="lyria-3.5",
     input="A structured instrumental score ...",
 )
 
@@ -52,7 +62,7 @@ The OpenMontage adapter currently:
 
 - sends a list containing one text block and optionally one image block;
 - appends `[Target Duration: N seconds]` to the text;
-- calls `client.interactions.create()` with `lyria-3-pro-preview`;
+- calls `client.interactions.create()` with `lyria-3.5` (the recommended replacement for `lyria-3-pro-preview`; same $0.08 per song, same single-turn Interactions call);
 - extracts audio through `output_audio`, then legacy outputs, then step traversal;
 - writes MP3 and reports the requested duration without probing the result.
 

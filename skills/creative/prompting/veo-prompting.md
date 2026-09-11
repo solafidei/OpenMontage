@@ -1,6 +1,7 @@
-# VEO 3.1 / VEO 3 — Prompting Guide
+# VEO 3.1 — Prompting Guide
 
 > Source: [Vertex AI Video Gen Prompt Guide](https://cloud.google.com/vertex-ai/generative-ai/docs/video/video-gen-prompt-guide)
+> Status (2026-09): Veo 2 / 3.0 (`veo-2.0-generate-001`, `veo-3.0-generate-001`, `veo-3.0-fast-generate-001`) shut down 2026-06-30. Live ids: `veo-3.1-generate-preview` / `veo-3.1-fast-generate-preview` / `veo-3.1-lite-generate-preview` (Gemini API), `veo-3.1-generate-001` / `veo-3.1-fast-generate-001` (Vertex GA; `veo-3.1-lite-generate-001` announced 2026-04, launch stage unverified), and on fal.ai `fal-ai/veo3.1`, `fal-ai/veo3.1/fast`, `fal-ai/veo3.1/lite`. In `veo_video`, `model_variant` takes the bare variant — `veo3.1`, `veo3.1/fast` or `veo3.1/lite` (the tool prepends `fal-ai/` itself, so never pass the prefix). `veo3.1/lite` is wired on both backends (Gemini `veo-3.1-lite-generate-preview` / Vertex `veo-3.1-lite-generate-001`), priced at its own lite tier by `estimate_cost`, and rejected with a clear error for `resolution="4k"` and `reference_to_video`, which fal does not publish for lite. Limits: 4 / 6 / 8 s (8 s required for 1080p, 4K, or reference images), 720p default on fal, 1080p, 4K (not lite), 16:9 or 9:16, native audio (`generate_audio`, default true), `negative_prompt`, up to 3 reference images, extension +7 s per step (720p only, max 20, standard and fast only). Per-second price — Gemini API: standard $0.40 (720p/1080p) and $0.60 (4K); fast $0.10 / $0.12 / $0.30; lite $0.05 (720p) and $0.08 (1080p). fal.ai, audio on (audio off): standard $0.40 ($0.20) at 720p/1080p and $0.60 ($0.40) at 4K; fast $0.15 ($0.10) at 720p/1080p and $0.35 ($0.30) at 4K; lite $0.05 ($0.03) at 720p and $0.08 ($0.05) at 1080p. Google now recommends Gemini Omni Flash as the default video model; choose Veo 3.1 for scene extension, last-frame control, or legacy pipelines.
 > For universal vocabulary, see: `skills/creative/video-gen-prompting.md`
 
 **Word count:** VEO 3.1 sweet spot is 100–250 words; longer prompts stop helping.
@@ -20,13 +21,13 @@ VEO responds to the most comprehensive prompt structure of any model:
 9. **Artistic Style** — photorealistic, cinematic, animation, art movement
 10. **Ambiance** — color palettes, atmospheric effects, textures
 11. **Temporal Elements** — pacing, time flow, rhythm
-12. **Audio** — sound effects, ambient, dialogue (VEO 3 generates dialogue)
+12. **Audio** — sound effects, ambient, dialogue (VEO 3.1 generates dialogue natively; keep `generate_audio=true`)
 13. **Cinematic Terms** — editing techniques (match cut, montage, split diopter)
 14. **Negative Prompt** — what to exclude
 
 ## VEO-Specific Strengths
 
-- **Dialogue generation**: VEO 3 natively generates character speech. Write dialogue naturally.
+- **Dialogue generation**: VEO 3.1 natively generates character speech. Write dialogue naturally.
 - **Audio integration**: Ambient sound, music, and voice are generated together with video.
 - **Negative prompts**: Explicitly supported — "no text overlays, no watermarks, no lens flare"
 - **Editing vocabulary**: Understands "match cut", "jump cut", "montage", "split diopter" as prompt terms.
