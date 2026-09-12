@@ -489,8 +489,13 @@ class RemotionCaptionBurn(BaseTool):
         captions: list[dict],
     ) -> ToolResult:
         """Fall back to FFmpeg subtitle burning at bottom of frame."""
-        # Generate temporary SRT from word captions
-        tmp_srt = Path(output_path).parent / f"_tmp_captions_{int(time.time())}.srt"
+        # Generate temporary SRT from word captions. Keyed on the output path's
+        # stem AND a nanosecond token — a whole-second timestamp in a directory
+        # every reel of the batch shares let two concurrent burns collide on
+        # the same scratch filename and swap captions (sibling idiom:
+        # video_compose.py's _mux_external_audio temp_output).
+        out_path = Path(output_path)
+        tmp_srt = out_path.parent / f".{out_path.stem}.captions-{time.time_ns()}.srt"
         tmp_srt.parent.mkdir(parents=True, exist_ok=True)
 
         srt_lines = []

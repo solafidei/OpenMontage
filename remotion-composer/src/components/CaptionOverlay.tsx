@@ -251,7 +251,9 @@ const PageRenderer: React.FC<{
           backgroundColor,
           borderRadius: 12,
           padding: "14px 28px",
-          maxWidth: safeZone?.sides
+          // Test for presence, not truth: sides: 0 is a deliberate "full
+          // width" and must not fall through to the legacy 80% default.
+          maxWidth: safeZone?.sides !== undefined
             ? `${Math.round((1 - 2 * safeZone.sides) * 100)}%`
             : "80%",
           textAlign: "center",

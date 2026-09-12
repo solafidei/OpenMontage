@@ -425,6 +425,43 @@ def test_caption_position_is_a_safe_zone_fraction_not_a_pixel_offset():
     assert "paddingBottom: 80" not in source
 
 
+def _eval_max_width(*safe_zones: str) -> list:
+    """Run the REAL maxWidth ternary from PageRenderer, in node.
+
+    Source-text grepping for `!== undefined` would also pass a `!= null`
+    typo; running the expression is what actually proves 0 renders as full
+    width rather than falling through to the legacy 80% default.
+    """
+    source = _read("components/CaptionOverlay.tsx")
+    start = source.index("safeZone?.sides !== undefined")
+    end = source.index('"80%"', start) + len('"80%"')
+    expr = source[start:end]
+    calls = ",".join(f"maxWidth({sz})" for sz in safe_zones)
+    script = f"function maxWidth(safeZone) {{ return {expr}; }}\n" + (
+        f"console.log(JSON.stringify([{calls}]));"
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_a_zero_sides_safe_zone_renders_full_width_not_the_legacy_default():
+    """safeZone.sides: 0 is a deliberate "no side margin" and the tool's own
+    validator accepts it — but a truthiness check on `sides` read 0 as
+    absent and rendered the legacy 80% width, the opposite of what was asked.
+    """
+    full, narrowed, legacy = _eval_max_width(
+        "{bottom: 0.18, sides: 0}", "{bottom: 0.18, sides: 0.08}", "undefined",
+    )
+
+    assert full == "100%"
+    assert narrowed == "84%"
+    assert legacy == "80%"
+
+
 def test_pop_is_seeded_at_each_words_own_start():
     """A page-relative pop would only ever fire on the first word of a page."""
     source = _read("components/CaptionOverlay.tsx")
@@ -527,6 +564,44 @@ def test_word_separator_is_left_alone():
 
     assert 'wordSeparator = " ",' in source
     assert "{w.word}{i < page.words.length - 1 ? wordSeparator : \"\"}" in source
+
+
+def test_two_ffmpeg_fallback_burns_sharing_a_directory_get_different_scratch_names(
+    tmp_path, monkeypatch
+):
+    """Two reels of a batch caption-burn into the same shared render dir.
+
+    A whole-second-resolution scratch SRT name that ignores the output path
+    lets two overlapping ``_render_ffmpeg`` calls collide on the same
+    filename — one reel's captions overwrite the other's, both report
+    success, and there is no error to notice.
+    """
+    tool = RemotionCaptionBurn()
+    src = tmp_path / "master.mp4"
+    src.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    captions = [{"word": "GO", "startMs": 0, "endMs": 400}]
+
+    scratch_names: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        vf = next(a for a in cmd if a.startswith("subtitles="))
+        marker = "subtitles='"
+        start = len(marker)
+        srt_path = vf[start : vf.index("'", start)]
+        scratch_names.append(Path(srt_path).name)
+        out = Path(cmd[-1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(tool, "run_command", fake_run)
+
+    render_dir = tmp_path / "renders"
+    tool._render_ffmpeg(str(src), str(render_dir / "reel-a.mp4"), captions)
+    tool._render_ffmpeg(str(src), str(render_dir / "reel-b.mp4"), captions)
+
+    assert len(scratch_names) == 2
+    assert scratch_names[0] != scratch_names[1], scratch_names
 
 
 def test_the_ffmpeg_fallback_admits_what_it_dropped(tmp_path, monkeypatch):
