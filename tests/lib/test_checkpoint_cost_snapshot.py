@@ -129,6 +129,19 @@ NON_COST_SNAPSHOT_CORRUPTIONS = [
         _legacy_snapshot_masking(lambda d: d.__setitem__("human_approved", "yes")),
         id="legacy-snapshot-masking-wrong-typed-named-field",
     ),
+    # jsonschema.validate() surfaces only ONE best-match error, and its
+    # heuristic breaks path-length ties by the LATER property name — so a
+    # violation on a field that sorts before "cost_snapshot" (like
+    # checkpoint_policy) loses to it and, before the fix, rode through
+    # unreported: the old guard keyed on that single error's field, found
+    # "cost_snapshot", confirmed the legacy shape, and waived the WHOLE
+    # checkpoint — bogus checkpoint_policy included.
+    pytest.param(
+        _legacy_snapshot_masking(
+            lambda d: d.__setitem__("checkpoint_policy", "bogus_policy")
+        ),
+        id="legacy-snapshot-masking-jsonschema-best-match-prefers-cost-snapshot",
+    ),
 ]
 
 

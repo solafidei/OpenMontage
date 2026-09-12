@@ -6,6 +6,7 @@ abort a checkpoint write, must never rewrite or delete it, and must absorb
 each well-formed orphan exactly once.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -14,7 +15,6 @@ import threading
 import pytest
 from tests.contracts.test_phase0_contracts import sample_artifact
 
-from lib import checkpoint as checkpoint_module
 from lib.checkpoint import (
     CheckpointValidationError,
     _merge_decision_log,
@@ -169,6 +169,45 @@ def test_checkpoint_decision_missing_id_reports_schema_error_not_keyerror(
         assert canonical["decisions"] == []
 
 
+def test_rejected_write_does_not_persist_its_decision_and_correction_lands(
+    tmp_path,
+) -> None:
+    """A schema-invalid write must never merge its ruling into the canonical
+    log. Before the fix, the merge ran BEFORE validate_checkpoint, so a
+    rejected write's decision landed in decision_log.json anyway — and
+    because the merge dedups by decision_id, the later CORRECTED re-write of
+    that same decision then found the id already "present" and silently
+    dropped it, losing the judgment for good.
+    """
+    project_dir = _project(tmp_path)
+    canonical = project_dir / "decision_log.json"
+
+    # Invalid for a reason that has nothing to do with decision_log itself.
+    with pytest.raises(CheckpointValidationError):
+        write_checkpoint(
+            tmp_path,
+            "run",
+            "research",
+            "awaiting_human",
+            {
+                "research_brief": sample_artifact("research_brief"),
+                "decision_log": _log(_decision("d-1")),
+            },
+            pipeline_type="framework-smoke",
+            checkpoint_policy="bogus_policy",
+        )
+
+    assert not canonical.exists(), (
+        f"a rejected write still persisted its ruling to {canonical}"
+    )
+
+    # The corrected re-write, same decision_id, must land — not be silently
+    # dropped as an id the rejected attempt already "merged".
+    path = _research_write(tmp_path, _log(_decision("d-1")))
+    assert path.exists()
+    assert _ids(_canonical(project_dir)) == ["d-1"]
+
+
 def test_canonical_entry_without_id_survives_merge_untouched(tmp_path) -> None:
     project_dir = _project(tmp_path)
     (project_dir / "decision_log.json").write_text(
@@ -238,49 +277,55 @@ def test_canonical_unhashable_id_survives_merge_untouched(
     assert "decision_log.json" in caplog.text
 
 
-def test_concurrent_merges_do_not_collide_on_a_shared_tmp_file(
-    tmp_path, monkeypatch
-) -> None:
+def test_concurrent_merges_do_not_collide_on_a_shared_tmp_file(tmp_path) -> None:
     """Two stages of one project merging at once must both survive.
 
-    Every stage merges into the SAME decision_log.json, so a single fixed
-    ``decision_log.json.tmp`` was shared scratch space: both writers wrote it,
-    the first os.replace consumed it, and the second died with
-    FileNotFoundError — losing its decision AND aborting its checkpoint write.
-    The barrier below holds both writers between their dump and their replace,
-    which is exactly the interleaving that collides.
+    Every stage merges into the SAME decision_log.json. Two writers racing on
+    the read-modify-write can both read the same pre-state, each append only
+    their own decision, and the second os.replace clobbers the first — one
+    decision silently vanishes though neither writer crashed (the
+    unique-per-writer tmp name only fixed the crash, not this lost update).
+    Holding the canonical file's own lock externally and confirming a
+    concurrent merge stays blocked — then lands correctly once the lock is
+    released — proves the merge acquires that lock BEFORE its read, not only
+    around the replace.
     """
     project_dir = _project(tmp_path)
+    canonical = project_dir / "decision_log.json"
+    canonical.write_text(json.dumps(_log(_decision("d-1"))), encoding="utf-8")
 
-    barrier = threading.Barrier(2, timeout=10)
-    real_dump = json.dump
+    lock_path = canonical.with_name(f"{canonical.name}.lock")
+    external_lock = open(lock_path, "a+", encoding="utf-8")
+    fcntl.flock(external_lock, fcntl.LOCK_EX)
 
-    def synced_dump(obj, fp, **kwargs):
-        real_dump(obj, fp, **kwargs)
-        fp.flush()
-        barrier.wait()  # both tmp files written; neither replace has run yet
-
-    monkeypatch.setattr(checkpoint_module.json, "dump", synced_dump)
-
+    done = threading.Event()
     errors: list[BaseException] = []
 
-    def merge(did: str) -> None:
+    def merge() -> None:
         try:
-            _merge_decision_log(tmp_path, "run", _log(_decision(did)))
+            _merge_decision_log(tmp_path, "run", _log(_decision("d-2")))
         except BaseException as exc:  # noqa: BLE001 - the defect under test
             errors.append(exc)
+        finally:
+            done.set()
 
-    threads = [threading.Thread(target=merge, args=(d,)) for d in ("d-1", "d-2")]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=20)
-    assert not any(t.is_alive() for t in threads)
+    t = threading.Thread(target=merge)
+    t.start()
+    try:
+        # Held externally: a merge that locks correctly must not even finish
+        # its read while this is held, let alone complete.
+        assert not done.wait(timeout=0.3)
+        assert _ids(_canonical(project_dir)) == ["d-1"]
+    finally:
+        fcntl.flock(external_lock, fcntl.LOCK_UN)
+        external_lock.close()
 
+    t.join(timeout=20)
+    assert not t.is_alive()
     assert errors == [], f"concurrent merge crashed: {errors!r}"
 
-    canonical = _canonical(project_dir)
-    assert set(_ids(canonical)) & {"d-1", "d-2"}
+    canonical_data = _canonical(project_dir)
+    assert set(_ids(canonical_data)) == {"d-1", "d-2"}
     assert not list(project_dir.glob("*.tmp"))
 
 

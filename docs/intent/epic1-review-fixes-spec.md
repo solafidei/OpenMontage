@@ -100,7 +100,7 @@ this file, so sibling specs' line anchors are re-read off the final tree after A
 
 ---
 
-## A1. Legacy cost_snapshot tolerance missing from `_enforce_stage_prerequisites` (`lib/checkpoint.py:363`, MAJOR ×2 — python-correctness + schema-contract)
+## A1. Legacy cost_snapshot tolerance missing from `_enforce_stage_prerequisites` (`lib/checkpoint.py:376`, MAJOR ×2 — python-correctness + schema-contract)
 
 The branch defined the read-side tolerance twice (read_checkpoint:625-638,
 get_latest_checkpoint:660-673) and forgot the third validator of already-written
@@ -1641,7 +1641,7 @@ Rewrite section 2 (lines 64–84, `### 2. The judgment note` through the `Rules:
 > Judgment state goes through the **supported decision-log path**: schema-valid entries in
 > the `decision_log` artifact of the gate checkpoint, which `write_checkpoint()` merges
 > into the canonical `projects/<id>/decision_log.json` via `_merge_decision_log()`
-> ([`lib/checkpoint.py:511`](../../lib/checkpoint.py#L511)). **Never hand-write
+> ([`lib/checkpoint.py:524`](../../lib/checkpoint.py#L524)). **Never hand-write
 > `projects/<id>/artifacts/decision_log.json`** — nothing in the codebase writes that
 > file, Backlot prefers it over the canonical log when both exist
 > ([`backlot/state.py`](../../backlot/state.py), artifact-first fallback), and
