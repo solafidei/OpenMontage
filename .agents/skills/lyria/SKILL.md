@@ -25,7 +25,7 @@ Read [references/api-and-prompting.md](references/api-and-prompting.md) when cho
 | Need | Model | Contract |
 |---|---|---|
 | Prompt iteration, preview, loop, exact 30-second source | `lyria-3-clip-preview` | Always generates a 30-second MP3; currently $0.04/request |
-| Full song, vocals, longer structure, image-conditioned score | `lyria-3.5` | Public preview since 2026-09-03 (models page lists it as the stable flagship, replacing `lyria-3-pro-preview`); full-length, prompt-controllable duration (a couple of minutes); MP3 default or WAV via `response_format`; up to 10 images; $0.08 per song. This is the model `google_music` calls |
+| Full song, vocals, longer structure, image-conditioned score | `lyria-3.5` | Public preview since 2026-09-03 (models page lists it as the stable flagship, replacing `lyria-3-pro-preview`); full-length, prompt-controllable duration (a couple of minutes; the `google_music` adapter holds the requested duration to 5-184s — a tool floor and ceiling, not model limits — coercing by default and hard-erroring when `auto_fix=false`); MP3 default or WAV via `response_format`; up to 10 images; $0.08 per song. This is the model `google_music` calls |
 | Same, on the previous generation | `lyria-3-pro-preview` | Superseded by `lyria-3.5` (Google's models page calls it "previous generation"; the deprecations page names `lyria-3.5` as its recommended replacement, no shutdown date announced); prompt-influenced duration of a couple of minutes (the adapter capped it at 184s); $0.08 per song. No longer routed through `google_music` |
 | Live, continuously steered instrumental performance | `lyria-realtime-exp` | Separate WebSocket workflow; do not route through `google_music` |
 

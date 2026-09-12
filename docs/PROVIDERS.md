@@ -334,7 +334,10 @@ No subscription — pure pay-as-you-go, no minimum spend.
 |-------|-------|--------|
 | FLUX Pro v1.1 (`fal-ai/flux-pro/v1.1`, `flux_image` default) | $0.04 per megapixel, rounded up | 25 × 1MP images |
 | FLUX Dev (`fal-ai/flux/dev`) | $0.025 per megapixel, rounded up | 40 × 1MP images |
+| FLUX Schnell (`fal-ai/flux/schnell`) | $0.003 per megapixel, rounded up | 333 × 1MP images |
 | FLUX.2 Pro (`fal-ai/flux-2-pro`) | $0.03 for the first output megapixel + $0.015 per extra megapixel of input and output, rounded up | 33 × 1MP images |
+| FLUX.2 (`fal-ai/flux-2`) | $0.012 per megapixel, rounded up | 83 × 1MP images |
+| FLUX Pro (legacy) (`fal-ai/flux-pro`, `flux_image` `model: flux-pro`; the original FLUX.1 [pro] v1 route — still resolves on the fal OpenAPI but absent from fal's public catalog JSON; prefer `flux-pro/v1.1` or `flux-2-pro`) | $0.05 per megapixel, rounded up | 20 × 1MP images |
 | Recraft v4 (`fal-ai/recraft/v4/text-to-image`, `recraft_image` default; Recraft v3 is the legacy family, not wired) | $0.04/image; SVG via `fal-ai/recraft/v4/text-to-vector` $0.08/image | 25 images |
 | Recraft v4 Pro (`fal-ai/recraft/v4/pro/text-to-image`, `recraft_image` `model: v4-pro`) | $0.25/image; SVG via `fal-ai/recraft/v4/pro/text-to-vector` $0.30/image | 4 images |
 | Seedream 5 Pro (up to 1536x1536) (`bytedance/seedream/v5/pro/text-to-image`) | $0.0675/image | ~14 images |
@@ -351,19 +354,19 @@ Newer fal.ai endpoints in the same families, not yet wired into the tools above:
 | Kling O3 Standard / Pro (`o3/standard`, `o3/pro`) | $0.084 / $0.112 per sec audio off · $0.112 / $0.14 audio on | 3–15 s |
 | Kling 3.0 Turbo Standard / Pro (`v3/turbo/standard`, `v3/turbo/pro`) | $0.112 / $0.14 per sec | 3–15 s |
 | Kling 3.0 / O3 4K (`v3/4k`, `o3/4k`) | $0.42/sec | 3–15 s |
-| Kling 2.5 Turbo Pro (`v2.5-turbo/pro`) | $0.35 per 5 s + $0.07 per extra sec | 5 or 10 s |
+| Kling 2.5 Turbo Pro (`fal-ai/kling-video/v2.5-turbo/pro/*`; fal endpoint, not wired into `kling_video` — absent from its `model_variant` enum and `FAL_PRICE_PER_SECOND` table) | $0.35 per 5 s + $0.07 per extra sec | 5 or 10 s |
 | Kling 2.1 Standard / Pro / Master (`v2.1/*`, legacy; Standard and Pro are image-to-video only on fal) | $0.28 / $0.49 / $1.40 per 5 s (+$0.056 / $0.098 / $0.28 per extra sec) | 5 or 10 s |
 | Seedance 2.5 (`bytedance/seedance-2.5/*`) | $0.2205/sec 480p · $0.4730/sec 720p · $1.164/sec 1080p | 4–30 s |
-| Seedance 2.0 / 2.0 Fast (`bytedance/seedance-2.0/*`, `.../fast/*`) | $0.3034/sec 720p, $0.682/sec 1080p · Fast $0.2419/sec 720p | 4–15 s |
+| Seedance 2.0 / 2.0 Fast (`bytedance/seedance-2.0/*`, `.../fast/*`) | $0.3034/sec 480p and 720p · $0.682/sec 1080p · $1.5552/sec 4K (token-billed at $0.008/1k tokens, standard only) · Fast $0.2419/sec 480p and 720p | 4–15 s |
 | Seedance 2.0 Mini (`bytedance/seedance-2.0/mini/*`) | $0.0721/sec 480p · $0.1547/sec 720p | 4–15 s |
 | Gemini Omni 1.1 Flash (`google/gemini-omni-flash/v1.1/*`) | $0.03/sec 360p · $0.10/sec 720p · $0.15/sec 1080p · $0.30/sec 4K | 3–10 s |
-| Gemini Omni Flash 1.0 (`google/gemini-omni-flash/*`, legacy) | token-billed, ≈$0.125/sec at 720p | 3–10 s |
-| MiniMax H3 (`minimax/h3/*`; `fal-ai/minimax/hailuo-03/*` is the legacy alias) | $0.05/sec 480p · $0.06/sec 768p · $0.13/sec 2K · $0.16/sec 4K | 5–15 s |
-| MiniMax H3 Max / H3 Max Turbo (`minimax/h3-max/*`, `minimax/h3-max-turbo/*`) | list $0.05 / $0.08 / $0.16 per sec (480p/768p/1080p); Turbo $0.025 / $0.04 / $0.08 — 75% launch discount until 2026-09-14 | 5–15 s |
+| Gemini Omni Flash 1.0 (`google/gemini-omni-flash/*`, legacy, not wired — `gemini_omni_fal` maps every operation to the v1.1 endpoints) | token-billed, ≈$0.13/sec at 720p | 3–10 s |
+| MiniMax H3 (`minimax/h3/*`; `fal-ai/minimax/hailuo-03/*` is the legacy alias) | $0.05/sec 480p · $0.06/sec 768p · $0.13/sec 2K · $0.16/sec 4K · `reference_to_video`: first 5 reference images free, then +$0.08 per extra image (max 9) | 5–15 s |
+| MiniMax H3 Max / H3 Max Turbo (`minimax/h3-max/*`, `minimax/h3-max-turbo/*`; fal endpoints, not wired into `minimax_fal_video` — it hardcodes `minimax/h3/*` and exposes no model selector) | list $0.05 / $0.08 / $0.16 per sec (480p/768p/1080p); Turbo $0.025 / $0.04 / $0.08 — 75% launch discount until 2026-09-14 | 5–15 s |
 | Veo 3.1 (`fal-ai/veo3.1`) | $0.20/sec audio off · $0.40/sec audio on (720p/1080p); 4K $0.40 / $0.60 | 4, 6 or 8 s |
 | Veo 3.1 Fast (`fal-ai/veo3.1/fast`) | $0.10/sec audio off · $0.15/sec audio on; 4K $0.30 / $0.35 | 4, 6 or 8 s |
 | Veo 3.1 Lite (`fal-ai/veo3.1/lite`) | $0.03 / $0.05 per sec at 720p (audio off / on) · $0.05 / $0.08 at 1080p | 4, 6 or 8 s |
-| WAN 2.5 (`fal-ai/wan-25-preview/*`) | $0.05/sec 480p · $0.10/sec 720p · $0.15/sec 1080p (WAN 2.6 / 2.7: $0.10/sec 720p, $0.15/sec 1080p) | 5 or 10 s |
+| WAN 2.5 (`fal-ai/wan-25-preview/*`; fal endpoint, no fal-routed WAN tool — `wan_video` is local-GPU only) | $0.05/sec 480p · $0.10/sec 720p · $0.15/sec 1080p (WAN 2.6 / 2.7: $0.10/sec 720p, $0.15/sec 1080p) | 5 or 10 s |
 
 Veo 3 and Veo 2 are no longer in fal's public catalog (Google shut down `veo-3.0-*` and `veo-2.0-*` on 2026-06-30; the old `fal-ai/veo3` / `fal-ai/veo2` ids only resolve as legacy aliases) — only the `veo3.1` family is listed.
 

@@ -26,7 +26,12 @@ orchestration:
   # shortfall is 5 x $0.42 = $2.10 on the pinned kling_video route via video_selector.
   # That $0.42 is fal's audio-OFF rate for a 5s v3/standard clip ($0.084/s): the pin sends
   # generate_audio: false because the sub-second trim discards the audio. Leaving it on
-  # would cost $0.126/s -> $0.63/clip -> $3.15 a sitting, which this cap does NOT cover.
+  # would cost $0.126/s -> $0.63/clip -> $3.15 a sitting, more than half again this floor.
+  # Both figures exceed this $2.00 floor, but neither needs an operator cap raise: the idea
+  # gate arms the tracker at max(default_budget_cap_usd, min_workable_usd), where
+  # min_workable grosses the approved estimate up past cost_tracker's reserve holdback
+  # (config.yaml budget.reserve_pct, 0.10 today) — $2.35 for the $2.10 pinned shortfall,
+  # $3.51 for the $3.15 audio-on one. This floor is the DEFAULT cap, not the armed one.
   # Recompute from those two numbers rather than guessing if either changes.
   budget_default_usd: 2.00
   budget_per_output_minute_usd: 0.75

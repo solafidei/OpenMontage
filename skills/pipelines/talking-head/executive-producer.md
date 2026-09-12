@@ -404,8 +404,8 @@ The EP doesn't replace any director skill — it wraps them. Each director skill
 [EP] Subtitles generated: 82 cues, SRT format.
 [EP] Sync check: max offset 0.18s. All within 0.3s tolerance. ✓
 [EP] Audio extracted and normalized to -16 LUFS. ✓
-[EP] Lower-third overlay generated via recraft_image. Cost: $0.02.
-[EP] Budget: $0.02 spent, $0.48 remaining.
+[EP] Lower-third overlay generated via recraft_image. Cost: $0.04.
+[EP] Budget: $0.04 spent, $0.46 remaining.
 [EP] G4 PASS — Subtitles synced, audio clean, assets on disk.
 
 [EP] === STAGE 5: edit ===
@@ -421,7 +421,7 @@ The EP doesn't replace any director skill — it wraps them. Each director skill
 [EP] audio_enhance: noise reduction applied.
 [EP] video_compose: final render → output/talking-head-final.mp4
 [EP] Output probe: 3m01s, 1920x1080, stereo audio, H.264. ✓
-[EP] Budget: $0.18 spent (face_enhance + color_grade + overlays).
+[EP] Budget: $0.04 spent (recraft overlay; face_enhance/color_grade/audio_enhance/video_compose are local ffmpeg, $0.00).
 [EP] G6 PASS
 
 [EP] === STAGE 7: publish ===
@@ -431,7 +431,7 @@ The EP doesn't replace any director skill — it wraps them. Each director skill
 [EP] === FINAL QA ===
 [EP] Duration: 3m01s ✓ | Subtitle sync: max drift 0.18s ✓ | Audio: -16.2 LUFS ✓
 [EP] Face enhance: natural ✓ | Color: consistent ✓ | Overlays: timed correctly ✓
-[EP] Budget: $0.18 / $0.50 ✓
+[EP] Budget: $0.04 / $0.50 ✓
 [EP] PIPELINE COMPLETE — 0 revisions, 0 send-backs
 [EP] Output: output/talking-head-final.mp4
 ```

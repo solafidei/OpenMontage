@@ -8,12 +8,17 @@ that arithmetic against the real `video_selector` price so the two headline numb
 the spec can be checked rather than trusted:
 
   a pool that covers the batch  ->  TOTAL ESTIMATED $0.00 of $2.00, a proven-$0 ledger
-  a pool five cuts short        ->  TOTAL ESTIMATED $3.15 of $2.00, itemised per reel
+  a pool five cuts short        ->  TOTAL ESTIMATED $2.10 of $2.00, itemised per reel —
+                                     on the pinned audio-off route ($0.42/clip), already
+                                     ABOVE the $2.00 budget_default_usd FLOOR. The floor is
+                                     not the armed cap: the idea gate arms the tracker at
+                                     max(default_budget_cap_usd, min_workable_usd) = $2.35,
+                                     so all five reservations fit without a cap raise.
 
 The cap that makes the second number reachable is decision #6: at most ONE cut per reel
 may be an AI flash, so a reel needs `cuts_per_reel - 1` of the operator's own segments.
 Without it, greedy fill-free-reels-first allocation gives four reels at $0.00 from a
-20-segment pool and the $3.15 worst case never occurs.
+20-segment pool and the $2.10 worst case never occurs.
 
 Run:  python scripts/reel_batch_gate_dry_run.py
 """
@@ -30,6 +35,7 @@ import yaml  # noqa: E402
 from tools.video.cutaway_gen import (  # noqa: E402
     CUTAWAY_ASPECT_RATIO,
     CUTAWAY_CLIP_SECONDS,
+    CUTAWAY_GENERATE_AUDIO,
     CUTAWAY_MODEL_VARIANT,
     CUTAWAY_PROVIDER_PIN,
 )
@@ -38,7 +44,7 @@ from tools.video.video_selector import VideoSelector  # noqa: E402
 CUTS_PER_REEL = 5
 REQUESTED_REELS = 5
 REEL_SECONDS = 10.0
-# The pinned inputs `_provider_inputs` builds (cutaway_gen.py:324-339), minus the
+# The pinned inputs `_provider_inputs` builds (cutaway_gen.py:336-364), minus the
 # per-prompt `output_path` — built from the same exported constants so this dry run
 # prices what cutaway_gen actually executes, not a lookalike that happens to agree.
 CLIP = {
@@ -49,6 +55,7 @@ CLIP = {
     "model_variant": CUTAWAY_MODEL_VARIANT,
     "duration": CUTAWAY_CLIP_SECONDS,
     "aspect_ratio": CUTAWAY_ASPECT_RATIO,
+    "generate_audio": CUTAWAY_GENERATE_AUDIO,
 }
 
 
@@ -107,14 +114,17 @@ def report(label: str, have: int, unit_usd: float) -> None:
 def main() -> int:
     unit = VideoSelector().estimate_cost(CLIP)
 
-    print(f"\nreel-batch cost gate — dry run  (unit price ${unit:.2f}/clip, pinned to "
-          f"{CUTAWAY_PROVIDER_PIN[0]})")
+    print(f"\nreel-batch cost gate — dry run  (unit price ${unit:.2f}/clip — "
+          f"{CUTAWAY_PROVIDER_PIN[0]} {CUTAWAY_MODEL_VARIANT}, "
+          f"generate_audio={CUTAWAY_GENERATE_AUDIO} — the audio-off pin, not the "
+          f"generic $0.63 audio-on quote)")
     report("A sufficient pool", 31, unit)
     report("A pool five cuts short", 20, unit)
 
     print("\n" + "=" * 66)
-    print("  The flat $2.00 floor wins the max() until about twenty reels; at 3.333")
-    print(f"  output minutes the rate takes over at ${budget_cap(20):.2f}.")
+    print("  The flat $2.00 floor wins the max() up to sixteen reels (2.667 output")
+    print("  minutes x $0.75 = exactly $2.00); from seventeen the rate takes over,")
+    print(f"  reaching ${budget_cap(20):.2f} at twenty reels (3.333 output minutes).")
     return 0
 
 

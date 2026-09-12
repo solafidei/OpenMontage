@@ -1,7 +1,8 @@
 """Regression tests: google_imagen must return every image it requests and bills for.
 
-`execute()` sends `sampleCount = number_of_images` to the Imagen API and
-`estimate_cost` scales with `number_of_images`, but result handling was
+On the legacy `imagen-4.0-*` path, `execute()` sends `sampleCount = number_of_images`
+to the Imagen `:predict` API and `estimate_cost` scales with `number_of_images`,
+but result handling was
 hardcoded to `predictions[0]` — images 1..n-1 were decoded never, written
 never, and absent from `artifacts`. Worse, `images_generated` reported
 `len(predictions)`, so the result claimed n images while only one reached
@@ -9,6 +10,12 @@ disk. The user paid for n images and received one.
 
 Mirrors tests/tools/test_openai_image_multi_output.py, which covers the same
 defect class in the OpenAI provider.
+
+The three execute-path tests below pin the legacy `imagen-4.0-generate-001`
+id to exercise that `:predict` transport (sampleCount, one call, n
+predictions back); `test_gemini_default_path_writes_all_requested_images`
+covers the current default, `gemini-3.1-flash-image`, which makes one
+`generate_content` call per requested image.
 """
 
 import base64

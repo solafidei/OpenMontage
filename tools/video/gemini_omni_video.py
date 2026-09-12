@@ -78,8 +78,8 @@ class GeminiOmniVideo(BaseTool):
         "  Get one at https://aistudio.google.com/apikey\n"
         "  Gemini Omni 1.1 Flash is paid-tier only (no free tier). Google bills by\n"
         "  tokens and publishes only the 720p rate, ~$0.10 per second; the 360p\n"
-        "  $0.03/s, 1080p $0.15/s, and 4K $0.30/s figures used below are fal.ai's\n"
-        "  gateway prices for the same model, borrowed as an upper-bound proxy."
+        "  $0.03/s, 1080p $0.15/s, and 4K $0.30/s figures this tool quotes are\n"
+        "  fal.ai's gateway prices for the same model, borrowed as an upper-bound proxy."
     )
     agent_skills = ["gemini-omni", "ai-video-gen"]
 

@@ -513,13 +513,18 @@ def test_pinning_actually_redirects_the_real_scorer():
 
 @pytest.mark.skipif(not _kling_is_live(), reason="kling_video not credentialed here")
 def test_five_reel_shortfall_costs_three_dollars_fifteen():
-    """Spec §5.3: a full five-reel pool shortfall is 5 x $0.63 = $3.15.
+    """A GENERIC audio-on v3/standard quote is 5 x $0.63 = $3.15.
 
     kling 3.0 standard (fal-ai/kling-video/v3/standard/text-to-video) lists at
     $0.084/s with audio off and $0.126/s with audio on. fal's own schema defaults
     generate_audio to true on the v3 endpoints, so that is what the route has
     billed all along; the tool now sends true explicitly to keep the estimate and
     the bill equal. A 5 s clip is $0.63 and five of them are $3.15.
+
+    This test covers the GENERIC audio-on case: this test's clip dict passes
+    no `generate_audio`. The reel-batch cutaway pin sends `generate_audio:
+    false` instead and prices five clips at 5 x $0.42 = $2.10
+    (pipeline_defs/reel-batch.yaml:26) — a different scenario, not this test.
     """
     sel = _live_selector()
     clip = {
@@ -651,7 +656,10 @@ class _FailingStub(_StubTool):
 
 
 def _two_provider_selector(rankings, *, kling_cost: float | None = 0.42):
-    """seedance (top-ranked, $1.52) + kling ($0.42), with handles on both."""
+    """seedance (top-ranked, $1.52) + kling ($0.42 — the reel-batch cutaway pin's
+    audio-off rate, ``generate_audio: false``; the generic audio-on quote is
+    $0.63), with handles on both.
+    """
     seedance = _StubTool("seedance_video", "seedance", cost=1.52)
     kling = _StubTool("kling_video", "kling", cost=kling_cost)
     rankings.extend([

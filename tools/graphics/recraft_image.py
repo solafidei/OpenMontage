@@ -108,7 +108,7 @@ class RecraftImage(BaseTool):
         cpu_cores=1, ram_mb=512, vram_mb=0, disk_mb=100, network_required=True
     )
     retry_policy = RetryPolicy(max_retries=2, retryable_errors=["rate_limit", "timeout"])
-    idempotency_key_fields = ["prompt", "model", "style", "image_size"]
+    idempotency_key_fields = ["prompt", "model", "style", "image_size", "colors"]
     side_effects = ["writes image file to output_path", "calls fal.ai API"]
     user_visible_verification = ["Inspect generated image for brand accuracy and text readability"]
 

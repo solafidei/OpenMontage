@@ -60,12 +60,12 @@ grade per sitting. Out of scope: particle overlays, 3D.
 
 | Capability | Where | Reused how |
 |---|---|---|
-| Word-synced transcription | `tools/analysis/transcriber.py:165` — faster-whisper, `word_timestamps=True`, local, $0.00 | Caption timing, verbatim |
+| Word-synced transcription | `tools/analysis/transcriber.py:208` — faster-whisper, `word_timestamps=True`, local, $0.00 | Caption timing, verbatim |
 | Caption burn + overlay | `tools/video/remotion_caption_burn.py`, `remotion-composer/src/components/CaptionOverlay.tsx` | The text plane, extended with a pop preset |
 | CLIP retrieval stack | `lib/clip_embedder.py`, `lib/corpus.py`, `tools/video/clip_search.py` | Slot-filling from the operator's own pool |
 | Colour grade | `tools/enhancement/color_grade.py:79` — 7 ffmpeg profiles + `.cube` LUT + intensity blend | The batch-wide look |
 | Identity-safe beautify | `tools/enhancement/face_enhance.py:71` — smartblur / unsharp / curves / colorbalance / hqdn3d | "Beautify" that cannot regenerate a face |
-| Video generation fleet | 24 tools in `tools/video/`, routed by `tools/video/video_selector.py:15` through `lib/scoring.py:373` | AI cutaways |
+| Video generation fleet | 24 tools in `tools/video/`, routed by `tools/video/video_selector.py:30` through `lib/scoring.py:373` | AI cutaways |
 | Money ledger | `tools/cost_tracker.py` (997 lines) — estimate→reserve→reconcile→persist, file locking, atomic saves | Cost governance, and the persistence pattern the clip ledger copies |
 | Beat/energy analyser | `.agents/skills/music-to-video/scripts/analyze-beatgrid.py` — bpm, beats, downbeats, per-onset events, energy phases, rolls, silences, hard_stops, key_moments, phrases | The beat grid — **once it can run** |
 
@@ -108,18 +108,32 @@ All three render engines report live: `video_compose.get_info()["render_engines"
   `allowed_providers` returns **$1.52** per 5s clip (seedance standard, verified by execution). At
   one cutaway per 10s reel that is **$7.60** a batch against a $1.50 quality route — 5×, for footage
   trimmed to two seconds. `config.yaml:10` is `mode: warn`, which annotates the entry and proceeds
-  (`tools/cost_tracker.py:280-282`) rather than stopping it.
-- **D2 — a mistyped provider pin estimates $0.00.** Verified: `["kling"] → $0.63`,
-  `["gemini_omni"] → $0.50`, but `["fal"] → $0.00` and `["typo_provider"] → $0.00` via the
-  no-candidate branch (`tools/video/video_selector.py:295-297`). A $0.00 estimate is exempt from
-  **both** approval guards — `estimated > single_action_approval_usd` (`tools/cost_tracker.py:256`)
-  and `require_approval_for_new_paid_tool and estimated > 0` (`:264`) — so a typo seeds an
-  unguarded line item.
-- **D3 — the estimate/execute split.** The sharper variant of D2: a gate that prices with
-  `allowed_providers=["kling"]` ($0.63) while the spending director executes **without** it (routing
-  to seedance at $1.52) is a ~2.4× under-price. It no longer slips either guard on magnitude — $0.63
-  clears `single_action_approval_usd: 0.50` on its own — only on provider identity, which is what
-  `estimate_divergence` (`tools/video/video_selector.py:418`) exists to catch.
+  (`tools/cost_tracker.py:291-300` — budget check at `:291`, the `BudgetMode.WARN` annotation at
+  `:298-300`) rather than stopping it.
+- **D2 — a mistyped provider pin estimated $0.00 (fixed).** Verified at the time: `["kling"] →
+  $0.63`, `["gemini_omni"] → $0.50`, but `["fal"] → $0.00` and `["typo_provider"] → $0.00` via the
+  no-candidate branch. (That `["kling"]` figure is a **bare** provider pin, which passes no
+  `generate_audio` and so is quoted audio-on; the shipped cutaway pin sends `generate_audio: false`
+  and quotes $0.42 — §4, §5.2.) A $0.00
+  estimate is exempt from **both** approval guards — `estimated > single_action_approval_usd`
+  (`tools/cost_tracker.py:274`) and `require_approval_for_new_paid_tool and estimated > 0` (`:282`)
+  — so a typo seeded an unguarded line item. `video_selector.estimate_cost` now **raises**
+  `ProviderPinUnresolvedError` on any `allowed_providers` pin that resolves to no live provider
+  (`tools/video/video_selector.py:361`, inside the no-candidate branch at `:354-368`; exception
+  class at `:18`), pinned by `tests/tools/test_video_selector_routing.py:394-399`; the $0.00
+  return survives for `operation="rank"` (free and read-only) and for an UNPINNED call that
+  matches no live provider at all — in that second case `execute` also refuses
+  (`tools/video/video_selector.py:523`, `No video generation provider available`), so the zero
+  estimate cannot seed a paid action; only the pinned case could, and that now raises.
+- **D3 — the estimate/execute split.** The sharper variant of D2: a gate that prices with a bare
+  `allowed_providers=["kling"]` ($0.63, audio on) while the spending director executes **without** it
+  (routing to seedance at $1.52) is a ~2.4× under-price. On *that* generic quote it no longer slips
+  either guard on magnitude — $0.63 clears `single_action_approval_usd: 0.50` on its own — only on
+  provider identity, which is what `estimate_divergence` (`tools/video/video_selector.py:418`)
+  exists to catch. On the **shipped cutaway path** it is not closed: `cutaway_gen._provider_inputs`
+  pins `generate_audio: false` (`tools/video/cutaway_gen.py:80`, wired at `:358`), so the quote is
+  $0.42, which still sits under the $0.50 threshold. There the under-price is **~3.6×** and
+  invisible to the magnitude guard — provider identity is the only thing that catches it.
 - **D4 — `_pre_compose_validation` is bypassed on two render paths.** Its only call site is
   `tools/video/video_compose.py:1643`, but the atelier path returns at `:1592` and the HyperFrames
   path at `:1610`. A gate placed only there does not run for those runtimes. Verified.
@@ -300,10 +314,10 @@ recommendation with its measured rationale — not by re-interviewing the operat
 `CostTracker.for_project` (`skills/pipelines/documentary-montage/compose-director.md:31`). Persists to
 `projects/<id>/artifacts/clip_ledger.json`, copying `CostTracker`'s persistence **verbatim, not by
 abstraction**: `_locked()` flocking a sibling `.lock` with merge-from-disk inside the critical section
-and warn-and-continue when `fcntl` is absent (`tools/cost_tracker.py:669-702`), `_save()` via tmp +
-`os.replace` (`:704-728`), `_merge_from_disk()` union-by-id where a terminal state never regresses
-(`:872-905`), and a `ClipLedgerCorruptedError` that raises on a malformed file and **never silently
-resets** (`:54-57, :730-740`).
+and warn-and-continue when `fcntl` is absent (`tools/cost_tracker.py:688-721`), `_save()` via tmp +
+`os.replace` (`:722-747`), `_merge_from_disk()` union-by-id where a terminal state never regresses
+(`:934-967`), and a `ClipLedgerCorruptedError` that raises on a malformed file and **never silently
+resets** (`:54-57, :773`).
 
 It does **not** live in `tools/video/clip_search.py`: that tool declares `determinism = DETERMINISTIC`
 (`:61`), `side_effects = []` (`:164`), `tier = ANALYZE` (`:56`) and a docstring promising "The corpus
@@ -346,10 +360,15 @@ At that length the choice is not about quality — nothing reads in half a secon
   a segment reels 4 and 5 cannot have.
 - An **AI cutaway** costs $0.42 as billed today on the pinned Kling 3.0 Standard route: fal lists
   `fal-ai/kling-video/v3/standard` at $0.084/s, and the cutaway pin sends `generate_audio: false`
-  explicitly, since the sub-second trim discards the audio (the same clip with audio left on, fal's
-  default for an unpinned quote, is $0.63 at $0.126/s). `kling_video.estimate_cost` returns $0.42 for
-  the pinned inputs, which is the figure every guard and every cap in §5.3 is derived from — but it
-  is **pool-neutral**.
+  explicitly, since the sub-second trim discards the audio (the same clip with audio left on is $0.63
+  at $0.126/s — that is `kling_video`'s own default, `inputs.get("generate_audio", True)` at
+  `tools/video/kling_video.py:154`, which mirrors fal's own audio-on default on the `v3/*`
+  endpoints; since the #15 fix the tool **sends** the flag explicitly (`:219-220`) so the bill
+  equals the estimate instead of inheriting the server-side default it never saw).
+  `kling_video.estimate_cost` quotes that same $0.42 for the pinned inputs, so the approval guards
+  and the ledger compare against the price fal actually bills. §5.3's caps were derived from the
+  pre-audit $0.10 estimate and are **kept by ruling** (decision #16, `docs/decision-log.md:24`), not
+  re-derived from $0.42. The cutaway is, either way, **pool-neutral**.
 
 **The ruling is free-first with a measured valve.** Flash cuts come from the operator's own pool by
 default. AI cutaways fire **only** when the `idea` gate measures that the pool cannot support the
@@ -369,7 +388,7 @@ available) settle it:
 
 | Route | Cost | Runtime | Verdict |
 |---|---|---|---|
-| `kling_video` | $0.42 as shipped (pinned route sends `generate_audio: false` explicitly — fal `v3/standard` at $0.084/s); $0.63 if audio were left on ($0.126/s, fal's default for an unpinned quote); `estimate_cost` returns $0.42 for the pinned inputs | ~1 min/clip | **chosen** (ruled pre-audit at the stale $0.10 estimate; now $0.42 as pinned — see below) |
+| `kling_video` | **$0.42** on the cutaway pin as shipped (5s `v3/standard`, `generate_audio: false` sent explicitly — fal $0.084/s); **$0.63** only for a generic quote that leaves audio on ($0.126/s — the tool's own default when the caller passes no `generate_audio`, which mirrors fal's v3 default; sent explicitly since #15, `:154`, `:219-220`); `estimate_cost` quotes both exactly | ~1 min/clip | **chosen** (ruled when the estimate was $0.10 — re-priced at $0.42 on the pin, see below) |
 | `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | $0.00 | ~4 min/clip | 20 min for five clips |
 | `wan_video` | $0.00 | **~43 min/clip** | disqualified |
 | `gemini_omni_video` | $0.30 | — | dropped as "3× the price" when kling was believed to cost $0.10; at fal's list prices it is the cheaper route, so this verdict rests on a stale price and needs re-logging before it moves |
@@ -501,7 +520,7 @@ floor, so the floor alone sets the price. Verified live:
 
 | Tool | Shortest clip | Price | Runtime | Note |
 |---|---|---|---|---|
-| `kling_video` (`v3/standard`, via fal) | **5s** as shipped — the tool's enum is now `"3"`–`"15"` (default `"5"`), matching fal's `fal-ai/kling-video/v3/*` endpoints; only the legacy `v2.1/*` endpoints are `["5","10"]` | **$0.42** as shipped (pinned route sends `generate_audio: false` explicitly, since the trim discards the audio — fal $0.084/s); **$0.63** if audio were left on ($0.126/s, fal's default for an unpinned quote); `estimate_cost` returns **$0.42** for the pinned inputs | ~1 min | `tools/video/kling_video.py:84-89, :135-147, :149-155, :219-220` |
+| `kling_video` (`v3/standard`, via fal) | **5s** as shipped — the tool's enum is now `"3"`–`"15"` (default `"5"`), matching fal's `fal-ai/kling-video/v3/*` endpoints; only the legacy `v2.1/*` endpoints are `["5","10"]` | **$0.42** as shipped (pinned route sends `generate_audio: false` explicitly, since the trim discards the audio — fal $0.084/s); **$0.63** only for a generic quote that leaves audio on ($0.126/s — the tool's own default when the caller passes no `generate_audio`, which mirrors fal's v3 default; sent explicitly since #15); `estimate_cost` quotes both exactly | ~1 min | `tools/video/kling_video.py:84-89, :135-147, :149-155, :219-220` |
 | `gemini_omni_video` | 3s — a *hint*; the model chooses actual length | $0.30 | — | `:43, :123-126, :200-201` |
 | `ltx_video_local`, `cogvideo_video`, `hunyuan_video` | — | $0.00 | ~4 min | local, RTX 5070 |
 | `wan_video` | — | $0.00 | **~43 min** | disqualified |
@@ -510,37 +529,62 @@ floor, so the floor alone sets the price. Verified live:
 **Generate 5s, use half a second, discard the rest.** Paying for unused footage was the cheaper
 choice at the tool's pre-audit $0.10 estimate; at fal's list prices it is not on price alone — a 3s
 `v3/standard` clip ($0.25 audio off, $0.38 audio on) and `gemini_omni_video` ($0.30) both undercut
-the 5s pin. The 5s pin stands regardless, ruled at §8: `generate_audio: false` brings the shipped
-clip to $0.42. Because `gemini_omni_video`'s duration is a hint rather than a guarantee, trimming is
-mandatory on every route — no design may depend on receiving an exact clip length.
+the 5s pin — audio-off applies at 3s too, so $0.42 is still the dearer clip. The 5s pin is
+therefore **not** a price ruling: it stands because `CUTAWAY_CLIP_SECONDS = "5"` is what
+`cutaway_gen` ships (`tools/video/cutaway_gen.py:76`) and no ruling has moved it. §8 rules the
+*route*, not the duration; a 3s pin is an open cost reduction, not a decided one. Because
+`gemini_omni_video`'s duration is a hint rather than a guarantee, trimming is mandatory on every
+route — no design may depend on receiving an exact clip length.
 
 ### 5.3 Derived caps
 
 ```
+# Derived PRE-AUDIT, at the $0.10 kling_video.estimate_cost then returned. Kept by ruling
+# (decision #16), not re-derived — see "Price basis" below for the shipped arithmetic.
 typical sitting  (pool sufficient)   = $0.00
-thin-pool sitting (valve fires × 5)  = 5 × $0.10          = $0.50
+thin-pool sitting (valve fires × 5)  = 5 × $0.10          = $0.50   (shipped pin: 5 × $0.42 = $2.10)
 per output minute                    = $0.50 / 0.8333     = $0.60
 + 20% regeneration headroom          = $0.72              → round to $0.75
 ```
 
 **Derived manifest values:** `budget_default_usd: 2.00`, `budget_per_output_minute_usd: 0.75`.
 
-**Price basis.** `kling_video.estimate_cost` (`tools/video/kling_video.py:149-155`) prices from fal's
-rate table, not the flat $0.10 the block above still uses. The shipped cutaway pin (5s,
-`generate_audio: false`) returns $0.42; the same clip with audio left on returns $0.63.
+**Price basis.** The flat $0.10 the block above derives from was `kling_video.estimate_cost`'s
+pre-audit return. The tool now prices from fal's real per-second table
+(`tools/video/kling_video.py:135-147, :149-155`) and sends `generate_audio` explicitly (`:219-220`),
+so the shipped cutaway pin (5s, `generate_audio: false`) quotes **$0.42** and a generic quote that
+leaves audio on quotes **$0.63**. Re-derived at the pin, a thin-pool sitting is 5 × $0.42 = **$2.10**.
 `budget_default_usd: 2.00` and `budget_per_output_minute_usd: 0.75`
-(`pipeline_defs/reel-batch.yaml:31-32`) are unchanged under this pin — see the decision log for the
-ruling.
+(`pipeline_defs/reel-batch.yaml:26-36`) are nonetheless **unchanged**: decision #16
+(`docs/decision-log.md:24`) ruled the manifest correct as written rather than re-derived, so the
+block above stands as the pre-audit derivation the ruling deliberately preserves. Which pin applies
+is settled, not open — audio off.
+
+**What the ruling costs, stated plainly: the flat cap sits *below* the full-shortfall worst case.**
+`cost_tracker` holds back `reserve_pct` of the total (default `0.10`, `tools/cost_tracker.py:127`;
+`config.yaml:12`) and checks every reservation against `usable = remaining − total × reserve_pct`
+(`:217-220`, enforced at `:291`). Against a $2.00 cap only $1.80 is usable at rest, and the
+reservations are serial: after four $0.42 reservations `remaining` is $0.32 and `usable` is $0.12, so
+the **fifth** $0.42 reservation fails — `BudgetExceededError` under `mode: cap`, a `budget_warning`
+annotation that proceeds under the shipped `mode: warn` (`config.yaml:10`). A *full* five-reel
+shortfall therefore needs an explicit cap raise at gate 2 or one fewer reel. It is the documented
+worst case, not a covered one, and it is the rare case — the typical sitting is $0.00.
 
 At $0.75 the rate is **in family** with every existing pipeline (0.05 / 0.25 / 0.30 / 0.40 / 0.60),
 where the pre-R8 figures were outliers twice over. The flat floor governs at realistic batch sizes
 and the rate guards large ones:
 
 ```
-5 reels : target 0.8333 min → cap max($2.00, $0.63) = $2.00 ; estimate $0.50 ; min_workable $0.57 ✓
-10 reels: target 1.667  min → cap max($2.00, $1.25) = $2.00 ; estimate $1.00 ; min_workable $1.12 ✓
-20 reels: target 3.333  min → cap max($2.00, $2.50) = $2.50 ; estimate $2.00 ; min_workable $2.23 ✓
+# Cap column = the shipped manifest. Estimate column = as derived PRE-AUDIT, at $0.10/clip.
+5 reels : target 0.8333 min → cap max($2.00, $0.63) = $2.00 ; estimate $0.50 ; min_workable $0.57
+10 reels: target 1.667  min → cap max($2.00, $1.25) = $2.00 ; estimate $1.00 ; min_workable $1.12
+20 reels: target 3.333  min → cap max($2.00, $2.50) = $2.50 ; estimate $2.00 ; min_workable $2.23
 ```
+
+At the shipped $0.42 pin those estimates are **$2.10 / $4.20 / $8.40** against the same
+$2.00 / $2.00 / $2.50 caps — every one of them over. That is deliberate, not an oversight: decision
+#16 keeps `budget_default_usd: 2.00` rather than re-deriving it, so the flat cap is set below the
+full-shortfall worst case and a full shortfall is raised or trimmed at gate 2.
 
 Unpinned, a five-cutaway shortfall routes to seedance at $1.52/clip = **$7.60** — ~18× the $0.42
 quote the guards approved for one pinned clip, and ~3.6× per clip against that same $0.42 pinned
@@ -554,8 +598,8 @@ entry per tool. Reel-batch books **one ledger entry per reel** for cutaway gener
 
 The rule is permissive ("is acceptable"), not mandatory, and a single batch entry has **no honest
 terminal state after a mid-batch abort**: `reconcile()` is one-shot and terminal-guarded
-(`tools/cost_tracker.py:314`), `budget_spent_usd` counts failed entries as spend (`:186-192`), and
-`refund()` on a partly-executed entry erases real billing (`:323-337`). Per-reel is also the only
+(`tools/cost_tracker.py:315`), `budget_spent_usd` counts failed entries as spend (`:205-210`), and
+`refund()` on a partly-executed entry erases real billing (`:341-356`). Per-reel is also the only
 granularity matching the approval shape — he approves **per reel**.
 
 A per-reel entry at $0.42 sits below `single_action_approval_usd: 0.50` (`config.yaml:13`) —
@@ -709,7 +753,8 @@ No open questions remain against the operator. What remains is measurement, belo
 - **Second-generation encode loss** from the caption overlay pass (crf 18 over crf 23).
 - **Context cost dwarfs tool cost.** `docs/intent/context-cost.md:41` models the real bill as
   `0.5 × peak × n_calls`, 84-86% from accumulation. A five-reel sitting with five per-reel approvals
-  is the maximal-accumulation shape. `cost_snapshot()` will honestly report $0.00-$0.50 of tool spend while
+  is the maximal-accumulation shape. `cost_snapshot()` will honestly report $0.00-$2.10 of tool spend ($0.00 typical, $2.10 on a full
+  five-reel shortfall at the pinned $0.42) while
   the session's actual cost is elsewhere. Anyone reading `budget_remaining_usd` as "what this batch
   cost me" is materially wrong.
 - **Per-reel cost attribution has no schema carrier.** `operation` is a free string and

@@ -114,14 +114,14 @@ alias. `planned_reel_ids` is minted **here and nowhere else**: it goes onto the 
 | `have` | `max_reels` | `assisted_ceiling` | reels planned | cutaways | cost |
 |---|---|---|---|---|---|
 | 25-29 | 5 | 6+ | 5 | 0 | **$0.00** |
-| 22 | 4 | 5 | 5 | 3 | $0.30 |
-| 20 | 4 | 5 | 5 | 5 | $0.50 (full shortfall) |
-| 19 | 3 | 4 | **4** | 1 | $0.10 |
+| 22 | 4 | 5 | 5 | 3 | $1.26 |
+| 20 | 4 | 5 | 5 | 5 | $2.10 (full shortfall) |
+| 19 | 3 | 4 | **4** | 1 | $0.42 |
 
 Say it in one line at the gate: *"31 usable segments, 5 reels x 5 cuts = 25 needed — the
 pool covers the batch outright, nothing is generated, this sitting costs $0.00."* Or:
 *"19 usable segments — 5 reels needs 25, and even with one AI accent each the pool only
-supports 4. I can plan 4 reels for $0.10, or you can add footage."* A shortfall is the
+supports 4. I can plan 4 reels for $0.42, or you can add footage."* A shortfall is the
 operator's call: offer **fewer reels at $0.00** beside the paid fill and recommend one
 (`AGENT_GUIDE.md` → "Recommendation Style").
 
@@ -318,8 +318,9 @@ default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
 ```
 
 A five-reel sitting is `max($2.00, $0.75 x 0.8333) = max($2.00, $0.62) = $2.00` — show
-that math at the gate, not just the number. The flat floor does the work until about
-twenty reels, where the rate takes over (3.333 min → `max(2.00, 2.50) = $2.50`).
+that math at the gate, not just the number. The flat $2.00 floor wins the `max()` up to
+sixteen reels (2.667 output minutes x $0.75 = exactly $2.00); from seventeen the rate takes
+over, reaching $2.50 at twenty reels (3.333 min → `max(2.00, 2.50) = $2.50`).
 
 Now price the valve. Only the shortfall costs anything, priced through the selector on
 the pin the cutaway tool will execute under. **Build the dict once** and carry that same
@@ -334,7 +335,8 @@ that identity is what keeps the estimate and the later execution on one route.
 
 ```python
 from tools.video.cutaway_gen import (CUTAWAY_ASPECT_RATIO, CUTAWAY_CLIP_SECONDS,
-                                     CUTAWAY_MODEL_VARIANT, CUTAWAY_PROVIDER_PIN)
+                                     CUTAWAY_GENERATE_AUDIO, CUTAWAY_MODEL_VARIANT,
+                                     CUTAWAY_PROVIDER_PIN)
 from tools.video.video_selector import VideoSelector
 
 selector = VideoSelector()
@@ -355,8 +357,11 @@ for reel_id, prompt in shortfall_prompts.items():        # empty when the pool s
         "preferred_provider": CUTAWAY_PROVIDER_PIN[0],
         "model_variant": CUTAWAY_MODEL_VARIANT,          # "v3/standard"
         "duration": CUTAWAY_CLIP_SECONDS, "aspect_ratio": CUTAWAY_ASPECT_RATIO,
+        "generate_audio": CUTAWAY_GENERATE_AUDIO,        # False — the pin, as cutaway_gen sends it
     }
-    estimated_usd = selector.estimate_cost(payload)      # $0.10 on the pinned route
+    estimated_usd = selector.estimate_cost(payload)      # $0.42 on the pinned route
+                                                         # (5 s x $0.084/s, generate_audio: false;
+                                                         #  omit the flag and it quotes $0.63)
     line_items.append({"tool": "video_selector", "reel_id": reel_id,
                        "estimated_usd": estimated_usd, "inputs": payload})
 
@@ -440,8 +445,9 @@ for entry_id in [e["id"] for e in tracker.entries if e["status"] == "estimated"]
 ```
 
 On a full five-reel shortfall the arming line reads
-`ceil(0.50 / (1 - 0.10) * 100)/100 + 0.01 = $0.57`, well under the $2.00 cap, so `max()`
-picks the cap. On a proven-$0 sitting `min_workable_usd` lands at $0.01 and the `max()` is
+`ceil(2.10 / (1 - 0.10) * 100)/100 + 0.01 = $2.35`, which is ABOVE the $2.00 cap, so `max()`
+picks `min_workable_usd` — this is what lets all five $0.42 reservations fit a sitting whose
+floor is $2.00, with no operator cap raise. On a proven-$0 sitting `min_workable_usd` lands at $0.01 and the `max()` is
 inert — the line stays verbatim anyway. Uniformity is the drift guard.
 
 An `estimated` placeholder holds no money — it **does NOT consume budget** — but it is not
@@ -459,7 +465,7 @@ Downstream stages must book under these exact names — see
 stranded-entry recovery and ledger-corruption handling. Do not restate either here.
 
 The asset director creates and reserves its OWN entry at the moment it spends, passing
-`user_approved=True` because that call fulfils a line item approved here. At $0.10 a
+`user_approved=True` because that call fulfils a line item approved here. At $0.42 a
 per-reel entry sits below `config.yaml`'s `single_action_approval_usd: 0.50`, so the
 threshold does not force the flag — carry it anyway, because the operator genuinely does
 approve each reel at gate 2. Work outside this plan still trips `ApprovalRequiredError`,

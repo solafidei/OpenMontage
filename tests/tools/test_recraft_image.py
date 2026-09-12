@@ -112,3 +112,16 @@ class TestColorConversion:
         assert not result.success
         assert "color" in (result.error or "").lower()
         mock_post.assert_not_called()
+
+
+# ========== Idempotency key ==========
+
+class TestIdempotencyKey:
+    def test_colors_change_the_idempotency_key(self, recraft_tool):
+        # colors is materially forwarded to fal as RGBColor objects and
+        # changes the generated image, so it must be part of the cache key —
+        # otherwise a resume/cache layer would serve the wrong image.
+        base = {"prompt": "logo", "colors": ["#FF5733"]}
+        other = {"prompt": "logo", "colors": ["#2E86C1"]}
+
+        assert recraft_tool.idempotency_key(base) != recraft_tool.idempotency_key(other)

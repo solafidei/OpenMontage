@@ -14,7 +14,8 @@ inside a list or dict.
 
 **It is a pool relief valve, not the default path.** Under R8 flash cuts come from the
 operator's own footage; this tool fires only for the shortfall the ``idea`` gate
-measured, at most one cutaway per reel, trimmed to a sub-second flash accent. Called
+measured, at most one cutaway per reel, trimmed to a flash accent (0.6 s by default,
+2.0 s ceiling). Called
 with no prompts it costs $0.00 and makes no provider call at all.
 
 Route: ``kling_video``, PINNED via ``allowed_providers`` — ``v3/standard`` at 5s. fal lists
@@ -343,7 +344,7 @@ class CutawayGen(BaseTool):
 
         ``generate_audio`` is pinned false along with the route. It is not cosmetic:
         it cuts fal's rate by a third ($0.084/s against $0.126/s — audio on costs 50%
-        more) for audio the sub-second trim throws away, and it is part of
+        more) for audio the trim throws away, and it is part of
         ``kling_video``'s ``idempotency_key_fields``, so the flag is part of the cache
         identity: an audio-off clip and an audio-on one are never confused.
         """

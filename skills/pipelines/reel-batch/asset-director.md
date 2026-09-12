@@ -12,7 +12,12 @@ It is also **the only stage in this pipeline that can spend money**, and on a ty
 sitting it spends **$0.00**. Cutaways are free-first: sub-second flash accents come out of
 the operator's own indexed pool, and the paid valve opens only against the shortfall the
 `idea` gate measured and gate 2 approved — one clip per shortfall cut at $0.42 on the pinned
-`kling_video` route, so a five-cut shortfall is $2.10. This pipeline has three human gates —
+`kling_video` route, so a five-cut shortfall is $2.10. That is above `budget_default_usd:
+2.00`, but it does not need an operator cap raise: the idea gate arms the tracker at
+`max(default_budget_cap_usd, min_workable_usd)` (`skills/pipelines/reel-batch/idea-director.md:432-433`),
+where `min_workable_usd` grosses the approved estimate up past the reserve holdback — $2.35
+for a full five-cut shortfall — so all five reservations fit. Only a sitting armed at the
+bare $2.00 floor would trip the fifth reserve. This pipeline has three human gates —
 `idea`, `scene_plan`, `publish` — and gate 2 is the last of them **before any paid call**, which
 is exactly what lets `assets` run unattended (`human_approval_default: false`). Nothing here
 re-opens a creative decision; it executes the one that was approved.
@@ -23,7 +28,7 @@ re-opens a creative decision; it executes the one that was approved.
 |-------|----------|---------|
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation. Every asset object is `additionalProperties: false` — see Step 7 |
 | Prior artifacts | `state.artifacts[...]` — `["scene_plan"]["scene_plan"]`, `["script"]["script"]`, `["idea"]["brief"]` | Reel groups, cut slots and the per-cut `metadata.shortfall` entries; per-reel `window`, `caption`, `track_id`; reel count, usable-segment count, whether a paid cutaway is armed |
-| Corpus | `lib/corpus.py` — `Corpus(corpus_dir)` | The indexed pool. Rows are **segments**, not files (`lib/corpus.py:52-57`) |
+| Corpus | `lib/corpus.py` — `Corpus(corpus_dir)` | The indexed pool. Rows are **segments**, not files (`lib/corpus.py:52-61`) |
 | Clip ledger | `lib/clip_ledger.py` — `ClipLedger.for_project(project_id)` | No clip reused within a batch |
 | Look guard | `lib/polish_filters.py` — `look_filters`, `PolishError` | Refuses an unsafe look on identity-locked footage rather than dropping it |
 | Tools | `cutaway_gen` (the paid valve), `subtitle_gen`, `audio_mixer`, `face_enhance` | Everything but `cutaway_gen` is local ffmpeg/pure-python and prices $0.00 — none of the three overrides `BaseTool.estimate_cost` (`tools/base_tool.py:376-378`) |
@@ -34,8 +39,8 @@ re-opens a creative decision; it executes the one that was approved.
 Open the project's tracker once — `tracker = CostTracker.for_project(project_id)` reopens
 the same ledger every other stage shares. The one paid line in this pipeline is a cutaway,
 and it books under **`video_selector`**, not under `cutaway_gen`: both
-`CutawayGen.estimate_cost` (`tools/video/cutaway_gen.py:333-343`) and `CutawayGen.execute`
-(`:383-384`) hand the same pinned payload to `VideoSelector`, so the selector is what
+`CutawayGen.estimate_cost` (`tools/video/cutaway_gen.py:388-398`) and `CutawayGen.execute`
+(`:438-439`) hand the same pinned payload to `VideoSelector`, so the selector is what
 prices and bills. The routed concrete provider goes in the **operation string** — the house
 rule for a selector-fronted line (`skills/meta/checkpoint-protocol.md` → Cost Ledger
 Governance, "One name per line of spend").
@@ -43,8 +48,8 @@ Governance, "One name per line of spend").
 Book **one entry per cutaway** — one shortfall cut, one prompt, one clip, one entry. That is
 the grain the operator approved at gate 2, where the shortfall was itemised per cut. A single
 batch entry has no honest terminal state after a mid-batch abort: `reconcile` is one-shot and
-terminal-guarded (`tools/cost_tracker.py:314`), `budget_spent_usd` counts failed entries as
-spend (`:186-192`), and `refund` on a partly-executed entry erases real billing (`:323-337`).
+terminal-guarded (`tools/cost_tracker.py:315`), `budget_spent_usd` counts failed entries as
+spend (`:205-210`), and `refund` on a partly-executed entry erases real billing (`:341-355`).
 
 ```python
 from tools.video.cutaway_gen import DEFAULT_FLASH_SECONDS, MAX_FLASH_SECONDS
@@ -87,8 +92,8 @@ tracker.reconcile(entry_id, actual_usd, success=result.success)
 ```
 
 **Known-free routes book $0.00.** A prompt already generated into `cache_dir` is a cache hit:
-`estimate_cost` skips it (`tools/video/cutaway_gen.py:340-341`) and `execute` stamps
-`cached: true` with `cost_usd: 0.0` on that cutaway (`:416-417`). Estimate and actual
+`estimate_cost` skips it (`tools/video/cutaway_gen.py:395-396`) and `execute` stamps
+`cached: true` with `cost_usd: 0.0` on that cutaway (`:517-518`). Estimate and actual
 therefore agree at `0.00` with no special case — a re-run of an interrupted sitting is free,
 not double-billed. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Governance for the
 shared rules, including stranded entries and a corrupt ledger; do not re-derive them here.
@@ -96,8 +101,8 @@ shared rules, including stranded entries and a corrupt ledger; do not re-derive 
 `user_approved=True` rides on every reservation in this stage because gate 2 approved each
 reel's cut list, cutaway included. It is not a threshold dodge: at $0.42 a per-cutaway entry
 sits under `single_action_approval_usd: 0.50` ($0.42 < $0.50), so that guard would not have
-fired anyway (`tools/cost_tracker.py:256-262`). It does **not** waive the first-paid-use
-guard — `video_selector` must already be armed via `approve_tool` (`:264-270`, `:291-295`).
+fired anyway (`tools/cost_tracker.py:274-279`). It does **not** waive the first-paid-use
+guard — `video_selector` must already be armed via `approve_tool` (`:282-287`, `:309-313`).
 If that trips, surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers
 Explicitly"; never self-`approve_tool` around it, and never rename the line to a tool that
 happens to be armed. If a reservation is made and the call never runs (reel dropped, budget
@@ -113,11 +118,11 @@ measured** — the shortfall was measured at gate 1 as
 gate 2 as `scene_plan.metadata.shortfall`. The number you fire is
 `len(scene_plan["metadata"]["shortfall"])` — never a number you derive here.
 `usable_segments // cuts_per_reel` is a different quantity: it is the pool's *capacity*,
-which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:487-488`,
-surfaced at `:517`). Reading capacity as shortfall fires a cutaway for every reel the pool
+which `footage_library` computes as `max_reels` (`tools/video/footage_library.py:515`,
+surfaced at `:544`). Reading capacity as shortfall fires a cutaway for every reel the pool
 could have carried — unapproved spend, and it fails this file's own quality gate.
 **Provenance is declared, never inferred** — a row is identity-locked because
-`footage_library` wrote it that way at ingest (`:371`, `:412`), and nothing downstream
+`footage_library` wrote it that way at ingest (`:500-502`), and nothing downstream
 re-decides it from pixels. **`faceswap`, avatars and video-restyle of
 operator footage are out of scope** — the face is never regenerated, and no shortfall is
 a reason to reach for a tool that would. The compose gate cross-checks what you write
@@ -139,7 +144,7 @@ from tools.cost_tracker import CostTracker
 # The index is keyed to the POOL, not this batch — read the path the idea stage
 # resolved (brief.metadata.corpus_dir), never rebuild it from project_id.
 corpus = Corpus(Path(brief["metadata"]["corpus_dir"])); corpus.load()
-clips = ClipLedger.for_project(project_id)      # lib/clip_ledger.py:115-134
+clips = ClipLedger.for_project(project_id)      # lib/clip_ledger.py:164-186
 tracker = CostTracker.for_project(project_id)   # the ledger the idea stage seeded
 ```
 
@@ -177,7 +182,7 @@ for reel in scene_plan["metadata"]["reels"]:
         # overruns its own budget and drifts off every beat after the first cut.
         start, end = slot["in_seconds"], slot["out_seconds"]
         # local_path is ABSOLUTE for operator rows — the pool lives outside the corpus
-        # and is never copied (tools/video/footage_library.py:453-456); the join still
+        # and is never copied (tools/video/footage_library.py:472-476); the join still
         # resolves, because an absolute right-hand side wins.
         path = (corpus.corpus_dir / rec.local_path).as_posix()
         # The index now outlives the batch, so it can outlive the footage too.
@@ -232,7 +237,7 @@ firing its prompt would be spend nobody approved for a slot that is already full
 
 **Do not re-claim what gate 2 already claimed.** `ClipLedger.claim` raises
 `SegmentAlreadyClaimedError` on any overlap with a live claim — including the reel's own,
-because `_holder_of` does not exempt the claiming reel (`lib/clip_ledger.py:261-266`).
+because `_holder_of` does not exempt the claiming reel (`lib/clip_ledger.py:322-327`).
 Claim only a **substitute** pick, and check first:
 
 ```python
@@ -243,7 +248,7 @@ if clips.is_available(source=path, in_seconds=start, out_seconds=end):
                 out_seconds=end, clip_id=rec.clip_id)
 ```
 
-Close the step with `clips.assert_no_reuse()` (`:216-228`). It raises `ClipReuseError`
+Close the step with `clips.assert_no_reuse()` (`:265-281`). It raises `ClipReuseError`
 naming both reels — a batch-integrity failure, not a warning to note and pass. If a slot's
 file has vanished off disk since indexing, that is a blocker too, not a reason to reach for
 a generator: substituting AI for missing operator footage is a provenance change and needs
@@ -279,7 +284,7 @@ them — and say which you did. A four-reel sitting delivered is worth more than
 five-reel sitting that died on one clip.
 
 Each row carries `output_path`, `flash_seconds`, `cost_usd`, `cached` and
-`provenance: "ai_generated"` (`tools/video/cutaway_gen.py:413-427`). `sf["cut_id"]` is what
+`provenance: "ai_generated"` (`tools/video/cutaway_gen.py:514-528`). `sf["cut_id"]` is what
 the generated asset's `scene_id` and its `cut_index` key must both carry — that is the only
 join edit has back to the slot this clip fills. Cuts with no `shortfall` entry are not in
 the loop at all, and there is no other list to loop over: a per-reel `shortfall_prompt`
@@ -287,30 +292,33 @@ exists in no artifact this pipeline writes.
 
 **The prompt is text and only text.** `cutaway_gen` refuses any input carrying a media
 reference — a path, URL, data-URI or raw bytes, at any depth, under any key name — with
-`MediaReferenceRefusedError` (`tools/video/cutaway_gen.py:74-79`), raised by the recursive
-walker `refuse_media_references` (`:127-178`) from both `estimate_cost` (`:334`) and
-`execute` (`:356`), so the refusal lands before pricing as well as before sending. That
+`MediaReferenceRefusedError` (`tools/video/cutaway_gen.py:112-117`), raised by the recursive
+walker `refuse_media_references` (`:174-225`) from both `estimate_cost` (`:389`) and
+`execute` (`:411`), so the refusal lands before pricing as well as before sending. That
 refusal is the structural half of the identity guarantee. Never hand it a pool path "for
 style reference".
 
 **Why the pin is load-bearing.** `_provider_inputs` builds one dict per prompt with
 `allowed_providers=["kling"]` and `preferred_provider="kling"`
-(`tools/video/cutaway_gen.py:296-302`), and the *identical* dict is priced and executed
-(`:383-384`), so `VideoSelector` cannot stamp an estimate divergence. Unpinned, the same
+(`tools/video/cutaway_gen.py:353-354`), and the *identical* dict is priced and executed
+(`:438-439`), so `VideoSelector` cannot stamp an estimate divergence. Unpinned, the same
 shortfall routes to whatever the scorer ranks top — currently seedance at **$1.52/clip,
 $7.60 a sitting**, 3.6x the pinned $0.42/$2.10, for footage trimmed to six-tenths of a
 second. And a pin that resolves to nothing **raises** `ProviderPinUnresolvedError` rather
-than returning an unguardable $0.00 (`tools/video/video_selector.py:336-343`) — a $0.00
+than returning an unguardable $0.00 (`tools/video/video_selector.py:361-367`) — a $0.00
 estimate is exempt from both approval guards, so the raise is what stops a typo seeding an
-unguarded paid line. `python scripts/reel_batch_route_cost.py` prints all three numbers and
-the bad-pin behaviour; run it before asserting any of them to the operator.
+unguarded paid line. `python scripts/reel_batch_route_cost.py` prints all three routed
+prices and the bad-pin behaviour — it takes `generate_audio` from the pin itself
+(`scripts/reel_batch_route_cost.py:40`, `CUTAWAY_GENERATE_AUDIO`), so it quotes the pinned
+audio-OFF $0.42/clip ($2.10 a sitting) against seedance's $1.52 (~3.6x), not the generic
+audio-ON $0.63; run it before asserting any of them to the operator.
 
 Announce the first call per AGENT_GUIDE.md → "Announce Before Execution": tool `cutaway_gen`,
 provider `kling`, variant `v3/standard`, reason "pool shortfall of N cuts measured at
 `idea`", batch run of N clips at $0.42 each, where N is `len(scene_plan["metadata"]["shortfall"])`.
 If a cutaway fails, reconcile it `success=False` (the block does this), then retry once or
 drop that reel and `clips.release_reel(sf["reel_id"])` to return its segments to the pool
-(`lib/clip_ledger.py:204-210`). A four-reel sitting that ships beats a five-reel one that
+(`lib/clip_ledger.py:253-260`). A four-reel sitting that ships beats a five-reel one that
 stalls — say which you did.
 
 ### 4. The Proven-$0 Sitting Runs The Same Ceremony
@@ -376,19 +384,19 @@ The pool is identity-locked at ingest and nothing in this stage may loosen that.
   not as a style hint. Step 3's refusal enforces it in code; do not route around it.
 - **`face_enhance` presets are the only enhancement an `operator_footage` cut accepts.**
   `look_filters` resolves `look["grade"]` against `FACE_PRESETS` **first** and only then
-  against `GRADE_PROFILES` (`lib/polish_filters.py:163-175`), so a face preset sitting in the
+  against `GRADE_PROFILES` (`lib/polish_filters.py:317-334`), so a face preset sitting in the
   `grade` slot is permitted on a locked cut. What **raises** is a `color_grade` profile
-  (`:169-173`) or any grain (`:177-181`) — a `PolishError`, not a silent drop, so a look that
+  (`:327-331`) or any grain (`:336-339`) — a `PolishError`, not a silent drop, so a look that
   is not identity-safe fails the batch instead of applying to four fifths of it. The allowlist
   is `tools/enhancement/face_enhance.py:26-67`.
 - **Do not bake the batch look here.** The grade is spliced into the per-segment re-encode
-  at compose (`lib/polish_filters.py:228`). The one thing worth baking now is a
+  at compose (`tools/video/video_compose.py:754`). The one thing worth baking now is a
   `face_enhance` preset on a genuinely soft pool file — local ffmpeg, $0.00, identity-safe
   by construction. A `color_grade` profile baked onto a locked file is the same defect
   `look_filters` would have raised for, except unrecoverable.
 - **The stamp is the enforcement point.** `look_filters` takes provenance as its second
-  positional argument (`lib/polish_filters.py:149`); the function that reads it off the cut
-  dict is `cut_filters` (`:194`), which passes `cut.get("provenance")` through at `:228`. So
+  positional argument (`lib/polish_filters.py:303`); the function that reads it off the cut
+  dict is `cut_filters` (`:353`), which passes `cut.get("provenance")` through at `:388`. So
   a cut whose provenance is missing or wrong reads as unlocked and gets graded. The stamp
   that reaches that call is `edit_decisions.cuts[].provenance`, which edit copies forward
   from the scene slot — not from anything this stage writes. What step 7's `cut_index` gives
@@ -408,7 +416,7 @@ CANONICAL_LOOK = {"grade": "talking_head_standard", "sharpen": "sharpen_light"}
 operator_look = None                  # whatever the operator named this sitting, else None
 proposed_look = operator_look or CANONICAL_LOOK
 for cut in resolved:
-    look_filters(proposed_look, cut["provenance"])   # lib/polish_filters.py:149
+    look_filters(proposed_look, cut["provenance"])   # lib/polish_filters.py:303
 ```
 
 Dry-running it here costs nothing and fails before compose spends the 117 seconds a five-reel
@@ -430,8 +438,8 @@ drives the whole reel negative, which is why step 4 computes `shift` rather than
 Write two files per reel from the rebased words (`subtitle_gen` format enum `srt|vtt|json`,
 `tools/subtitle/subtitle_gen.py:50-54`). Both are inputs to the **same** Remotion burn, which
 has no JSON-file parameter at all: its schema takes `segments`, an inline array
-(`tools/video/remotion_caption_burn.py:86-92`), or `srt_path`, a path used as the alternative
-when `segments` is absent (`:93-99`). So the `json` is the one compose **loads** and passes
+(`tools/video/remotion_caption_burn.py:94-100`), or `srt_path`, a path used as the alternative
+when `segments` is absent (`:101-107`). So the `json` is the one compose **loads** and passes
 as `segments`, and the `srt` is the one it passes as `srt_path` — the path taken when
 Remotion itself is unavailable and the tool falls back to ffmpeg's `subtitles` filter
 (`:13-14`). Keep `max_words_per_cue` at 3 — 9:16 has no room for eight. Do **not** try to
@@ -548,14 +556,14 @@ cutaway.
 **About `path`.** It is project-relative for everything this pipeline wrote — cutaways,
 normalised beds, caption files. For an identity-locked pool row it is the **absolute** source
 path, because the pool lives outside the project and `footage_library` never copies it
-(`tools/video/footage_library.py:453-456`), even though the schema's own description reads
+(`tools/video/footage_library.py:472-476`), even though the schema's own description reads
 "Relative path within the pipeline project directory"
 (`schemas/artifacts/asset_manifest.schema.json:21`; nothing validates the shape). Say so in
 that asset's `generation_summary`, as above, so a reader is not left to guess which rule
 applies.
 
 A generated cutaway is `subtype: "ai_generated"`. `cutaway_gen` returns that string under the
-key **`provenance`** on each of its result rows (`tools/video/cutaway_gen.py:426`); because
+key **`provenance`** on each of its result rows (`tools/video/cutaway_gen.py:527`); because
 the asset schema is closed and has no `provenance` field, carry the value into `subtype` here
 — and into `cut_index[cut_id]["provenance"]`, which is what edit cross-checks. Never write
 `operator_footage` on something a model produced, and never the reverse.

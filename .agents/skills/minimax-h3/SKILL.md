@@ -1,7 +1,7 @@
 ---
 name: minimax-h3
 description: |
-  Generate MiniMax H3 (Hailuo 3.0) video through the official MiniMax v2 API, fal.ai, Runway, ComfyUI Partner Nodes, or local open weights in ComfyUI. Use for 4-15 second 2K clips, first/last-frame animation, and image/video/audio reference-conditioned video.
+  Generate MiniMax H3 (Hailuo 3.0) video through the official MiniMax v2 API, fal.ai, Atlas Cloud, Runway, ComfyUI Partner Nodes, or local open weights in ComfyUI. Use for 5-15 second clips at 480P/768P/2K/4K on fal (2K default), 4-15 s at 768P/2K on Atlas Cloud (2K default), and 4-15 s 2K-only on the first-party v2 API, first/last-frame animation, and image/video/audio reference-conditioned video.
 ---
 
 # MiniMax H3
@@ -19,7 +19,8 @@ substitute one provider's identifier into another API.
 |-------|-----------|-----------|
 | MiniMax direct | `minimax_video`, `model: "MiniMax-H3"` | Hosted first-party v2 API; global or mainland-China region |
 | fal.ai | `minimax_fal_video` | Hosted gateway; T2V, I2V, reference-to-video; 5–15 s (integer), 480P/768P native with 2K (default) / 4K upscaled from 768P; reference mode: ≤9 images + ≤3 videos + ≤3 audio clips (≤12 files, video/audio 2–15 s each, ≤15 s combined). $0.05/s 480P, $0.06/s 768P, $0.13/s 2K, $0.16/s 4K; first 5 reference images free then $0.08 each. fal also lists **H3 Max** (`minimax/h3-max/{text,image,reference}-to-video`, 480P/768P/1080P, list $0.05/$0.08/$0.16 per s after the promo ends 2026-09-14) and **H3 Max Turbo** (`minimax/h3-max-turbo/{text,image}-to-video`), neither wrapped yet |
-| Runway | `runway_video`, `model: "hailuo3"` | Hosted; 768P or 2K, 5–15 seconds |
+| Atlas Cloud | `atlas_video`, `model: "minimax/h3/{text,image,reference}-to-video"` | Hosted gateway; 4–15 s, 768P/2K (2K default), $0.10/s |
+| Runway | `runway_video`, `model: "hailuo3"` | Hosted; 768P or 2K (2K default), 5–15 s; $0.15/s at 2K, $0.10/s at 768P |
 | ComfyUI Partner Node | `comfyui_video`, `model_family: "minimax_h3_api"` | Hosted and billed in Comfy credits |
 | ComfyUI open weights | `comfyui_video`, `model_family: "minimax_h3_local"` | Local GPU with official workflow and model stack |
 

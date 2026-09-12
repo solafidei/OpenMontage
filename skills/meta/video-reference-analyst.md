@@ -233,10 +233,10 @@ Use this structure for each variant:
 - Clip duration strategy: [maximize clip duration to minimize API calls and cost.
   Ceilings differ by provider: Veo 3.1 tops out at 8 s (4/6/8), Gemini Omni Flash
   3-10 s, Seedance 2.0 4-15 s (2.5: 4-30 s; `seedance_video` exposes both), Kling 3
-  3-15 s on fal and `kling_video` accepts that full range (the legacy v2.1 lines are 5 or
-  10 s only). Prefer the longest clip the
-  chosen tool allows and consolidate adjacent scenes into single clips where
-  narratively coherent. A 60s video needs 6×10s clips, not 12×5s — fewer cuts and
+  3-15 s on fal and `kling_video` accepts that full range (the legacy v2.1
+  lines are 5 or 10 s only). Prefer the longest clip the chosen tool allows
+  and consolidate adjacent scenes into single clips where narratively
+  coherent. A 60s video needs 6×10s clips, not 12×5s — fewer cuts and
   smoother motion; under per-second billing the cost is about the same either way,
   so the win is continuity, not price.]
 
