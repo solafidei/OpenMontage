@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import sys
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from schemas.artifacts import validate_artifact
 from tools.cost_tracker import (
     BudgetExceededError,
     CostLogCorruptedError,
+    CostLogUnreadableError,
     CostTracker,
     EntryAlreadyTerminalError,
 )
@@ -104,6 +106,55 @@ class CostTrackerAtomicPersistenceTests(unittest.TestCase):
 
             with self.assertRaises(CostLogCorruptedError):
                 CostTracker(cost_log_path=log_path)
+
+    def test_unreadable_ledger_raises_unreadable_not_corrupt(self) -> None:
+        """W2.1: a chmod must not tell the operator to quarantine an intact ledger.
+
+        The two failures need opposite action. A corrupt ledger has to be
+        quarantined and rebuilt via reconstruct_from_snapshot; an IO or
+        permission failure leaves the file intact, and following the
+        corruption advice on top of it destroys the only record of what was
+        really spent. So the IO path must raise its own error, never the
+        content one — including through the reload-merge every mutator does.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the permission bits this test relies on")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "cost_log.json"
+            tracker = _tracker(log_path)
+            entry_id = tracker.estimate("paid_video", "generate", 0.10)
+            intact = log_path.read_bytes()
+            os.chmod(log_path, 0o000)
+            try:
+                with self.assertRaises(CostLogUnreadableError) as ctx:
+                    CostTracker(cost_log_path=log_path)
+                # A caller that only knows about corruption must NOT swallow
+                # this one and act on its (destructive) advice.
+                self.assertNotIsInstance(ctx.exception, CostLogCorruptedError)
+                message = str(ctx.exception).lower()
+                self.assertIn(str(log_path).lower(), message)
+                self.assertIn("do not quarantine", message)
+                self.assertNotIn("recovery: call", message)
+                self.assertNotIn("is corrupt", message)
+
+                # The live in-memory instance refuses to write over an
+                # unreadable file too, rather than merging against a ledger
+                # it could not reload — same error, not the corrupt one.
+                with self.assertRaises(CostLogUnreadableError):
+                    tracker.reserve(entry_id)
+            finally:
+                os.chmod(log_path, 0o600)
+
+            # Nothing was reset, quarantined, or rewritten while unreachable.
+            self.assertEqual(log_path.read_bytes(), intact)
+            self.assertEqual(
+                list(Path(temp_dir).glob("*.corrupt-*")), [],
+                "an IO error must never trigger quarantine",
+            )
+            # Once the access problem is fixed, the ledger opens unchanged.
+            reopened = CostTracker(cost_log_path=log_path)
+            self.assertEqual(len(reopened.entries), 1)
+            self.assertEqual(reopened.entries[0]["id"], entry_id)
 
     def test_save_replaces_not_appends(self) -> None:
         """The ledger is swapped in whole: a reader never sees a half-write.
@@ -245,6 +296,15 @@ class CostTrackerDamagedLedgerShapeTests(unittest.TestCase):
         "actual_usd_is_a_string": {
             "version": "1.0",
             "entries": [{"id": "abc123", "status": "completed", "actual_usd": "1.0"}],
+        },
+        # W2.4: a present-but-null numeric field used to read as "absent"
+        # (both are `.get(field)` -> None) and skip validation, so the bare
+        # TypeError it exists to prevent still escaped from budget_reserved_usd
+        # (`sum(e.get("reserved_usd", 0.0) for e in ... if status == "reserved")`
+        # sums a real None here, since the key IS present).
+        "reserved_usd_is_null": {
+            "version": "1.0",
+            "entries": [{"id": "abc123", "status": "reserved", "reserved_usd": None}],
         },
         "approved_tools_is_a_string": {
             "version": "1.0",

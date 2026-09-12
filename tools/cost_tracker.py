@@ -56,6 +56,19 @@ class CostLogCorruptedError(Exception):
     pass
 
 
+class CostLogUnreadableError(Exception):
+    """cost_log.json could not be opened at all — IO, not content.
+
+    Deliberately NOT a subclass of CostLogCorruptedError, because the two
+    demand opposite operator action. "Corrupt" tells the operator to
+    quarantine the file and rebuild the ledger via reconstruct_from_snapshot;
+    a chmod, a stale mount, or a full disk leaves the file itself intact, and
+    quarantining it on top of an IO error is how a recoverable access problem
+    turns into a lost money audit log. Fix the access problem and retry.
+    """
+    pass
+
+
 class EntryAlreadyTerminalError(Exception):
     """A mutator would overwrite an entry that already reached a terminal state.
 
@@ -91,6 +104,11 @@ _TERMINAL_STATUSES = frozenset({
 # Entry fields the budget arithmetic sums; a non-number here would raise a
 # bare TypeError deep inside a property, so _validate_ledger_shape rejects it.
 _NUMERIC_ENTRY_FIELDS = ("estimated_usd", "reserved_usd", "actual_usd")
+
+# Sentinel for "field absent" vs "field present with value None" — a JSON
+# `null` is a legitimate dict value and .get(field) can't be told apart from
+# a missing key by truthiness alone. See _validate_ledger_shape.
+_MISSING = object()
 
 
 class CostTracker:
@@ -128,7 +146,7 @@ class CostTracker:
         self.entries: list[dict[str, Any]] = []
         self._approved_tools: set[str] = set()
 
-        if cost_log_path and cost_log_path.exists():
+        if cost_log_path and self._log_exists():
             self._load()
 
     @property
@@ -737,7 +755,21 @@ class CostTracker:
                     f"top-level JSON is {type(data).__name__}, expected object"
                 )
             self._validate_ledger_shape(data)
-        except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
+        except OSError as exc:
+            # Ordered before the content errors below (the two hierarchies
+            # are disjoint, so this only claims genuine IO). Folding it in
+            # with them told the operator a chmod meant CORRUPT and sent them
+            # to quarantine-and-reconstruct — destructive advice for a money
+            # ledger that is still perfectly intact on disk.
+            raise CostLogUnreadableError(
+                f"Cost ledger {self.cost_log_path} could not be read ({exc}). "
+                "The ledger's contents were never examined, so this is NOT a "
+                "corruption report: do not quarantine it or call "
+                "reconstruct_from_snapshot. Fix whatever is blocking the "
+                "read — permissions on the file or its directory, or a mount "
+                "that has gone away — and run the stage again."
+            ) from exc
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise CostLogCorruptedError(
                 f"Cost ledger {self.cost_log_path} is corrupt ({exc}). "
                 "This is the money audit log — do NOT delete it or start fresh, "
@@ -816,8 +848,14 @@ class CostTracker:
                     f"{sorted(known_statuses)}"
                 )
             for field in _NUMERIC_ENTRY_FIELDS:
-                value = entry.get(field)
-                if value is None:
+                # Sentinel, not truthiness: an absent field is fine (the
+                # budget properties default it with .get(field, 0.0)), but a
+                # field present with JSON `null` must fall through to the
+                # isinstance rejection below — .get(field) alone returns None
+                # for both cases and used to let a null past this guard, only
+                # for it to raise a bare TypeError inside budget_spent_usd.
+                value = entry.get(field, _MISSING)
+                if value is _MISSING:
                     continue
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise ValueError(
@@ -864,6 +902,28 @@ class CostTracker:
             "override is logged."
         )
 
+    def _log_exists(self) -> bool:
+        """Does the cost log file exist? Reports an inaccessible parent honestly.
+
+        Path.exists() lets an EACCES on the containing directory out as a raw
+        OSError, which would reach the caller as a bare traceback with none
+        of the do-not-quarantine guidance the same failure gets one line
+        later in _read_ledger.
+        """
+        if self.cost_log_path is None:
+            return False
+        try:
+            return self.cost_log_path.exists()
+        except OSError as exc:
+            raise CostLogUnreadableError(
+                f"Cost ledger {self.cost_log_path} could not be reached "
+                f"({exc}). The ledger's contents were never examined, so "
+                "this is NOT a corruption report: do not quarantine it or "
+                "call reconstruct_from_snapshot. Fix whatever is blocking "
+                "the read — permissions on the file or its directory, or a "
+                "mount that has gone away — and run the stage again."
+            ) from exc
+
     def _load(self) -> None:
         data = self._read_ledger()
         self.entries = data.get("entries", [])
@@ -878,7 +938,7 @@ class CostTracker:
         regresses); approved_tools union; budget_total_usd from disk unless
         this instance armed it explicitly after construction.
         """
-        if self.cost_log_path is None or not self.cost_log_path.exists():
+        if self.cost_log_path is None or not self._log_exists():
             return
         data = self._read_ledger()
 
