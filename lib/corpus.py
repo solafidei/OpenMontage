@@ -103,6 +103,15 @@ class ClipRecord:
     # it rather than trusting a default to carry the guarantee.
     identity_locked: bool = False
 
+    # Fingerprint of the source file at index time (spec W8.2): size in bytes
+    # + mtime_ns. 0/0 means "not stamped" — every non-footage_library row,
+    # and any footage_library row written before this field existed — and is
+    # never checked (see `_source_row_is_stale`); a real file's size and
+    # mtime are never both exactly zero, so there is no collision with a
+    # genuinely unstamped row.
+    source_size: int = 0
+    source_mtime_ns: int = 0
+
     def __post_init__(self) -> None:
         # `kind` arrives straight off disk — `Corpus.load` does
         # `ClipRecord(**data)` on each JSONL row — so it is untrusted text,
@@ -215,6 +224,24 @@ class ClipRecord:
         return (start, end)
 
 
+def _source_row_is_stale(rec: ClipRecord) -> bool:
+    """Whether the file backing `rec` has changed since it was fingerprinted.
+
+    Only footage_library stamps `source_size`/`source_mtime_ns` (both
+    nonzero); every other row reads 0/0 and is skipped before touching the
+    filesystem at all. A missing file is a different failure than a changed
+    one — footage_library's own `dead_source_rows` report covers "gone
+    entirely" — so a failed stat reads as "not stale" here, not as stale.
+    """
+    if not rec.source_size or not rec.source_mtime_ns:
+        return False
+    try:
+        stat = Path(rec.local_path).stat()
+    except OSError:
+        return False
+    return stat.st_size != rec.source_size or stat.st_mtime_ns != rec.source_mtime_ns
+
+
 class Corpus:
     """Append-only local clip corpus with vector search.
 
@@ -274,40 +301,45 @@ class Corpus:
 
     def load(self) -> None:
         """Load existing corpus from disk. Silently starts empty if absent."""
-        self.records = []
-        self._id_to_row = {}
+        records: list[ClipRecord] = []
         if self.index_path.is_file():
             with open(self.index_path, encoding="utf-8") as f:
-                for i, line in enumerate(f):
+                for line in f:
                     line = line.strip()
                     if not line:
                         continue
-                    data = json.loads(line)
-                    rec = ClipRecord(**data)
-                    self.records.append(rec)
-                    self._id_to_row[rec.clip_id] = i
+                    records.append(ClipRecord(**json.loads(line)))
 
         if self.embed_path.is_file():
-            self.clip_embeddings = np.load(self.embed_path)
+            clip_embeddings = np.load(self.embed_path)
         else:
-            self.clip_embeddings = np.zeros((0, EMBED_DIM), dtype=np.float32)
+            clip_embeddings = np.zeros((0, EMBED_DIM), dtype=np.float32)
 
         if self.tag_embed_path.is_file():
-            self.tag_embeddings = np.load(self.tag_embed_path)
+            tag_embeddings = np.load(self.tag_embed_path)
         else:
-            self.tag_embeddings = np.zeros((0, EMBED_DIM), dtype=np.float32)
+            tag_embeddings = np.zeros((0, EMBED_DIM), dtype=np.float32)
 
         # Sanity check: if JSONL and .npy drifted out of sync (e.g. crash
         # mid-add), we truncate to the shorter length so subsequent adds
         # don't alias to the wrong rows.
-        n = min(len(self.records), self.clip_embeddings.shape[0], self.tag_embeddings.shape[0])
-        if n != len(self.records):
-            self.records = self.records[:n]
-            self._id_to_row = {r.clip_id: i for i, r in enumerate(self.records)}
-        if self.clip_embeddings.shape[0] != n:
-            self.clip_embeddings = self.clip_embeddings[:n]
-        if self.tag_embeddings.shape[0] != n:
-            self.tag_embeddings = self.tag_embeddings[:n]
+        n = min(len(records), clip_embeddings.shape[0], tag_embeddings.shape[0])
+        records = records[:n]
+        clip_embeddings = clip_embeddings[:n]
+        tag_embeddings = tag_embeddings[:n]
+
+        # A row whose fingerprint no longer matches its file (spec W8.2) was
+        # re-encoded or trimmed in place since it was indexed: its embedding
+        # describes frames at offsets the file may not even contain anymore.
+        # `Corpus` stays append-only — nothing here rewrites the row on disk
+        # — but a row this stale must not come back out as selectable, so it
+        # is dropped from every in-memory view, right where every consumer
+        # (`corpus.records`, `rank_by_text`, `knn`, ...) reads it.
+        keep = [i for i, r in enumerate(records) if not _source_row_is_stale(r)]
+        self.records = [records[i] for i in keep]
+        self._id_to_row = {r.clip_id: i for i, r in enumerate(self.records)}
+        self.clip_embeddings = clip_embeddings[keep]
+        self.tag_embeddings = tag_embeddings[keep]
 
     def save(self) -> None:
         """Persist index + both embedding stacks atomically-ish."""

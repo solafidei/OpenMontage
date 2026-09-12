@@ -72,6 +72,15 @@ nowhere else, so the floor is enforced solely by declining to write the row.
 Both are refused with the remedy named (`_index_conflict`), never absorbed
 silently. Lowering the floor is free: the excluded segments are re-decided from
 their cached measurements, which is the reason for keeping them.
+
+A file changed IN PLACE — re-encoded, trimmed — is a different failure again:
+nothing about the request changed, so `_index_conflict` has nothing to refuse,
+and the new scan's scene boundaries produce different (in, out) pairs than the
+old ones did, so the clip_ids don't even collide. The old rows would otherwise
+sit in the corpus forever, `identity_locked` and selectable, describing frames
+that may no longer exist at those offsets. Every row this tool writes carries
+its source file's (size, mtime_ns) at index time, and `Corpus.load` drops any
+row whose file no longer matches it.
 """
 from __future__ import annotations
 
@@ -81,6 +90,7 @@ import math
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -354,6 +364,16 @@ class FootageLibrary(BaseTool):
                 files_failed.append({"path": str(path), "reason": "probe_failed"})
                 continue
 
+            try:
+                file_stat = path.stat()
+                source_size, source_mtime_ns = file_stat.st_size, file_stat.st_mtime_ns
+            except OSError:
+                # The probe above already read this file successfully; a stat
+                # failing here (permissions changed mid-run) must not crash
+                # the index. The row is written unfingerprinted and simply
+                # never checked for staleness — same as a legacy row.
+                source_size, source_mtime_ns = 0, 0
+
             scenes = _scene_boundaries(path, duration, corpus_dir)
             segments, rejects = _plan_segments(scenes, min_seconds, max_seconds)
             segments_planned += len(segments) + len(rejects)
@@ -471,6 +491,12 @@ class FootageLibrary(BaseTool):
                         start_seconds=seg_start,
                         end_seconds=seg_end,
                         sharpness=sharpness,
+                        # Fingerprint at index time (spec W8.2): `Corpus.load`
+                        # drops a row whose file no longer matches this on
+                        # disk — the tell that the pool file was re-encoded
+                        # or trimmed in place after this segment was indexed.
+                        source_size=source_size,
+                        source_mtime_ns=source_mtime_ns,
                         # Declared at ingest (spec R5) — the pool is his footage,
                         # so the whole pool is locked. Set nowhere else.
                         identity_locked=True,
@@ -727,19 +753,34 @@ def _sharpness(grey: np.ndarray) -> float:
 
 
 def _normalise_for_sharpness(grey: np.ndarray) -> np.ndarray:
-    """Box-downsample so the long side is about SHARPNESS_NORMALISED_LONG_SIDE."""
+    """Box-downsample so the long side is exactly SHARPNESS_NORMALISED_LONG_SIDE.
+
+    An integer box factor (`round(long_side / 1920)`) only cancels the
+    resolution bias at exact multiples of 1920: 2560-, 2704- and 3000-wide
+    frames all round to factor 1 — none of them reach the 1.5x ratio that
+    rounds up to factor 2 — so they were left at native resolution while a
+    3840-wide frame (factor 2, an exact multiple) got normalised correctly.
+    That is up to a 3.7x residual bias between resolutions, 10x across the
+    1.5x bucket boundary itself, and it reads as a focus difference between
+    cameras shooting the same scene. Resampling to the exact target ratio
+    removes the quantisation instead of merely coarsening it.
+
+    Sources already at or below the target are left native — the floor was
+    calibrated with no resize at ~1080p, and upscaling adds no real detail.
+    """
     height, width = grey.shape
-    factor = max(1, int(round(max(height, width) / SHARPNESS_NORMALISED_LONG_SIDE)))
-    if factor == 1:
+    long_side = max(height, width)
+    if long_side <= SHARPNESS_NORMALISED_LONG_SIDE:
         return grey
-    trimmed_h, trimmed_w = (height // factor) * factor, (width // factor) * factor
-    if trimmed_h < factor or trimmed_w < factor:
-        return grey
-    return (
-        grey[:trimmed_h, :trimmed_w]
-        .reshape(trimmed_h // factor, factor, trimmed_w // factor, factor)
-        .mean(axis=(1, 3))
-    )
+    scale = SHARPNESS_NORMALISED_LONG_SIDE / long_side
+    new_h, new_w = max(1, round(height * scale)), max(1, round(width * scale))
+    from PIL import Image
+
+    # BOX is Pillow's area-average filter — the same "average, don't drop
+    # pixels" choice `_sharpness`'s docstring makes for the integer case,
+    # just at an arbitrary ratio instead of only exact factors.
+    resized = Image.fromarray(grey, mode="F").resize((new_w, new_h), Image.BOX)
+    return np.asarray(resized, dtype=np.float32)
 
 
 def _motion_score(greys: list[np.ndarray]) -> float:
@@ -813,12 +854,25 @@ def _save_measurements(
     corpus_dir: Path, measured: dict[str, float], params: dict[str, Any]
 ) -> None:
     path = _measurements_path(corpus_dir)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps({"params": params, "sharpness": measured}, sort_keys=True, allow_nan=False),
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    # Per-writer tmp name (the `lib/checkpoint.py:608` idiom): a single fixed
+    # "measurements.json.tmp" is a shared scratch path across two indexers of
+    # the same pool. One writer's `.replace` can consume the other's tmp
+    # file out from under it — the first replace succeeds, the second then
+    # calls `.replace` on a path that is no longer there and dies with a raw
+    # FileNotFoundError, losing its own measurements in the process.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"params": params, "sharpness": measured}, sort_keys=True, allow_nan=False),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _index_conflict(
@@ -830,37 +884,71 @@ def _index_conflict(
     by design (`lib/corpus.py:230-233`): a row cannot be taken back out without
     breaking the row-to-embedding alignment.
 
-    - **Re-chunked.** Different segmentation means different (file, in, out)
-      triples, so the old chunking's rows stay and the new one's are added
-      beside them. Two overlapping segments of the same footage in one corpus
-      defeats the no-reuse guarantee they exist to support.
+    Derived from the corpus rows themselves, not solely from `measurements.json`
+    — that sidecar can be missing (deleted, never written, unreadable), and a
+    conflict that only checked it used to read a missing sidecar as "no
+    conflict" on exactly the pool it exists to protect.
+
     - **Raised floor.** `sharpness` is written here and read nowhere else, so
       the floor is enforced only by declining to write the row. Rows admitted
-      under a lower floor are already in, and nothing downstream re-checks them.
+      under a lower floor are already in, and nothing downstream re-checks
+      them — checked against `corp.records` directly, sidecar or not.
+    - **Re-chunked.** Different segmentation means different (file, in, out)
+      triples, so the old chunking's rows stay and the new one's are added
+      beside them. A stored row too short, or too long to be the one legitimate
+      over-long piece `_plan_segments` (:672-675) leaves when `2*min > max`, is
+      a tell whether or not the sidecar survived. But a *widened* `min`/`max`
+      leaves every old row in range and is invisible without the sidecar — the
+      same blind spot it already has for a `frames_per_segment` change, which
+      no row span can reveal either.
 
     Lowering the floor is not a conflict: no admitted row becomes invalid, and
     the segments excluded last time are re-decided from their cached
     measurements — which is the whole point of keeping them.
     """
-    if not recorded:
-        return None
-    changed = [f for f in SEGMENTATION_FIELDS if f in recorded and recorded[f] != params[f]]
-    if changed:
-        detail = ", ".join(f"{f}: {recorded[f]} -> {params[f]}" for f in changed)
-        return (
-            f"Stored index at this corpus_dir was built with different segmentation ({detail}). "
-            "Segment boundaries would change and the corpus is append-only, so both chunkings "
-            "would coexist as overlapping rows. Delete the corpus directory to rebuild it, or "
-            "pass a different corpus_dir."
-        )
     floor = params["sharpness_floor"]
     stale = sum(1 for r in corp.records if r.sharpness and r.sharpness < floor)
     if stale:
         return (
             f"{stale} indexed row(s) were admitted under sharpness_floor "
-            f"{recorded.get('sharpness_floor')} and fall below the requested {floor}. The corpus "
-            "is append-only and nothing downstream re-checks sharpness, so raising the floor "
-            "would leave them selectable. Delete the corpus directory to rebuild it."
+            f"{recorded.get('sharpness_floor', 'an earlier, unrecorded run')} and fall below the "
+            f"requested {floor}. The corpus is append-only and nothing downstream re-checks "
+            "sharpness, so raising the floor would leave them selectable. Delete the corpus "
+            "directory to rebuild it."
+        )
+
+    min_seconds, max_seconds = params["min_segment_seconds"], params["max_segment_seconds"]
+    mismatched: list[ClipRecord] = []
+    for r in corp.records:
+        if r.source != "footage_library" or r.start_seconds is None or r.end_seconds is None:
+            continue
+        span = r.end_seconds - r.start_seconds
+        if span < min_seconds - 1e-6:
+            mismatched.append(r)
+        elif span > max_seconds + 1e-6 and span / 2 >= min_seconds - 1e-6:
+            # Only a tell if _plan_segments (:672-675) could actually have split
+            # it. When 2*min > max it deliberately leaves one over-long piece
+            # rather than a sub-min one, so a lone row in (max, 2*min) is legit.
+            mismatched.append(r)
+    changed = (
+        [f for f in SEGMENTATION_FIELDS if f in recorded and recorded[f] != params[f]]
+        if recorded
+        else []
+    )
+    if mismatched or changed:
+        if changed:
+            detail = ", ".join(f"{f}: {recorded[f]} -> {params[f]}" for f in changed)
+        else:
+            span = mismatched[0].end_seconds - mismatched[0].start_seconds
+            detail = (
+                f"{len(mismatched)} row(s) carry a segment span (e.g. {span:.3f}s) outside the "
+                f"requested min_segment_seconds/max_segment_seconds range [{min_seconds}, {max_seconds}]"
+            )
+        return (
+            f"Stored index at this corpus_dir was built with different segmentation ({detail}). "
+            "Segment boundaries would change and the corpus is append-only, so both chunkings "
+            "would coexist as overlapping rows. Delete the corpus directory to rebuild it, or "
+            "pass a different corpus_dir."
         )
     return None
 

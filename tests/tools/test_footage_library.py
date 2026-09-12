@@ -421,6 +421,51 @@ def test_sharpness_scores_the_same_scene_the_same_at_any_resolution() -> None:
     )
 
 
+@pytest.mark.parametrize("height,width", [(1521, 2704), (1440, 2560), (1688, 3000)])
+def test_normalise_for_sharpness_resamples_to_the_exact_target_long_side(height, width) -> None:
+    """2560, 2704 and 3000 all round to an integer box factor of 1 —
+    `round(2704 / 1920)` never reaches the 1.5x ratio that rounds up to 2 —
+    so the old quantised normaliser left them at native resolution entirely.
+    """
+    from tools.video.footage_library import (
+        SHARPNESS_NORMALISED_LONG_SIDE,
+        _normalise_for_sharpness,
+    )
+
+    grey = np.zeros((height, width), dtype=np.float32)
+    normalised = _normalise_for_sharpness(grey)
+
+    assert max(normalised.shape) == SHARPNESS_NORMALISED_LONG_SIDE
+
+
+@pytest.mark.parametrize("long_side", [2560, 2704, 3000])
+def test_sharpness_is_stable_at_off_multiple_resolutions(long_side) -> None:
+    """The counterpart to `test_sharpness_scores_the_same_scene_the_same_at_any_resolution`,
+    sampled between the integer factor's bucket boundaries rather than at an
+    exact multiple of 1920. An off-multiple source used to skip normalisation
+    entirely, so the SAME scene scored differently by up to a 3.7x residual
+    bias purely from a box factor that only cancels at exact multiples.
+    """
+    from PIL import Image
+
+    from tools.video.footage_library import _sharpness
+
+    base = _synthetic_detail(1920, 1080)
+    short_side = round(long_side * 1080 / 1920)
+    scaled = np.asarray(
+        Image.fromarray(base).resize((short_side, long_side), Image.LANCZOS), dtype=np.float32
+    )
+
+    at_target = _sharpness(base)
+    at_off_multiple = _sharpness(scaled)
+
+    assert at_target > 0, "the synthetic frame carries no detail — test is vacuous"
+    assert at_off_multiple == pytest.approx(at_target, rel=0.5), (
+        f"the same scene scored {at_target:.1f} at 1920 and {at_off_multiple:.1f} at long side "
+        f"{long_side} — an integer box factor leaves off-multiple resolutions unnormalised"
+    )
+
+
 def test_a_genuinely_blurred_frame_still_fails_the_floor() -> None:
     """The counter-test: normalising must not turn the gate off.
 
@@ -535,6 +580,57 @@ def test_rechunking_an_existing_index_is_refused(pool, tmp_path):
     assert "max_segment_seconds" in rechunked.error
 
 
+def test_deleting_the_sidecar_does_not_disable_the_rechunk_refusal(pool, tmp_path):
+    """`_index_conflict` used to return `None` outright whenever the sidecar
+    was unreadable or absent, silently allowing a re-chunk it exists to
+    refuse. The corpus rows themselves carry start/end offsets, so the
+    refusal must still fire with the sidecar gone.
+    """
+    corpus_dir = tmp_path / "corpus"
+    _index(pool, corpus_dir)
+    (corpus_dir / "measurements.json").unlink()
+
+    rechunked = _index(pool, corpus_dir, max_segment_seconds=2.0)
+
+    assert rechunked.success is False
+    assert "segmentation" in rechunked.error
+
+
+def test_deleting_the_sidecar_does_not_disable_the_floor_refusal(pool, tmp_path):
+    """Same default-allow bug, the other refusal `_index_conflict` makes."""
+    corpus_dir = tmp_path / "corpus"
+    _index(pool, corpus_dir)
+    (corpus_dir / "measurements.json").unlink()
+
+    raised = _index(pool, corpus_dir, sharpness_floor=1_000_000.0)
+
+    assert raised.success is False
+    assert "append-only" in raised.error
+
+
+def test_a_legitimately_over_long_row_does_not_trip_the_rechunk_refusal(tmp_path):
+    """`_plan_segments` (:672-675) deliberately leaves one over-long piece
+    rather than a sub-min one whenever `2*min > max`, so a stored row can
+    legitimately land in `(max, 2*min)`. The rechunk refusal must not read
+    that row as evidence of different segmentation on an identical re-index.
+    """
+    footage_dir = tmp_path / "pool"
+    footage_dir.mkdir()
+    _make_clip(footage_dir / "long_set.mp4", _SHARP, 7)
+    corpus_dir = tmp_path / "corpus"
+
+    first = _index(footage_dir, corpus_dir, min_segment_seconds=5.0, max_segment_seconds=6.0)
+    assert first.success is True, first.error
+    corp = Corpus(corpus_dir)
+    corp.load()
+    assert len(corp.records) == 1
+    assert corp.records[0].end_seconds - corp.records[0].start_seconds == pytest.approx(7.0)
+
+    identical = _index(footage_dir, corpus_dir, min_segment_seconds=5.0, max_segment_seconds=6.0)
+
+    assert identical.success is True, identical.error
+
+
 def test_a_corrupt_measurement_file_costs_time_not_correctness(pool, tmp_path):
     corpus_dir = tmp_path / "corpus"
     first = _index(pool, corpus_dir)
@@ -613,3 +709,78 @@ def test_replacing_a_file_re_detects_its_scenes(tmp_path):
         FootageLibrary().execute(_inputs(small, corpus_dir))
 
     assert seen == [str(clip)], "a replaced file must not reuse the old boundaries"
+
+
+def test_reencoding_a_pool_file_in_place_drops_its_old_segments(tmp_path):
+    """Spec W8.2: nothing invalidated a row when its source file was
+    re-encoded or trimmed in place. `dead_source_rows` cannot see this case
+    — the path still exists — so the fingerprint stamped at index time must.
+    """
+    small = tmp_path / "pool"
+    small.mkdir()
+    clip = small / "set.mp4"
+    _make_clip(clip, _SHARP, 6)
+    corpus_dir = tmp_path / "corpus"
+    first = _index(small, corpus_dir)
+    assert first.data["segments_added"] > 0
+
+    old_corp = Corpus(corpus_dir)
+    old_corp.load()
+    old_ids = {r.clip_id for r in old_corp.records}
+    assert old_ids
+
+    _make_clip(clip, _SHARP, 9)  # same path, re-encoded in place
+
+    reloaded = Corpus(corpus_dir)
+    reloaded.load()
+
+    assert not (old_ids & {r.clip_id for r in reloaded.records}), (
+        "a row from the old encode survived a re-encode of the same path"
+    )
+
+
+def test_concurrent_indexers_do_not_collide_on_the_measurements_tmp_file(tmp_path):
+    """Spec W8.4: a single fixed `measurements.json.tmp` is a shared scratch
+    path across two indexers of one pool — one writer's `.replace` consumes
+    the other's tmp file, and the second then dies with a raw
+    FileNotFoundError calling `.replace` on a path that is no longer there.
+    """
+    import threading
+    import time
+
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+
+    fast_done = threading.Event()
+    real_replace = Path.replace
+
+    def _paced_replace(self, target):
+        if threading.current_thread().name == "slow":
+            fast_done.wait(timeout=5)
+        result = real_replace(self, target)
+        if threading.current_thread().name == "fast":
+            fast_done.set()
+        return result
+
+    errors: dict[str, BaseException] = {}
+
+    def _run(tag: str) -> None:
+        try:
+            footage_library._save_measurements(
+                corpus_dir, {f"clip_{tag}": 1.0}, {"sharpness_floor": 60.0}
+            )
+        except BaseException as exc:
+            errors[tag] = exc
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "replace", _paced_replace)
+        slow = threading.Thread(target=_run, args=("slow",), name="slow")
+        fast = threading.Thread(target=_run, args=("fast",), name="fast")
+        slow.start()
+        time.sleep(0.1)  # let the slow writer write its tmp and start waiting
+        fast.start()
+        fast.join(timeout=5)
+        slow.join(timeout=5)
+
+    assert not errors, f"a concurrent indexer crashed: {errors}"
+    assert (corpus_dir / "measurements.json").is_file()

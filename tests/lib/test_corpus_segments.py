@@ -344,6 +344,113 @@ def test_a_non_finite_out_point_is_rejected_at_construction(bad):
         _row(duration=45.0, start_seconds=1.0, end_seconds=bad)
 
 
+# ----------------------------------------------------------------------
+# The source fingerprint (spec W8.2): a row stale relative to its own file
+# ----------------------------------------------------------------------
+
+
+def _fingerprinted(clip_id: str, local_path: str, size: int, mtime_ns: int) -> ClipRecord:
+    return ClipRecord(
+        clip_id=clip_id,
+        source="footage_library",
+        source_id="gym_set_01",
+        source_url="",
+        local_path=local_path,
+        duration=45.0,
+        start_seconds=0.0,
+        end_seconds=3.0,
+        source_size=size,
+        source_mtime_ns=mtime_ns,
+    )
+
+
+def test_a_stale_fingerprint_drops_the_row_on_load(tmp_path):
+    """Nothing invalidated a row when its pool file was re-encoded or
+    trimmed in place — old segments stayed `identity_locked` and selectable
+    even though the frames they describe may no longer be at those offsets.
+    `Corpus.load` must drop a row whose stamped (size, mtime_ns) no longer
+    matches the file on disk.
+    """
+    corpus_dir = tmp_path / "corpus"
+    source = tmp_path / "gym_set_01.mp4"
+    source.write_bytes(b"original encode")
+    stat = source.stat()
+
+    corp = Corpus(corpus_dir)
+    corp.add(
+        _fingerprinted("footage_gym_set_01_s0", str(source), stat.st_size, stat.st_mtime_ns),
+        _vec(1, 0),
+        _vec(1, 0),
+    )
+    corp.save()
+
+    source.write_bytes(b"a different, re-encoded file at the same path")
+
+    reloaded = Corpus(corpus_dir)
+    reloaded.load()
+
+    assert reloaded.get("footage_gym_set_01_s0") is None
+    assert len(reloaded) == 0
+    assert reloaded.clip_embeddings.shape[0] == 0
+    assert reloaded.tag_embeddings.shape[0] == 0
+
+
+def test_an_unstamped_row_is_never_treated_as_stale(tmp_path):
+    """0/0 means "not fingerprinted": every row written before this field
+    existed, and every non-footage_library (stock) row. Neither must be
+    dropped just because its file happens to change.
+    """
+    corpus_dir = tmp_path / "corpus"
+    source = tmp_path / "pexels_1.mp4"
+    source.write_bytes(b"stock footage")
+
+    corp = Corpus(corpus_dir)
+    corp.add(
+        ClipRecord(
+            clip_id="pexels_1",
+            source="pexels",
+            source_id="1",
+            source_url="",
+            local_path=str(source),
+            duration=45.0,
+            start_seconds=0.0,
+            end_seconds=3.0,
+        ),
+        _vec(1, 0),
+        _vec(1, 0),
+    )
+    corp.save()
+
+    source.write_bytes(b"changed anyway")
+
+    reloaded = Corpus(corpus_dir)
+    reloaded.load()
+
+    assert reloaded.get("pexels_1") is not None
+
+
+def test_a_matching_fingerprint_survives_load(tmp_path):
+    """The counter-test: an unchanged file must not be treated as stale."""
+    corpus_dir = tmp_path / "corpus"
+    source = tmp_path / "gym_set_01.mp4"
+    source.write_bytes(b"unchanged encode")
+    stat = source.stat()
+
+    corp = Corpus(corpus_dir)
+    corp.add(
+        _fingerprinted("footage_gym_set_01_s0", str(source), stat.st_size, stat.st_mtime_ns),
+        _vec(1, 0),
+        _vec(1, 0),
+    )
+    corp.save()
+
+    reloaded = Corpus(corpus_dir)
+    reloaded.load()
+
+    assert reloaded.get("footage_gym_set_01_s0") is not None
+    assert len(reloaded) == 1
+
+
 def test_a_row_mutated_after_construction_is_still_caught_at_interval():
     # The dataclass is not frozen — `Corpus.add` stamps `added_at` on the
     # record it is handed — so __post_init__ alone cannot be the whole guard.
