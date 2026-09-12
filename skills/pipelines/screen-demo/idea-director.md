@@ -135,12 +135,34 @@ default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
 tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
 ```
 
-Itemize the tools that will actually be called for the production mode this brief chose, and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each, so the on-screen figure and `cost_log.json` agree:
+Itemize the tools that will actually be called for the production mode this brief chose as a `planned_tool_calls` list of `{tool, operation, inputs, quantity}` — `quantity` defaults to 1 for whole-payload tools like `tts_selector`; set it explicitly for unit-priced tools like `image_selector`:
 
 - **Synthetic terminal, or real capture with a silent recording** — narration is generated: one `tts_selector` line item (quantity 1, the full narration text) plus `image_selector` opening/transition/outro cards, unit-priced × the planned card count.
 - **Real capture that already has a voiceover** — the line items may legitimately all be `$0.00` (`subtitle_gen`, `diagram_gen` and `audio_enhance` are local/free). **Seed and arm anyway.** The armed cap and an honest all-$0 ledger are the point: without arming, the checkpoint's `cost_snapshot()` reports config's global default instead of the cap approved here, and $0 spent is unrecorded rather than proven.
 
-Record the total as `metadata.cost_estimate` and the cap as `metadata.budget_cap_usd`.
+Price and seed each in one pass, so the on-screen figure and `cost_log.json` agree:
+
+```python
+from tools.tool_registry import registry
+registry.discover()
+
+line_items = []
+for planned in planned_tool_calls:
+    tool = registry.get(planned["tool"])
+    unit_usd = tool.estimate_cost(planned["inputs"])   # price of ONE call
+    quantity = planned.get("quantity", 1)
+    estimated_usd = round(unit_usd * quantity, 4)
+    tracker.estimate(planned["tool"], planned["operation"], estimated_usd)
+    line_items.append({"tool": planned["tool"], "operation": planned["operation"],
+                       "quantity": quantity, "estimated_usd": estimated_usd})
+
+brief["metadata"]["cost_estimate"] = {                              # the shape the approval block reads back
+    "total_estimated_usd": round(sum(li["estimated_usd"] for li in line_items), 4),
+    "line_items": line_items,
+}
+```
+
+Record `metadata.budget_cap_usd` beside it so the on-screen figure and `cost_log.json` agree.
 
 **On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True`): arm the tracker with what was actually approved and clear this step's placeholders.
 
@@ -157,6 +179,8 @@ import math
 #    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
 #    the tracker (config's budget.reserve_pct via for_project); never
 #    hardcode 0.10.
+metadata = brief["metadata"]            # the brief written in step 5
+approved_budget_usd = None              # a figure the operator NAMED; None for a bare "approve"
 total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
 min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
 tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)

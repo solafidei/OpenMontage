@@ -108,7 +108,23 @@ default_budget_cap_usd = manifest["budget_default_usd"]         # $1.00 flat
 tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
 ```
 
-Itemize the tool batches that will actually be called (`subtitle_gen` for the per-clip subtitle set, `audio_enhance` for the batch audio normalization pass) and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each — one entry per tool batch, never one per clip. Every figure here is `0.00`, and that is the point: the gate presents an explicit `TOTAL ESTIMATED $0.00 of $1.00` rather than silence, and `cost_log.json` proves the $0 rather than merely failing to record it. Record the total as `metadata.cost_estimate` and the cap as `metadata.budget_cap_usd`.
+Itemize the tool batches that will actually be called (`subtitle_gen` for the per-clip subtitle set, `audio_enhance` for the batch audio normalization pass) and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each — one entry per tool batch, never one per clip. Every figure here is `0.00`, and that is the point: the gate presents an explicit `TOTAL ESTIMATED $0.00 of $1.00` rather than silence, and `cost_log.json` proves the $0 rather than merely failing to record it.
+
+```python
+line_items = [
+    {"tool": "subtitle_gen", "operation": f"subtitles x {clip_count}", "quantity": clip_count, "estimated_usd": 0.0},
+    {"tool": "audio_enhance", "operation": "batch normalize", "quantity": 1, "estimated_usd": 0.0},
+]
+for li in line_items:
+    tracker.estimate(li["tool"], li["operation"], li["estimated_usd"])
+
+brief["metadata"]["cost_estimate"] = {                              # the shape the approval block reads back
+    "total_estimated_usd": round(sum(li["estimated_usd"] for li in line_items), 4),
+    "line_items": line_items,
+}
+```
+
+The fence above writes `metadata.cost_estimate` itself, in the shape the approval block below reads back. Record `metadata.budget_cap_usd` beside it so the on-screen figure and `cost_log.json` agree.
 
 **On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True`): arm the tracker with what was actually approved and clear this step's placeholders.
 
@@ -125,6 +141,8 @@ import math
 #    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
 #    the tracker (config's budget.reserve_pct via for_project); never
 #    hardcode 0.10.
+metadata = brief["metadata"]            # the brief written in step 5
+approved_budget_usd = None              # a figure the operator NAMED; None for a bare "approve"
 total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
 min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
 tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)

@@ -70,7 +70,28 @@ default_budget_cap_usd = max(flat_default, per_minute_rate * target_minutes)
 tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
 ```
 
-Itemize the tools that will actually be called and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each, so the on-screen figure and `cost_log.json` agree. On this pipeline the only paid tool is optional `image_selector` overlay graphics — price it per unit x the number of overlays the brief plans (one line item for the overlay set). `subtitle_gen` and `audio_mixer` are local/free: seed them at `0.00` so every planned call is on the ledger. If the brief plans no overlays at all, the line items may legitimately total `$0.00` — seed and arm anyway; the armed cap and the honest-$0 ledger are the point. Record the total as `metadata.cost_estimate` and the cap as `metadata.budget_cap_usd`.
+Itemize the tools that will actually be called and seed a matching `tracker.estimate(tool, operation, estimated_usd)` for each, so the on-screen figure and `cost_log.json` agree. On this pipeline the only paid tool is optional `image_selector` overlay graphics — price it per unit x the number of overlays the brief plans (one line item for the overlay set). `subtitle_gen` and `audio_mixer` are local/free: seed them at `0.00` so every planned call is on the ledger. If the brief plans no overlays at all, the line items may legitimately total `$0.00` — seed and arm anyway; the armed cap and the honest-$0 ledger are the point.
+
+```python
+line_items = []
+if overlay_count:
+    unit_usd = image_selector.estimate_cost({"query": overlay_style_seed})
+    estimated_usd = round(unit_usd * overlay_count, 4)
+    tracker.estimate("image_selector", f"overlays x {overlay_count}", estimated_usd)
+    line_items.append({"tool": "image_selector", "operation": f"overlays x {overlay_count}",
+                       "quantity": overlay_count, "estimated_usd": estimated_usd})
+
+for tool_name, operation in (("subtitle_gen", "subtitles"), ("audio_mixer", "mix")):
+    tracker.estimate(tool_name, operation, 0.0)
+    line_items.append({"tool": tool_name, "operation": operation, "quantity": 1, "estimated_usd": 0.0})
+
+brief["metadata"]["cost_estimate"] = {                              # the shape the approval block reads back
+    "total_estimated_usd": round(sum(li["estimated_usd"] for li in line_items), 4),
+    "line_items": line_items,
+}
+```
+
+The fence above writes `metadata.cost_estimate` itself, in the shape the approval block below reads back. Record `metadata.budget_cap_usd` beside it so the on-screen figure and `cost_log.json` agree.
 
 **On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True`): arm the tracker with what was actually approved and clear this step's placeholders.
 
@@ -87,6 +108,8 @@ import math
 #    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
 #    the tracker (config's budget.reserve_pct via for_project); never
 #    hardcode 0.10.
+metadata = brief["metadata"]            # the brief written in step 5
+approved_budget_usd = None              # a figure the operator NAMED; None for a bare "approve"
 total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
 min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
 tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)

@@ -220,9 +220,15 @@ music_plan_inputs = {
 }
 estimated_usd = music_gen.estimate_cost(music_plan_inputs) if music_plan["source"] == "generated" else 0.0
 tracker.estimate("music_gen", "score_bed", estimated_usd)
+
+line_items = [{"tool": "music_gen", "operation": "score_bed", "quantity": 1, "estimated_usd": estimated_usd}]
+brief["metadata"]["cost_estimate"] = {                             # the shape the approval block reads back
+    "total_estimated_usd": round(sum(li["estimated_usd"] for li in line_items), 4),
+    "line_items": line_items,
+}
 ```
 
-Record `metadata.cost_estimate` (itemized) and `metadata.budget_cap_usd` on the brief so the on-screen number and `cost_log.json` agree.
+The fence above writes `metadata.cost_estimate` itself, in the shape the approval block below reads back. Record `metadata.budget_cap_usd` beside it so the on-screen number and `cost_log.json` agree.
 
 **On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True` — see `skills/meta/checkpoint-protocol.md`): arm the tracker with what was actually approved, and clear the placeholder entries this step seeded.
 
@@ -239,6 +245,8 @@ import math
 #    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
 #    the tracker (config's budget.reserve_pct via for_project); never
 #    hardcode 0.10.
+metadata = brief["metadata"]            # the brief written in step 5
+approved_budget_usd = None              # a figure the operator NAMED; None for a bare "approve"
 total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
 min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
 tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)

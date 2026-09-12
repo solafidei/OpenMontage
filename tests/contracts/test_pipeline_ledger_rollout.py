@@ -15,6 +15,7 @@ formula.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -213,6 +214,52 @@ def test_every_episode_pipeline_skillset_carries_the_four_ledger_markers() -> No
         )
 
 
+def test_every_idea_director_arming_block_reads_have_a_producer() -> None:
+    """Regression for W7.1: the arming block read
+    `metadata["cost_estimate"]["line_items"]` (plus `li["tool"]` and
+    `li["estimated_usd"]`) while the seeding instruction two lines earlier
+    recorded `metadata.cost_estimate` as a scalar total — the arm step
+    consumed fields nothing wrote. The fix builds `line_items` as a list of
+    dicts in the same loop that calls `tracker.estimate(...)` and assigns the
+    object form, in the same file, before the read.
+
+    Discovery is dynamic: every idea-director.md that reads
+    `cost_estimate["line_items"]` is swept, so a pipeline wired later with the
+    same arming block is checked with no test edit.
+    """
+    discovered = [
+        path
+        for path in sorted((SKILLS_ROOT / "pipelines").glob("*/idea-director.md"))
+        if '"line_items"]' in path.read_text(encoding="utf-8")
+    ]
+    relative = {_rel(path) for path in discovered}
+
+    # Sentinel floor — the two pipelines the defect report named by path.
+    for expected in (
+        "skills/pipelines/avatar-spokesperson/idea-director.md",
+        "skills/pipelines/hybrid/idea-director.md",
+    ):
+        assert expected in relative, f"{expected} no longer carries the arming block"
+
+    for path in discovered:
+        text = path.read_text(encoding="utf-8")
+        name = _rel(path)
+        assert re.search(r'\["cost_estimate"\]\s*=\s*\{', text), (
+            f"{name} reads cost_estimate[\"line_items\"] but this file never "
+            'assigns the object form `[...]["cost_estimate"] = {...}` that '
+            "would produce it"
+        )
+        assert '"line_items": line_items' in text, (
+            f"{name}: nothing in this file produces the line_items the arming "
+            "block reads back"
+        )
+        for read_key in ('li["tool"]', 'li["estimated_usd"]'):
+            assert read_key in text, (
+                f"{name} reads {read_key} off a line item with nothing in "
+                "this file producing it"
+            )
+
+
 def test_no_pre_fix_arming_formula_anywhere() -> None:
     """C1's guard, extended tree-wide: `... or total_estimated_usd` arms the
     bare estimate, so the plan's final approved reservation always trips the
@@ -226,3 +273,127 @@ def test_no_pre_fix_arming_formula_anywhere() -> None:
         "pre-fix arming formula "
         f"({PRE_FIX_ARMING!r}) survives in: {offenders}"
     )
+
+
+# --- W7.1's done-when, literally --------------------------------------------
+#
+# "a contract test asserts every arming block's reads have a producer in the
+# same file". The two names the arming formula reads fail differently, so they
+# are checked differently.
+#
+# `approved_budget_usd` is checked BY NAME: it is a plain scalar, and there is
+# no producer shape to verify beyond "something in this file assigns it".
+#
+# `metadata` is NOT checked by name — a bare `metadata = ...` Store proves
+# nothing about what `metadata["cost_estimate"]` holds. What matters is a Store
+# of an object (`ast.Dict`) into a `["cost_estimate"]` subscript, which is what
+# the arming formula subscripts into; `_cost_estimate_dict_producer` checks that
+# shape directly. A scalar `cost_estimate` written with `metadata` bound anyway
+# is the mutation this pairing exists to catch — it slips a name-only check.
+#
+# Deliberately not a full free-name sweep: these directors are copy-and-run
+# pseudocode and many names they read are narrative (`project_id`,
+# `planned_tool_calls`, `card_count`), handed in from the agent's wider context
+# and never assigned here. A naive sweep flags those in every director,
+# including the reel-batch reference the ported files were copied from.
+
+STORE_BOUND_ARMING_NAMES = ("approved_budget_usd",)
+
+
+def _fence_bodies(text: str) -> list[str]:
+    return re.findall(r"```python\n(.*?)```", text, re.DOTALL)
+
+
+def _store_bound_names(source: str) -> set[str]:
+    """Every name this source assigns to, anywhere — `ast.Store`, not `Load`.
+
+    Walking the whole tree (not just top-level `Assign`) picks up a `for`
+    target, a `with ... as`, a comprehension variable, tuple-unpacking — any
+    binding form, matching what "has a producer in this file" actually means.
+    """
+    tree = ast.parse(source)
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _cost_estimate_dict_producer(source: str) -> bool:
+    """A Store of an object (`ast.Dict`) into a `[...]["cost_estimate"]`
+    subscript — the producer shape `cost_estimate["line_items"]` depends on.
+    `metadata["cost_estimate"] = round(sum(...), 4)` Stores into the same
+    subscript but with a scalar value, so it does NOT count: that is W7.1's
+    exact defect shape."""
+    tree = ast.parse(source)
+    return any(
+        isinstance(target, ast.Subscript)
+        and isinstance(target.slice, ast.Constant)
+        and target.slice.value == "cost_estimate"
+        and isinstance(node.value, ast.Dict)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+    )
+
+
+def test_arming_block_reads_are_store_bound_in_the_same_file() -> None:
+    """W7.1's done-when, literally.
+
+    Every idea-director whose arming block reads
+    `metadata["cost_estimate"]["line_items"]` must, somewhere in this SAME
+    file's python fences: (a) bind `approved_budget_usd` by assignment
+    (`ast.Store`), and (b) Store an object (`ast.Dict`) into a
+    `["cost_estimate"]` subscript — the producer shape a scalar
+    `metadata["cost_estimate"] = round(sum(...), 4)` does not satisfy, even
+    when `metadata` itself is bound elsewhere in the file. W7.1's original
+    defect was blunter still: no `cost_estimate` assignment of any kind, so
+    the arming block consumed fields nothing in the file produced.
+
+    Discovery is dynamic — any idea-director carrying the arming read is
+    swept, so a ninth or tenth pipeline wired later with the same block is
+    checked with no test edit.
+    """
+    discovered = [
+        path
+        for path in sorted((SKILLS_ROOT / "pipelines").glob("*/idea-director.md"))
+        if 'metadata["cost_estimate"]["line_items"]' in path.read_text(encoding="utf-8")
+    ]
+    relative = {_rel(path) for path in discovered}
+
+    # Sentinel floor — the reference implementation, plus one ported file, so
+    # an empty or single-file sweep proves nothing.
+    for expected in (
+        "skills/pipelines/reel-batch/idea-director.md",
+        "skills/pipelines/avatar-spokesperson/idea-director.md",
+    ):
+        assert expected in relative, (
+            f"{expected} no longer reads the object-form cost_estimate — the "
+            "sweep is broken, not the rollout"
+        )
+
+    for path in discovered:
+        text = path.read_text(encoding="utf-8")
+        name = _rel(path)
+        fences = _fence_bodies(text)
+        assert fences, f"{name} has no python fences left to check"
+
+        bound: set[str] = set()
+        has_dict_producer = False
+        for fence in fences:
+            bound |= _store_bound_names(fence)
+            has_dict_producer = has_dict_producer or _cost_estimate_dict_producer(fence)
+
+        for read_name in STORE_BOUND_ARMING_NAMES:
+            assert read_name in bound, (
+                f"{name}: the arming block reads `{read_name}` but nothing in "
+                "this file's python fences ever assigns it — the arming block "
+                "consumes a field with no producer, W7.1's exact defect shape"
+            )
+        assert has_dict_producer, (
+            f"{name}: the arming block reads "
+            '`metadata["cost_estimate"]["line_items"]` but no fence Stores an '
+            'object into a `["cost_estimate"]` subscript — a scalar '
+            '`cost_estimate` (or none at all) leaves the arming block with no '
+            "producer for the field it reads, W7.1's exact defect shape"
+        )

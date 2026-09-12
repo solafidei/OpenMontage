@@ -88,16 +88,27 @@ Open the ledger and seed ONE `tts_selector` line item PER TARGET LANGUAGE — qu
 ```python
 tracker = CostTracker.for_project(project_id)  # every downstream stage reopens this same ledger
 
+line_items = []
 for lang in target_languages:
     estimated_usd = tts_selector.estimate_cost(
         {"text": translated_script_by_language[lang], "language": lang}
     )
     tracker.estimate("tts_selector", f"dub_{lang}", estimated_usd)
+    line_items.append({"tool": "tts_selector", "operation": f"dub_{lang}",
+                       "quantity": 1, "estimated_usd": estimated_usd})
 
-tracker.estimate("subtitle_gen", f"subtitles x {len(target_languages)} locales", 0.0)  # local/free
+subtitle_estimated_usd = 0.0  # local/free
+tracker.estimate("subtitle_gen", f"subtitles x {len(target_languages)} locales", subtitle_estimated_usd)
+line_items.append({"tool": "subtitle_gen", "operation": f"subtitles x {len(target_languages)} locales",
+                   "quantity": len(target_languages), "estimated_usd": subtitle_estimated_usd})
+
+brief["metadata"]["cost_estimate"] = {                             # the shape the approval block reads back
+    "total_estimated_usd": round(sum(li["estimated_usd"] for li in line_items), 4),
+    "line_items": line_items,
+}
 ```
 
-Record `metadata.cost_estimate` (itemized — one line per language) and `metadata.budget_cap_usd` on the brief so the on-screen number and `cost_log.json` agree.
+The fence above writes `metadata.cost_estimate` itself, one line per language, in the shape the approval block below reads back. Record `metadata.budget_cap_usd` beside it so the on-screen number and `cost_log.json` agree.
 
 **On approval** (once the checkpoint is re-written `status="completed"`, `human_approved=True` — see `skills/meta/checkpoint-protocol.md`): arm the tracker with what was actually approved and clear this step's placeholders.
 
@@ -114,6 +125,8 @@ import math
 #    E_n <= E_n - reserve_pct x total — never true. reserve_pct comes from
 #    the tracker (config's budget.reserve_pct via for_project); never
 #    hardcode 0.10.
+metadata = brief["metadata"]            # the brief written in step 5
+approved_budget_usd = None              # a figure the operator NAMED; None for a bare "approve"
 total_estimated_usd = round(sum(li["estimated_usd"] for li in metadata["cost_estimate"]["line_items"]), 4)
 min_workable_usd = math.ceil(total_estimated_usd / (1 - tracker.reserve_pct) * 100) / 100 + 0.01  # +1 cent: on an exact-cent division, bare ceil adds zero slack and the final reserve still trips on float dust
 tracker.budget_total_usd = approved_budget_usd or max(default_budget_cap_usd, min_workable_usd)

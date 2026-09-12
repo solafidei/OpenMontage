@@ -204,14 +204,16 @@ next_stage = get_next_stage(pipeline_dir, project_name)
 
 If `next_stage` is not the first stage:
 1. Inform the human: "Found existing progress. Resuming from stage: [next_stage]"
-2. **Check for partial progress**: Read the checkpoint for `next_stage`:
+2. **Sweep the ledger** — see Cost Ledger Governance below. Do this before touching any partial
+   progress or spending again: a stranded reservation from the interrupted run must be resolved
+   before the resumed stage can reserve or spend anything new.
+3. **Check for partial progress**: Read the checkpoint for `next_stage`:
    ```python
    current_cp = read_checkpoint(pipeline_dir, project_name, next_stage)
    ```
    If `current_cp` exists and its status is `"in_progress"`, inform the human you are resuming from the middle of the stage.
-3. **Load artifacts**: Load prior artifacts from checkpoints for context. If resuming from `"in_progress"`, first load any schema-valid partial artifact from `current_cp["artifacts"]`. If the partial data is stored in `current_cp["metadata"]["partial_progress"]`, use that draft data and its completion markers (such as `completed_scene_ids`) to skip sub-tasks that are already done.
-4. **Continue**: Continue generation from the next successful step, appending to the partial artifact.
-5. **Sweep the ledger** — see Cost Ledger Governance below.
+4. **Load artifacts**: Load prior artifacts from checkpoints for context. If resuming from `"in_progress"`, first load any schema-valid partial artifact from `current_cp["artifacts"]`. If the partial data is stored in `current_cp["metadata"]["partial_progress"]`, use that draft data and its completion markers (such as `completed_scene_ids`) to skip sub-tasks that are already done.
+5. **Continue**: Continue generation from the next successful step, appending to the partial artifact.
 
 If a checkpoint exists with status `"awaiting_human"`:
 1. Inform the human: "Stage [name] is awaiting your approval"
