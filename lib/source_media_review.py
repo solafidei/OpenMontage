@@ -12,6 +12,7 @@ assumptions. Never claim a file was reviewed unless a real probe ran.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -96,6 +97,11 @@ def _probe_video(
             duration = result["technical_probe"].get("duration_seconds", 0)
             timestamps = _sample_timestamps(duration, count=4)
             out_dir = frames_dir or (path.parent / ".source_review_frames")
+            # Keyed on the resolved path, not `path.stem`: two pool files that
+            # share a basename (e.g. two different `clip.mp4`s in different
+            # folders) would otherwise sample into the same subdirectory and
+            # each overwrite the other's frames.
+            digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
             sample_result = frame_sampler.execute({
                 "input_path": str(path),
                 # `strategy` is required by frame_sampler's schema and read
@@ -103,7 +109,7 @@ def _probe_video(
                 # the except below, so representative_frames never populated.
                 "strategy": "timestamps",
                 "timestamps": timestamps,
-                "output_dir": str(Path(out_dir) / path.stem),
+                "output_dir": str(Path(out_dir) / digest),
             })
             if sample_result.success:
                 # The tool returns `frames`: [{path, timestamp_seconds, index}].
