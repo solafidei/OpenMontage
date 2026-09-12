@@ -1654,6 +1654,30 @@ class VideoCompose(BaseTool):
         # overlays, and profile scaling for free.
         return True
 
+    @staticmethod
+    def _asset_ref_lookup(asset_manifest: dict[str, Any] | None) -> dict[str, dict]:
+        """Resolve a cut's `source` (an asset id OR a path) to its manifest row.
+
+        THE shared helper: `_identity_blocks` (the gate) and `_render` (which
+        picks the file ffmpeg actually encodes) must both resolve a cut's
+        asset through this one function, or they can silently pick different
+        rows for a duplicate id — the gate clears one, `_render` encodes the
+        other (spec W3.1). Calling this from both places makes that
+        divergence structurally impossible: whichever row wins here is the
+        row every caller sees.
+
+        Keyed by BOTH id and path, because `_render` resolves a cut's
+        `source` either way (`if source_id in lookup` — else it is opened as
+        a path). `setdefault` so the first row wins: a duplicate id appended
+        later must not shadow the original.
+        """
+        lookup: dict[str, dict] = {}
+        for asset in (asset_manifest or {}).get("assets", []):
+            for key in (asset.get("id"), asset.get("path")):
+                if key:
+                    lookup.setdefault(key, asset)
+        return lookup
+
     def _identity_blocks(
         self,
         edit_decisions: dict[str, Any],
@@ -1687,27 +1711,13 @@ class VideoCompose(BaseTool):
         # whose declaration contradicts its producer is the failure this gate
         # exists for — an operator clip relabelled `ai_generated` is an operator
         # clip with its identity protection switched off.
-        # Keyed by BOTH id and path, because `_render` resolves a cut's `source`
-        # either way (`if source_id in asset_lookup` — else it is opened as a
-        # path). Keyed on id alone, naming the operator's clip by its filename
-        # instead of its manifest id walked straight past this check while the
-        # corroborating row sat in the same manifest. `setdefault` so the first
-        # row wins: a duplicate id appended later must not shadow the original.
-        assets_by_ref: dict[str, dict] = {}
-        for asset in (asset_manifest or {}).get("assets", []):
-            for key in (asset.get("id"), asset.get("path")):
-                if key:
-                    assets_by_ref.setdefault(key, asset)
+        assets_by_ref = self._asset_ref_lookup(asset_manifest)
 
-        # What the manifest says each cut's pixels are, where it knows.
-        implied: dict[str, str] = {}
         for cut in edit_decisions.get("cuts") or []:
             asset = assets_by_ref.get(cut.get("source"))
             if not asset:
                 continue
             expected = PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
-            if expected:
-                implied[cut.get("id")] = expected
             declared = cut.get("provenance")
             if expected and declared and declared != expected:
                 blocks.append(
@@ -1741,12 +1751,18 @@ class VideoCompose(BaseTool):
             else:
                 by_provenance: dict[str | None, list[str]] = {}
                 for cut in edit_decisions.get("cuts") or []:
-                    # A cut that omits `provenance` falls back to what its
-                    # asset row implies. Omission was the softer hole: the
-                    # manifest said `footage_library` and the gate let a colour
-                    # grade through anyway, because the word was missing from
-                    # the cut. Where the manifest knows, silence is no waiver.
-                    provenance = cut.get("provenance") or implied.get(cut.get("id"))
+                    # A cut that omits `provenance` falls back to what its OWN
+                    # asset row implies, resolved inline rather than through a
+                    # dict keyed on cut id — two cuts sharing an id used to let
+                    # the later one's implied provenance overwrite the
+                    # earlier's in that shared map, disarming this guard for
+                    # the first cut (spec W3.2).
+                    asset = assets_by_ref.get(cut.get("source"))
+                    implied = (
+                        PROVENANCE_BY_SOURCE_TOOL.get(asset.get("source_tool"))
+                        if asset else None
+                    )
+                    provenance = cut.get("provenance") or implied
                     by_provenance.setdefault(provenance, []).append(cut.get("id"))
 
                 for provenance, cut_ids in by_provenance.items():
@@ -1997,7 +2013,9 @@ class VideoCompose(BaseTool):
         # further down (after the templated flow's asset resolution) it
         # silently never ran for either of those runtimes — the gate looked
         # present but only policed one of three paths.
-        asset_lookup = {a["id"]: a for a in (asset_manifest or {}).get("assets", [])}
+        # Same helper the identity gate uses (spec W3.1) — the gate and the
+        # row that actually gets encoded must never be able to diverge.
+        asset_lookup = self._asset_ref_lookup(asset_manifest)
         resolved_cuts = []
         for cut in edit_decisions.get("cuts") or []:
             resolved_cut = dict(cut)
@@ -2956,21 +2974,30 @@ class VideoCompose(BaseTool):
                     )
             except Exception as e:
                 audio_spotcheck["issues"].append(f"Loudness analysis error: {e}")
+        elif technical_probe.get("valid_container") and not technical_probe.get("has_audio"):
+            # Total audio loss is worse than a quiet mix, not exempt from
+            # review because there was no audio for the probes above to
+            # measure (spec W4.2).
+            audio_spotcheck["issues"].append(
+                "Output has no audio stream — total audio loss"
+            )
 
-            # A gate that did not run must say so. Never a silent skip.
-            if "integrated_lufs" not in audio_spotcheck:
-                audio_spotcheck["loudness_verdict"] = (
-                    "indeterminate — integrated loudness not measured; "
-                    "LUFS floor gate did not run"
-                )
-                audio_spotcheck["issues"].append(
-                    "Integrated loudness could not be measured — LUFS floor "
-                    "gate skipped, loudness indeterminate"
-                )
-            else:
-                audio_spotcheck["loudness_verdict"] = (
-                    f"measured — {audio_spotcheck['integrated_lufs']:.1f} LUFS"
-                )
+        # A gate that did not run must say so. Never a silent skip. Outside
+        # the has_audio branch above so total audio loss gets this bookkeeping
+        # too, not just a quiet-but-measured mix (spec W4.2).
+        if "integrated_lufs" not in audio_spotcheck:
+            audio_spotcheck["loudness_verdict"] = (
+                "indeterminate — integrated loudness not measured; "
+                "LUFS floor gate did not run"
+            )
+            audio_spotcheck["issues"].append(
+                "Integrated loudness could not be measured — LUFS floor "
+                "gate skipped, loudness indeterminate"
+            )
+        else:
+            audio_spotcheck["loudness_verdict"] = (
+                f"measured — {audio_spotcheck['integrated_lufs']:.1f} LUFS"
+            )
 
         # Narration was promised. Volume alone cannot PROVE narration, but a
         # measured silence disproves it — so this gate may only fire on a
@@ -3201,7 +3228,7 @@ class VideoCompose(BaseTool):
         critical_issues = [
             i for i in issues
             if any(kw in i.lower() for kw in [
-                "silent downgrade", "delivery promise violation",
+                "silent downgrade",
                 "effectively silent", "ffprobe failed", "suspiciously short",
                 "tts punctuation leak",  # reading literal punctuation aloud
                 "narration missing",       # promised narration absent
@@ -3223,7 +3250,25 @@ class VideoCompose(BaseTool):
             ])
         ]
 
-        if critical_issues:
+        # Branch on the booleans these checks already computed, not on
+        # scanning `issues` for prose that nothing emits. No emitter ever
+        # wrote the literal string "delivery promise violation" here — that
+        # phrase belongs to `_pre_compose_validation`, a different gate
+        # entirely — so a real promise violation or runtime swap used to
+        # read as a clean pass (spec W4.1). Total audio loss got the same
+        # treatment: only a *quiet* mix was in the keyword list above, so a
+        # render that lost its whole audio stream was not critical either
+        # (spec W4.2).
+        promise_broken = (
+            promise_preservation.get("delivery_promise_honored") is False
+            or promise_preservation.get("runtime_swap_detected")
+        )
+        total_audio_loss = bool(
+            technical_probe.get("valid_container")
+            and not technical_probe.get("has_audio")
+        )
+
+        if critical_issues or promise_broken or total_audio_loss:
             status = "revise"
             recommended_action = "re_render"
         elif indeterminate_issues:

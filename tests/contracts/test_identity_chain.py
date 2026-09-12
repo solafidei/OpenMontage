@@ -561,6 +561,104 @@ def test_a_shadow_asset_row_cannot_disarm_the_cross_check(tmp_path, monkeypatch)
     assert not result.success, "a shadow manifest row disarmed the cross-check"
 
 
+def test_the_gate_and_the_encode_resolve_a_duplicate_id_to_the_same_row(
+    tmp_path, monkeypatch
+) -> None:
+    """The gate must judge the exact row `_render` hands to ffmpeg (spec W3.1).
+
+    Row one is a generated clip (permissive: no look restriction under
+    `ai_generated`), row two shares its id but is the operator's real
+    footage at a different path. The gate used to resolve the shared id
+    first-row-wins while `_render`'s own lookup was a last-row-wins dict
+    comprehension: the gate would clear this cut against row one and ffmpeg
+    would then grade row two — the operator's real face — under whatever
+    look the cut's declared (permissive) provenance let through. Both must
+    now resolve through `_asset_ref_lookup`, so they can only ever agree.
+    """
+    captured: dict = {}
+
+    def fake_ffmpeg_render(self, *, resolved_cuts, **kwargs):
+        captured["source"] = resolved_cuts[0]["source"]
+        return ToolResult(success=True, data={})
+
+    monkeypatch.setattr(VideoCompose, "_render_via_ffmpeg", fake_ffmpeg_render)
+
+    generated_row = {
+        "id": "asset_x", "type": "video", "path": "/gen/ai_clip.mp4",
+        "source_tool": "cutaway_gen", "scene_id": "reel_01-01",
+    }
+    real_operator_row = {
+        "id": "asset_x", "type": "video", "path": "/pool/rack_pulls_A.mp4",
+        "source_tool": "footage_library", "scene_id": "reel_01-01",
+    }
+
+    result = VideoCompose().execute({
+        "operation": "render",
+        "edit_decisions": {
+            "version": "1.0", "renderer_family": "documentary-montage",
+            "render_runtime": "ffmpeg",
+            "cuts": [{"id": "reel_01-01", "source": "asset_x",
+                      "in_seconds": 0.0, "out_seconds": 1.9,
+                      "provenance": "ai_generated"}],
+        },
+        "asset_manifest": {"version": "1.0",
+                           "assets": [generated_row, real_operator_row]},
+        "batch_look": UNSAFE_LOOK,
+        "output_path": str(tmp_path / "out.mp4"),
+    })
+
+    assert result.success, f"gate blocked an honest ai_generated cut — {result.error}"
+    assert captured.get("source") == generated_row["path"], (
+        "the gate cleared the ai_generated row but the encode resolved the "
+        f"cut to a different manifest row ({captured.get('source')!r}) — "
+        "the gate and _render diverged on which asset this cut is"
+    )
+
+
+def test_a_duplicate_cut_id_cannot_disarm_the_omitted_provenance_guard(
+    tmp_path, monkeypatch
+) -> None:
+    """Two cuts sharing an `id` must not let one's implied provenance leak
+    onto the other (spec W3.2).
+
+    Neither cut declares `provenance`, so both fall back to what their OWN
+    asset row implies. A map keyed on cut id let the second cut's implied
+    value (`ai_generated`, from `cutaway_gen`) overwrite the first's
+    (`operator_footage`, from `footage_library`) — so the unsafe look was
+    checked against `ai_generated` only, and the operator's own clip, sharing
+    that id, was never checked against it at all.
+    """
+    _no_renderer_runs(monkeypatch, "dup-cut-id")
+
+    result = VideoCompose().execute({
+        "operation": "render",
+        "edit_decisions": {
+            "version": "1.0", "renderer_family": "documentary-montage",
+            "render_runtime": "ffmpeg",
+            "cuts": [
+                {"id": "dup", "source": "op_asset",
+                 "in_seconds": 0.0, "out_seconds": 1.0},
+                {"id": "dup", "source": "gen_asset",
+                 "in_seconds": 1.0, "out_seconds": 2.0},
+            ],
+        },
+        "asset_manifest": {"version": "1.0", "assets": [
+            {"id": "op_asset", "type": "video", "path": "/pool/op.mp4",
+             "source_tool": "footage_library", "scene_id": "dup"},
+            {"id": "gen_asset", "type": "video", "path": "/gen/gen.mp4",
+             "source_tool": "cutaway_gen", "scene_id": "dup"},
+        ]},
+        "batch_look": UNSAFE_LOOK,
+        "output_path": str(tmp_path / "out.mp4"),
+    })
+
+    assert not result.success, (
+        "an unlabelled operator-footage cut sharing an id with an "
+        "ai_generated cut was graded with an unsafe look"
+    )
+    assert "identity-safe" in (result.error or "")
+
+
 def test_an_unreferenced_source_still_renders(tmp_path, monkeypatch) -> None:
     """The limit, asserted so it stays a limit and does not quietly widen.
 

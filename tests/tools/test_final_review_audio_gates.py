@@ -286,6 +286,64 @@ def test_lufs_gate_still_fires_when_measured_low(tmp_path):
 
 
 # ------------------------------------------------------------------
+# W4 — status must branch on the booleans, not on prose nothing emits
+# ------------------------------------------------------------------
+
+
+NO_NARRATION_ED: dict[str, Any] = {
+    "version": "1.0",
+    "render_runtime": "ffmpeg",
+    "cuts": [{"id": "c1", "source": "x", "in_seconds": 0, "out_seconds": 2}],
+}
+
+
+def test_total_audio_loss_is_critical_even_without_narration(tmp_path):
+    """A render that lost its whole audio track must not read as clean (W4.2).
+
+    Nothing here promises narration, so the narration-missing branch never
+    fires — only a direct check on `has_audio` can catch this. Before the
+    fix this returned `pass`: the LUFS floor never ran (nothing to measure,
+    and the has_audio guard skipped the bookkeeping that says so too), so no
+    issue at all was recorded for a completely silent render.
+    """
+    mp4 = _make_mp4(tmp_path, audio_args=None, name="silent.mp4")
+
+    review = VideoCompose()._run_final_review(mp4, edit_decisions=NO_NARRATION_ED)
+
+    assert review["checks"]["technical_probe"]["has_audio"] is False
+    assert review["status"] == "revise", review["issues_found"]
+    assert review["recommended_action"] == "re_render", review
+
+
+def test_runtime_swap_is_critical_though_no_issue_names_it(tmp_path):
+    """A detected runtime swap must fail review on its own boolean (W4.1).
+
+    The old critical-keyword list included "delivery promise violation", a
+    phrase no emitter in this function ever writes — it belongs to a
+    different gate (`_pre_compose_validation`). A real runtime swap must
+    still flip the status even though `issues_found` never contains that
+    string.
+    """
+    mp4 = _make_mp4(tmp_path, "sine=frequency=440:duration=2")
+    ed = {
+        "version": "1.0", "render_runtime": "ffmpeg",
+        "cuts": [{"id": "c1", "source": "x", "in_seconds": 0, "out_seconds": 2}],
+    }
+    proposal_packet = {"production_plan": {"render_runtime": "remotion"}}
+
+    review = VideoCompose()._run_final_review(
+        mp4, edit_decisions=ed, proposal_packet=proposal_packet,
+    )
+
+    assert review["checks"]["promise_preservation"]["runtime_swap_detected"] is True
+    assert not any(
+        "delivery promise violation" in i.lower() for i in review["issues_found"]
+    ), review["issues_found"]
+    assert review["status"] == "revise", review["issues_found"]
+    assert review["recommended_action"] == "re_render", review
+
+
+# ------------------------------------------------------------------
 # Owner ruling — a render nothing measured is not a pass
 # ------------------------------------------------------------------
 
