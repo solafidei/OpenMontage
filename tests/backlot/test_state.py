@@ -571,3 +571,47 @@ def test_one_bad_reel_entry_costs_that_card_and_not_the_section(projects_root):
     assert ids == ["reel_01", "reel_02", "reel_03"]
     # A wrong-typed cut_ids costs the count, not the card.
     assert next(c for c in s["reels"] if c["reel_id"] == "reel_03")["cut_count"] == 0
+
+
+def test_render_count_and_poster_never_count_the_picture_intermediate(projects_root):
+    """W11.2: a five-reel batch summarizes as 5 renders, not 10, and the
+    board's poster is never the un-captioned `-picture` master — even when
+    it is the newest file on disk, which a two-plane render always leaves
+    it as (the picture cut renders before its captioned sibling).
+    """
+    import os
+
+    p = _reel_batch_project(projects_root)
+    # Pin the picture intermediate as unambiguously newest so the assertion
+    # exercises "skip it", not "got lucky on write order".
+    future = time.time() + 10
+    os.utime(p / "renders" / "reel_05-picture.mp4", (future, future))
+
+    summary = summarize_project(p)
+    assert summary["render_count"] == 5
+
+    s = load_board_state(p)
+    assert not s["poster"].endswith("-picture.mp4")
+
+
+def test_repo_relative_reel_output_still_resolves(projects_root, tmp_path, monkeypatch):
+    """W11.3: compose-director reports `reel_outputs` in the repo-relative
+    form it always uses (`projects/<id>/renders/<file>.mp4`), never
+    project-relative. Read as project-relative, that path resolves under a
+    nonexistent nested `projects/` subdirectory and the card falls back to
+    "not rendered yet" — the fix retries against REPO_ROOT before giving up.
+    """
+    monkeypatch.setattr(state_mod, "REPO_ROOT", tmp_path)
+    p = _reel_batch_project(projects_root, rendered=0)
+    (p / "renders" / "hand_named_master.mp4").write_bytes(b"finished")
+    _write(p / "checkpoint_compose.json", {
+        "stage": "compose", "status": "in_progress",
+        "metadata": {"partial_progress": {
+            "reel_outputs": {"reel_01": "projects/reel-batch-001/renders/hand_named_master.mp4"},
+        }},
+    })
+
+    s = load_board_state(p)
+
+    by_id = {c["reel_id"]: c for c in s["reels"]}
+    assert by_id["reel_01"]["output"] == "renders/hand_named_master.mp4"

@@ -613,14 +613,19 @@ def _resolve_reel_output(project_dir: Path, raw: object) -> Optional[str]:
     if not isinstance(raw, str) or not raw:
         return None
     candidate = Path(raw)
-    resolved = candidate if candidate.is_absolute() else (project_dir / candidate)
-    try:
-        relative = resolved.resolve().relative_to(Path(project_dir).resolve())
-    except (ValueError, OSError):
-        return None
-    if not resolved.exists() or resolved.stem.endswith("-picture"):
-        return None
-    return str(relative)
+    proj_root = Path(project_dir).resolve()
+    # compose-director reports every relative form as repo-relative
+    # ("projects/<id>/renders/<file>.mp4"), never project-relative — retry
+    # against REPO_ROOT before giving up.
+    candidates = [candidate] if candidate.is_absolute() else [project_dir / candidate, REPO_ROOT / candidate]
+    for resolved in candidates:
+        try:
+            relative = resolved.resolve().relative_to(proj_root)
+        except (ValueError, OSError):
+            continue
+        if resolved.exists() and not resolved.stem.endswith("-picture"):
+            return str(relative)
+    return None
 
 
 def _scan_media(project_dir: Path) -> dict[str, list[dict]]:
@@ -689,10 +694,12 @@ def _find_poster(project_dir: Path, state: dict) -> Optional[str]:
                     return _rel(project_dir, f)
         except OSError:
             continue
-    # Last resort: the newest render — /thumb extracts a poster frame.
+    # Last resort: the newest render — /thumb extracts a poster frame. Never
+    # the un-captioned `-picture` master (W11.2): posters the wrong cut.
     renders = (state.get("media") or {}).get("renders", [])
-    if renders:
-        return renders[0]["path"]
+    deliverables = [r for r in renders if not r.get("intermediate")]
+    if deliverables:
+        return deliverables[0]["path"]
     return None
 
 
@@ -817,7 +824,7 @@ def summarize_project(project_dir: Path) -> dict[str, Any]:
             for s in state["stages"] if not s.get("undeclared")
         ],
         "completed_count": len(done),
-        "render_count": len(state["media"]["renders"]),
+        "render_count": len([r for r in state["media"]["renders"] if not r.get("intermediate")]),
         "scene_count": len((state["storyboard"] or {}).get("scenes", [])),
     }
 

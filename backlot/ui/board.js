@@ -846,6 +846,16 @@ function renderReels(s) {
     const poster = reel.output
       ? el("img", { src: thumbURL(s.project_id, reel.output, 480), loading: "lazy", alt: "" })
       : el("span", { class: "reel-pending" }, "not rendered yet");
+    // A video with no extractable poster frame must not show a broken-image
+    // icon — fall back to the same "not rendered yet" treatment.
+    if (reel.output) {
+      poster.onerror = () => {
+        const p = poster.closest(".reel-poster");
+        if (!p) return;
+        p.innerHTML = "";
+        p.append(el("span", { class: "reel-pending" }, "not rendered yet"));
+      };
+    }
     const facts = [
       reel.track ? `♪ ${reel.track}` : null,
       reel.cut_count ? `${reel.cut_count} cut${reel.cut_count === 1 ? "" : "s"}` : null,
@@ -879,11 +889,17 @@ function renderRenders(s) {
   // deliverable, which turned a five-reel batch into "10 versions". They stay
   // listed and marked — that file is what you look at when the captions are
   // wrong — but deliverables come first and the count names only them.
+  //
+  // Partition on the filename stem, not `r.intermediate`: that flag only
+  // fires when a finished sibling exists, so a crashed batch's lone
+  // `-picture` file (no sibling yet) would otherwise count as a deliverable
+  // and win the hero-player slot.
+  const isPicture = (r) => /-picture\.[^./]+$/.test(r.path);
   const all = s.media.renders;
   if (!all.length) return null;
-  const renders = [...all.filter((r) => !r.intermediate),
-                   ...all.filter((r) => r.intermediate)];
-  const finished = all.length - all.filter((r) => r.intermediate).length;
+  const renders = [...all.filter((r) => !isPicture(r)),
+                   ...all.filter((r) => isPicture(r))];
+  const finished = all.length - all.filter(isPicture).length;
   if (activeRender >= renders.length) activeRender = 0;
   const current = renders[activeRender];
   // Full re-renders (every SSE refresh) must not reset an in-progress
@@ -908,7 +924,7 @@ function renderRenders(s) {
     renders.map((r, i) => el("span", {
       class: `v${i === activeRender ? " active" : ""}`,
       onclick: () => { activeRender = i; render(); },
-    }, `${r.path.split("/").pop()}${r.at_root ? " · root" : ""}${r.intermediate ? " · picture" : ""}`)),
+    }, `${r.path.split("/").pop()}${r.at_root ? " · root" : ""}${isPicture(r) ? " · picture" : ""}`)),
     el("span", { style: "margin-left:auto" }, `${(current.size / 1048576).toFixed(1)} MB`),
   );
   return el("div", {},
