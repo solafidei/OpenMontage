@@ -170,6 +170,10 @@ def test_declares_every_dependency_it_actually_uses() -> None:
 def test_status_degrades_when_a_python_dep_is_missing(monkeypatch) -> None:
     real = importlib.import_module
     monkeypatch.setattr(beat_grid_module, "_IMPORT_PROBE", {})
+    # Without this, get_status() bails out on the ffmpeg check on any machine
+    # that actually lacks ffmpeg -- returning UNAVAILABLE for the wrong reason
+    # and never reaching the librosa probe this test exists to cover.
+    monkeypatch.setattr(beat_grid_module.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         beat_grid_module.importlib,
         "import_module",
@@ -236,6 +240,20 @@ def test_status_degrades_when_ffmpeg_is_missing(monkeypatch) -> None:
     assert BeatGrid().get_status() is ToolStatus.UNAVAILABLE
 
 
+@needs_deps
+def test_output_schema_declares_every_key_execute_returns(speech_result) -> None:
+    """A contract that understates its tool is a contract a reader cannot use.
+
+    `roll_seconds`, `n_beats`, `n_bars`, `n_events`, `n_phrases`, `n_rolls`,
+    `energy_phases`, `proxy_path`, `devoiced`, `analysed_path` and
+    `duration_seconds` were returned without being declared -- exactly the
+    fields reel-batch's script-director branches its cut-policy ladder on.
+    """
+    declared = set(BeatGrid.output_schema["properties"])
+    returned = set(speech_result)
+    assert returned <= declared, f"returned but undeclared: {sorted(returned - declared)}"
+
+
 def test_discoverable_in_the_registry() -> None:
     from tools.tool_registry import registry
 
@@ -275,7 +293,13 @@ def test_wrapper_reproduces_the_analyser_exactly(music_only, tmp_path) -> None:
     )
     expected = json.loads(direct.read_text(encoding="utf-8"))
 
-    result = BeatGrid().execute({"input_path": str(music_only), "devoice": False})
+    result = BeatGrid().execute(
+        {
+            "input_path": str(music_only),
+            "devoice": False,
+            "output_dir": str(tmp_path / "wrapped"),
+        }
+    )
 
     assert result.success, result.error
     assert result.data["bpm"] == expected["tempo"]["bpm"]
