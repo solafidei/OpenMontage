@@ -6,9 +6,10 @@ Usage:
 
 Requires:
     $GOOGLE_API_KEY or $GEMINI_API_KEY environment variable (treated as aliases).
-    pip install google-genai python-dotenv. audio.mjs Step 4b installs these on
-    demand when a key is set but google.genai is not importable; if that install
-    fails it falls back to local MusicGen rather than leaving the video with no BGM.
+    pip install google-genai python-dotenv. The engine's lib/bgm.mjs
+    (generateBgmDetached) installs these on demand when a key is set but
+    google.genai is not importable; if that install fails it falls back to local
+    MusicGen rather than leaving the video with no BGM.
 """
 
 from __future__ import annotations

@@ -23,8 +23,9 @@ The trim discards the audio, so this payload sends ``generate_audio: false`` exp
 takes the audio-off rate: **$0.42 per 5s clip**. ``kling_video.estimate_cost`` quotes that
 same $0.42 — the figure the approval guards and the ledger compare against — and its duration
 schema accepts 3-15s, matching fal. Unpinned the same shortfall routes to seedance at
-$1.52/clip — ~3.6x what the selector estimated — for footage trimmed to half a second. The pinned inputs dict is built ONCE per prompt and the identical dict is
-handed to ``estimate_cost`` and ``execute`` (spec §6, defect D3); an unresolvable pin raises
+$1.52/clip — ~3.6x what the selector estimated — for footage trimmed to half a second.
+The pinned inputs dict is built ONCE per prompt and the identical dict is handed to
+``estimate_cost`` and ``execute`` (spec §6, defect D3); an unresolvable pin raises
 ``ProviderPinUnresolvedError`` from Wave 1 rather than estimating an unguardable $0.00.
 
 Trimming is MANDATORY on every route: generator durations are hints on some routes and
@@ -341,9 +342,10 @@ class CutawayGen(BaseTool):
         a ~3.6x under-price that slips both approval guards.
 
         ``generate_audio`` is pinned false along with the route. It is not cosmetic:
-        it halves fal's rate ($0.084/s against $0.126/s) for audio the sub-second trim
-        throws away, and it is part of ``kling_video``'s idempotency key, so leaving it
-        unset would let the cache answer with a clip priced on the other rate.
+        it cuts fal's rate by a third ($0.084/s against $0.126/s — audio on costs 50%
+        more) for audio the sub-second trim throws away, and it is part of
+        ``kling_video``'s ``idempotency_key_fields``, so the flag is part of the cache
+        identity: an audio-off clip and an audio-on one are never confused.
         """
         payload: dict[str, Any] = {
             "prompt": prompt,

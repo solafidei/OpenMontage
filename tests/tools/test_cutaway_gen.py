@@ -10,7 +10,7 @@ bearing and each has a test that fails if the code is reverted:
    object is handed to ``estimate_cost`` and ``execute``; unpinned the same shortfall
    routes to seedance at $1.52/clip instead of kling at $0.42 (5 s Kling v3/standard
    on fal at $0.084/s, the audio-off rate the pin selects; $0.126/s = $0.63 with
-   ``generate_audio`` off).
+   ``generate_audio`` on).
 3. **Trimming is mandatory and the output is measured.** The generator's duration is a
    hint, so the flash is cut out of whatever length came back, silent and 9:16, and
    the result is probed rather than assumed.
@@ -252,7 +252,7 @@ def test_pool_sufficient_sitting_costs_nothing_and_makes_no_call(tmp_path, forbi
 
 
 def test_estimate_and_execute_receive_the_identical_dict(tmp_path, provider):
-    """Defect D3: pricing a pinned route and executing an unpinned one is a ~2.4x
+    """Defect D3: pricing a pinned route and executing an unpinned one is a ~3.6x
     under-price that slips both approval guards. One dict, built once."""
     tool = CutawayGen()
     inputs = _inputs(tmp_path)
@@ -575,7 +575,7 @@ def test_removing_the_pin_would_route_the_same_sitting_to_the_pricier_provider(
     assert unpinned >= 2 * pinned, (
         f"unpinned routing priced {unpinned} against pinned {pinned}: the fixture no "
         "longer contains a materially more expensive alternative, so this test and "
-        "the three-dollars-fifteen sitting test above police nothing"
+        "the two-dollars-ten sitting test above police nothing"
     )
 
 

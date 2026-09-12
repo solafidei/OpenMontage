@@ -14,7 +14,7 @@ Everything you need to know about every provider in OpenMontage — setup instru
 | 2 | **$0** | Google API key | TTS with 700+ voices (1M Chirp 3: HD / 4M Standard chars per month free) + $300 new account credit |
 | 3 | **$0** | ElevenLabs | Premium TTS + music + SFX (10K chars/month free) |
 | 4 | **$0** | Piper (local install) | Fully offline TTS — no API key, no cost, no network |
-| 5 | **~$0.03/image** | fal.ai | FLUX images + Kling/Veo/MiniMax video + Recraft — broad single-key image + video coverage |
+| 5 | **~$0.04/1MP image** | fal.ai | FLUX images + Kling/Veo/MiniMax video + Recraft — broad single-key image + video coverage |
 | 6 | **~$0.05/image** | OpenAI | GPT Image 2 images + OpenAI TTS |
 | 7 | **~$0.067/image** | Google Imagen | Nano Banana 2 (`gemini-3.1-flash-image`, 1K) images — Imagen 4 was shut down 2026-08-17 (shares the Google API key) |
 | 8 | **pay-as-you-go** | Kling Official | Official direct Kling video, image, TTS, avatar, and lip-sync API, separate from fal.ai Kling |
@@ -90,9 +90,9 @@ speculative model strings.
 
 | Model | Direct provider | fal.ai | Runway | ComfyUI Partner Nodes | Local ComfyUI |
 |-------|-----------------|--------|--------|-----------------------|---------------|
-| **Gemini Omni 1.1 Flash** | Google `gemini_omni_video` (`gemini-omni-1.1-flash`; `gemini-omni-flash-preview` shuts down 2026-09-30) | `gemini_omni_fal` (T2V, I2V, references, editing — still on the legacy 1.0 `google/gemini-omni-flash/*` endpoints, token-billed ≈$0.125/sec; fal's current `google/gemini-omni-flash/v1.1/*` endpoints, published 2026-08-27 at $0.10/sec 720p, are not yet wired) | `runway_video` model `gemini_omni_flash` | `GeminiVideoOmni` (hosted, paid credits) | Not available as local weights |
+| **Gemini Omni 1.1 Flash** | Google `gemini_omni_video` (`gemini-omni-1.1-flash`; `gemini-omni-flash-preview` shuts down 2026-09-30) | `gemini_omni_fal` (T2V, I2V, references, editing — on fal's `google/gemini-omni-flash/v1.1/*` endpoints, published 2026-08-27, billed per second of output by resolution: $0.03/sec 360p · $0.10/sec 720p · $0.15/sec 1080p · $0.30/sec 4K; the unversioned 1.0 ids remain as the legacy token-billed route, ≈$0.125/sec) | `runway_video` model `gemini_omni_flash` | `GeminiVideoOmni` (hosted, paid credits) | Not available as local weights |
 | **Seedance 2.5** | Volcengine `seedance_ark` model variant `2.5` | `seedance_video` model version `2.5` | `runway_video` model `seedance2_5` | `ByteDance2TextToVideoNode` (hosted, paid credits) | Not available as local weights |
-| **MiniMax H3** | `minimax_video` model `MiniMax-H3` | `minimax_fal_video` (calls `fal-ai/minimax/hailuo-03/*`, a legacy alias of fal's catalog id `minimax/h3/*`) | `runway_video` model `hailuo3` | `MinimaxHailuo03TextToVideoNode` (hosted, paid credits) | Supported with official open weights and an exported API workflow |
+| **MiniMax H3** | `minimax_video` model `MiniMax-H3` | `minimax_fal_video` (calls fal's catalog id `minimax/h3/*`; `fal-ai/minimax/hailuo-03/*` is the legacy alias) | `runway_video` model `hailuo3` | `MinimaxHailuo03TextToVideoNode` (hosted, paid credits) | Supported with official open weights and an exported API workflow |
 
 ComfyUI Partner Nodes run inside the ComfyUI graph but call hosted services;
 they require network access, a logged-in Comfy account, and prepaid credits.
@@ -335,7 +335,8 @@ No subscription — pure pay-as-you-go, no minimum spend.
 | FLUX Pro v1.1 (`fal-ai/flux-pro/v1.1`, `flux_image` default) | $0.04 per megapixel, rounded up | 25 × 1MP images |
 | FLUX Dev (`fal-ai/flux/dev`) | $0.025 per megapixel, rounded up | 40 × 1MP images |
 | FLUX.2 Pro (`fal-ai/flux-2-pro`) | $0.03 for the first output megapixel + $0.015 per extra megapixel of input and output, rounded up | 33 × 1MP images |
-| Recraft v4 (`fal-ai/recraft/v4/text-to-image`, `recraft_image` default) / Recraft v3 | $0.04/image (v3 vector style $0.08) | 25 images |
+| Recraft v4 (`fal-ai/recraft/v4/text-to-image`, `recraft_image` default; Recraft v3 is the legacy family, not wired) | $0.04/image; SVG via `fal-ai/recraft/v4/text-to-vector` $0.08/image | 25 images |
+| Recraft v4 Pro (`fal-ai/recraft/v4/pro/text-to-image`, `recraft_image` `model: v4-pro`) | $0.25/image; SVG via `fal-ai/recraft/v4/pro/text-to-vector` $0.30/image | 4 images |
 | Seedream 5 Pro (up to 1536x1536) (`bytedance/seedream/v5/pro/text-to-image`) | $0.0675/image | ~14 images |
 | Seedream 5 Pro (up to 2048x2048) | $0.135/image | ~7 images |
 
@@ -845,7 +846,7 @@ Generates 3–10 second clips (360p, 720p default, 1080p and 4K upscaled; 16:9 o
 
 | Model | Price per generation request | Status |
 |-------|-----------------------------|--------|
-| `lyria-3.5` | $0.08 per full song (a couple of minutes, prompt-controllable; MP3 default or WAV; vocals or instrumental; up to 10 image inputs) | Released 2026-09-03, listed as stable — current flagship |
+| `lyria-3.5` | $0.08 per full song (a couple of minutes, prompt-controllable; MP3 default or WAV; vocals or instrumental; up to 10 image inputs) | Public preview since 2026-09-03 (the models page lists it as stable) — current flagship |
 | `lyria-3-pro-preview` | $0.08 (flat rate, up to 184s duration) | Deprecated in favour of `lyria-3.5` (no shutdown date announced) |
 | `lyria-3-clip-preview` | $0.04 per fixed 30 s clip | Preview |
 
@@ -861,7 +862,7 @@ Google TTS offers 700+ voices across 50+ languages. Voice names follow the patte
 |------|---------|---------|------|
 | **Chirp 3 HD** | `en-US-Chirp3-HD-Orus` | **Best (most natural; 30 voices, 50+ locales)** | **$30/1M — default** |
 | Standard | `en-US-Standard-A` | Good | Cheapest ($4/1M) |
-| WaveNet | `en-US-WaveNet-D` | Very good | Cheapest ($4/1M, legacy) |
+| WaveNet | `en-US-Wavenet-D` | Very good | Cheapest ($4/1M, legacy) |
 | Neural2 | `en-US-Neural2-D` | Excellent | Mid ($16/1M) |
 | Studio | `en-US-Studio-O` | Professional | Highest ($160/1M) |
 | Journey | `en-US-Journey-D` | Conversational (long-form) | Legacy — no longer listed on the pricing page |

@@ -5,9 +5,12 @@ Issue #40 / spec docs/intent/reel-batch-spec.md §5. The reel-batch cost model
 assumes two things a reader should be able to check rather than trust:
 
   1. An unpinned cutaway routes to whatever the scorer ranks top, which is
-     currently seedance at $1.52 a clip -- about 2.4x the pinned figure ($0.63:
-     5 s of Kling 3.0 Standard on fal, native audio on, which is fal's default),
-     for footage that gets trimmed to a sub-second flash.
+     currently seedance at $1.52 a clip -- about 3.6x the pinned figure ($0.42:
+     5 s of Kling 3.0 Standard on fal at the audio-off rate the pin selects,
+     $0.084/s), for footage that gets trimmed to a sub-second flash. Leave
+     generate_audio unset and fal's audio-on default applies instead, which is
+     the generic $0.63 quote and only ~2.4x -- so this script takes the flag
+     from cutaway_gen rather than restating it.
   2. A pin that resolves to nothing must RAISE. Before #40 it estimated
      $0.00, which is exempt from both approval guards in cost_tracker
      (estimated > single_action_approval_usd, and
@@ -24,11 +27,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.tool_registry import ToolRegistry  # noqa: E402
+from tools.video.cutaway_gen import CUTAWAY_GENERATE_AUDIO  # noqa: E402
 from tools.video.video_selector import ProviderPinUnresolvedError  # noqa: E402
 
 # A full five-reel pool shortfall: one cutaway per reel (spec R8).
 REELS = 5
-CLIP = {"prompt": "gym atmosphere, 5am, empty street", "duration": "5", "aspect_ratio": "9:16"}
+CLIP = {
+    "prompt": "gym atmosphere, 5am, empty street",
+    "duration": "5",
+    "aspect_ratio": "9:16",
+    # Taken from the pin, not restated: the pin is what makes this $0.42 and not $0.63.
+    "generate_audio": CUTAWAY_GENERATE_AUDIO,
+}
 
 
 def main() -> int:

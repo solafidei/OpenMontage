@@ -87,7 +87,7 @@ Direct call to the provider tool (only when you must bypass the selector):
 seedance = registry.get("seedance_video")
 seedance.execute({
     "prompt": PROMPT,
-    "model_variant": "standard",   # "standard" or "fast"
+    "model_variant": "standard",   # "standard", "fast", or "mini"
     "operation": "text_to_video",
     "aspect_ratio": "21:9",
     "duration": "10",
