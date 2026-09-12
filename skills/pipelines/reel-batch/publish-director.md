@@ -53,15 +53,17 @@ where it gets written down.
 
 ### 1. Rebuild The Batch Roster
 
-`render_report.outputs[]` is `additionalProperties: false` and carries **no `reel_id` field**
-(`schemas/artifacts/render_report.schema.json:13-26`), so compose writes the join itself:
-`render_report.metadata.reels[]`, one entry per reel carrying `reel_id` and that reel's output
-`path`. **That array is the join.** Fall back to matching the filename stem only when it is absent —
-and when you do, say in the gate summary that reel identity was *inferred* from filenames, not read.
+`render_report.outputs[]` is `additionalProperties: false` and carries an **optional,
+schema-declared `reel_id` field** (`schemas/artifacts/render_report.schema.json:13-26`) — compose
+writes it on every entry (`compose-director.md` step 5). `render_report.metadata.reels[]`, one
+entry per reel carrying `reel_id` and that reel's output `path`, stays the join this stage reads
+first — it is what the four fields below actually come off. When it is absent, read
+`outputs[].reel_id` before falling back to the filename stem; only a stem match is truly
+*inferred*, and that is the only case where the gate summary should say so.
 
-The fallback matches `stem == rid` and nothing looser. `outputs[]` lists only the captioned masters;
-compose's picture intermediates at `renders/<reel_id>-picture.mp4` are never listed, and a prefix
-match is exactly what would bind one to a reel — and, on an unconditional assignment, let the
+The stem fallback matches `stem == rid` and nothing looser. `outputs[]` lists only the captioned
+masters; compose's picture intermediates at `renders/<reel_id>-picture.mp4` are never listed, and a
+prefix match is exactly what would bind one to a reel — and, on an unconditional assignment, let the
 intermediate overwrite the master. Two outputs for one reel is a send-back, not a last-write-wins.
 
 ```python
@@ -85,15 +87,20 @@ if unlisted:
     raise RuntimeError(f"metadata.reels[] names paths absent from outputs[]: {unlisted}")
 
 output_for = {}                       # only built when metadata.reels[] is missing
+inferred = []                         # reel ids resolved by filename stem, not read — for the gate summary
 if not by_reel:
     for out in render_report["outputs"]:
-        stem = Path(out["path"]).stem
-        hits = [rid for rid in plan_by_reel if stem == rid]
-        if len(hits) != 1:
-            raise RuntimeError(f"{out['path']!r} maps to {hits} — send back to compose for reel-named outputs")
-        if hits[0] in output_for:
-            raise RuntimeError(f"{hits[0]} resolves to two outputs — one captioned master per reel")
-        output_for[hits[0]] = out
+        rid = out.get("reel_id")      # typed join — read it before falling back to the filename
+        if rid is None:
+            stem = Path(out["path"]).stem
+            hits = [r for r in plan_by_reel if stem == r]
+            if len(hits) != 1:
+                raise RuntimeError(f"{out['path']!r} maps to {hits} — send back to compose for reel-named outputs")
+            rid = hits[0]
+            inferred.append(rid)
+        if rid in output_for:
+            raise RuntimeError(f"{rid} resolves to two outputs — one captioned master per reel")
+        output_for[rid] = out
 
 missing = [rid for rid in plan_by_reel if rid not in (by_reel or output_for)]
 if missing:

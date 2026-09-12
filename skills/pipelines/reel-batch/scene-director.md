@@ -44,6 +44,7 @@ they pull against each other:
 ### 1. Load The Grid, The Pool And The Ledger
 
 ```python
+from pathlib import Path
 from lib.checkpoint import PROJECTS_DIR, read_checkpoint
 from lib.clip_ledger import ClipLedger
 from lib.corpus import Corpus
@@ -62,7 +63,9 @@ cuts_per_reel = brief["metadata"]["cuts_per_reel"]
 armed = brief["metadata"]["paid_cutaways_armed"]       # is the paid valve open at all
 armed_cutaways = brief["metadata"]["cutaway_count"]    # how many cuts it was opened for
 
-corpus = Corpus(PROJECTS_DIR / project_id / "corpus")
+# The index is keyed to the POOL, not this batch — read the path the idea stage
+# resolved (brief.metadata.corpus_dir), never rebuild it from project_id.
+corpus = Corpus(Path(brief["metadata"]["corpus_dir"]))
 corpus.load()                        # __init__ does not read disk (lib/corpus.py:169-174, :209)
 pool = [r for r in corpus.records if r.identity_locked]
 ledger = ClipLedger.for_project(project_id)    # lib/clip_ledger.py:114-134
@@ -94,7 +97,14 @@ downbeats or phrases according to the reel's own `cut_policy` — including the 
 phrase boundaries when the track measured speech-contaminated. That grid is the only one
 you plan against. The analyser's raw `beats_sec` / `downbeats_sec` ride along in
 `script.metadata.tracks[]` for audit and for a re-plan; never re-derive slots from them,
-and never re-run the analyser here. Slot edges are grid lines — never `total / 5`.
+and never re-run the analyser here. Slot edges are grid lines — never `total / 5` —
+except the one edge a shortfall slot's shrink shares with the neighbour absorbing its
+remainder (step 4, decision-log #14): that edge is deliberately not a grid line. On a
+reel's last slot, when the neighbour has no source footage left to extend into, it is the
+reel's own final edge that moves instead — the shrink shortens the reel rather than
+silently overrunning a claim the source cannot back (step 4's fallback), and
+`total_seconds` is written to match. Every other edge in the reel still comes from the
+grid.
 
 ```python
 def cut_slots(snap_grid, offset, cuts=5):
@@ -113,9 +123,10 @@ reel_id = reel["reel_id"]                      # from brief.metadata.reel_ids �
 slots = cut_slots(reel["snap_grid"], reel["window"]["offset_seconds"], cuts=cuts_per_reel)
 ```
 
-`snap_grid` is already bounded by the reel's `window`, so `slots[-1]["end_seconds"] <= 10.0`
-holds by construction — the 10-second ceiling is structural, not a check you remember to
-run. Spacing the edges across `span` rather than stepping by a floored stride is what keeps
+`snap_grid` is already bounded by the reel's `window`, so `slots[-1]["end_seconds"] <= 9.8`
+holds by construction — script's own step 5 caps the window there, so the 9.8-second
+ceiling is structural here too, not a check you remember to run. Spacing the edges across
+`span` rather than stepping by a floored stride is what keeps
 the last edge on `snap_grid[-1]`: a grid whose interval count is not a multiple of `cuts`
 (seven intervals, five cuts) would otherwise stop at boundary 5 and end the reel early
 inside its own window, and no upper-bound check would catch it. Store the reel-local
@@ -149,6 +160,10 @@ from lib.clip_embedder import embed_texts       # lib/clip_embedder.py:131
 
 planned_clip_ids: set[str] = set()     # every clip_id this planning pass has taken
 shortfall: list[dict] = []             # metadata.shortfall — one entry per shortfall CUT
+slot_tail: dict[int, dict] = {}        # slot index -> its claimed segment's tail room,
+                                        # for the last-slot shortfall branch (step 4) to
+                                        # read. A local dict, not a key on the scene object
+                                        # — scenes[] is additionalProperties:false.
 
 slot = slots[0]
 cut_id = f"{reel_id}-{slot['index'] + 1:02d}"                   # "reel_02-01" — minted here
@@ -181,7 +196,7 @@ yield several distinct slots (`lib/clip_ledger.py:83-96`).
 
 ```python
 from lib.clip_ledger import SegmentAlreadyClaimedError
-from tools.video.cutaway_gen import refuse_media_references
+from tools.video.cutaway_gen import DEFAULT_FLASH_SECONDS, refuse_media_references
 
 length = slot["end_seconds"] - slot["start_seconds"]
 for record, score in ranked:
@@ -202,13 +217,83 @@ for record, score in ranked:
     except SegmentAlreadyClaimedError:
         continue                               # lost the race — take the next candidate
     planned_clip_ids.add(record.clip_id)
+    # Remember this claim's tail room. The LAST-slot shortfall branch below needs to
+    # know, for the slot immediately before it, whether its source has any unclaimed
+    # footage past `take_out` before it can extend into it. A local dict keyed by
+    # slot index — not a key on the scene object, since scenes[] is
+    # additionalProperties:false — declared alongside `planned_clip_ids` in step 3.
+    slot_tail[slot["index"]] = {"source": record.local_path, "take_out": take_out,
+                                "seg_out": seg_out, "clip_id": record.clip_id}
     break
 else:
     # Author the prompt BEFORE the entry (step 6's rules and guard): the shortfall
     # entry is the only place the gate-2-approved prompt ever lives.
     prompt = "chalk dust drifting through a hard side light, black background, macro"
     refuse_media_references({"prompts": [prompt]})   # tools/video/cutaway_gen.py:127-178
-    shortfall.append({"reel_id": reel_id, "cut_id": cut_id, "prompt": prompt, "why": slot_description})
+    shortfall.append({"reel_id": reel_id, "cut_id": cut_id, "prompt": prompt,
+                      "why": slot_description, "length_seconds": length})
+    # R8: sub-second flash accents, not B-roll. This slot does not keep its own full
+    # beat-grid interval — it shrinks to the flash length and the remainder goes to
+    # the neighbouring operator clip, which extends to cover it. On a middle slot the
+    # flash keeps its own beat (`start_seconds` untouched); only the boundary it shares
+    # with that neighbour moves — that neighbour is not yet claimed, so steps 3/4 simply
+    # size its source interval to the new span when they run on it next — so
+    # `total_seconds` and the reel's outer window edges do not move.
+    #
+    # On the reel's LAST slot the neighbour is BEHIND it, not ahead, and it is ALREADY
+    # claimed: growing its timeline span the same way the middle-slot branch does would
+    # claim more timeline than its source actually covers — the defect decision-log #14
+    # named and the operator's ruling on it fixes. The fix extends that neighbour's
+    # SOURCE too, by claiming the abutting sliver of the same file as a second claim,
+    # and only when no footage is left to claim does it fall back to shortening the
+    # reel by `remainder` instead of silently overrunning the source.
+    flash_length = min(length, DEFAULT_FLASH_SECONDS)
+    remainder = round(length - flash_length, 3)
+    if slot["index"] + 1 < len(slots):
+        slot["end_seconds"] = round(slot["start_seconds"] + flash_length, 3)
+        # Not yet claimed — its length simply grows before step 3/4 run on it.
+        slots[slot["index"] + 1]["start_seconds"] = round(
+            slots[slot["index"] + 1]["start_seconds"] - remainder, 3)
+    else:
+        # The flash moves to the TAIL — the only neighbour is behind it, not ahead.
+        slot["start_seconds"] = round(slot["end_seconds"] - flash_length, 3)
+        prev_idx = slot["index"] - 1
+        tail = slot_tail.get(prev_idx)
+        new_out = round(tail["take_out"] + remainder, 3) if tail else None
+        if (tail is not None and new_out <= tail["seg_out"]
+                and ledger.is_available(source=tail["source"],
+                                        in_seconds=tail["take_out"],
+                                        out_seconds=new_out)):
+            # HEADROOM: the previous cut's segment has `remainder` more seconds of
+            # real footage past its current out-point. Claim the abutting sliver as
+            # a SECOND claim on the same source — it does not overlap the existing
+            # one, so `is_available` allows it — and grow the timeline span and the
+            # source span TOGETHER. The reel keeps its full approved length and grid.
+            ledger.claim(reel_id=reel_id, source=tail["source"],
+                         in_seconds=tail["take_out"], out_seconds=new_out,
+                         clip_id=tail["clip_id"])
+            slots[prev_idx]["end_seconds"] = slot["start_seconds"]
+            # Record the extended out-point: the cut this stage writes for `prev_idx`
+            # in step 8 must carry `new_out`, not the original `take_out`, or the
+            # written scene_plan disagrees with what the ledger just claimed and the
+            # next stage resolves the shorter, wrong source span.
+            slot_tail[prev_idx]["take_out"] = new_out
+        else:
+            # FALLBACK: no tail left on the previous cut's source (`new_out` would run
+            # past `seg_out`), or the sliver is already claimed by another reel. Do
+            # NOT move the previous slot — it has no more footage to give, moving it
+            # anyway is exactly the ~1.34s-short defect this branch replaces. Leave the
+            # flash at the tail of its own shrunk slot and let the reel end `remainder`
+            # seconds early instead: pull the flash's own end back by `remainder` too,
+            # so it still lands flush against the (unmoved) previous slot with no gap
+            # between them. This is the honest degradation — a reel that is
+            # `remainder` seconds shorter than approved but still cuts clean on the
+            # beat — over silently overrunning a claim the source cannot back. The
+            # caller writes this slot's true `end_seconds` into
+            # `metadata.reels[].total_seconds` at step 8, so edit and compose plan
+            # against the real length rather than the originally-approved 9.8.
+            slot["end_seconds"] = round(slot["end_seconds"] - remainder, 3)
+            slot["start_seconds"] = round(slot["end_seconds"] - flash_length, 3)
 ```
 
 **On a collision.** `is_available` is a probe, not a reservation — another reel stage can
@@ -256,11 +341,23 @@ claimed; a later pass is inference by another name.
 
 A shortfall is a slot no unclaimed segment could fill. It is itemised **per cut**, not per
 reel: one `metadata.shortfall[]` entry carrying the `reel_id`, the `cut_id` it fills, the
-exact `prompt` `assets` will send, and `why` nothing covered it. That entry is the only
+exact `prompt` `assets` will send, `why` nothing covered it, and the slot's own
+`length_seconds` (the same `length` step 4 sized the claim to). That entry is the only
 place the gate-2-approved prompt exists — `assets` reads the prompt from there and sends it
 verbatim — so a shortfall itemised without one leaves the next stage nothing to generate
 from. There is no per-reel prompt key: the entry is per cut, because the cut is what gets
-filled.
+filled. **`length_seconds` never sizes the flash** — R8 is explicit that a cutaway is a
+sub-second flash accent, not B-roll, so `assets` books a fixed sub-second `flash_seconds`
+regardless of the slot. What `length_seconds` sizes is the *shrink*: this stage does not
+let a shortfall keep its own full beat-grid interval — back in step 4, the same `else`
+branch that itemises the shortfall cuts it down to the flash length, and the seconds it
+gives up go to the neighbouring operator clip. On a middle slot, or a last slot whose
+neighbour still has source footage past its current out-point, that neighbour's source AND
+timeline both extend to cover the remainder, so the reel's `total_seconds` and its beat
+grid hold exactly as planned. On a last slot whose neighbour has no footage left, step 4
+falls back instead: the neighbour is not touched, and the reel's own `total_seconds` is
+shortened by the remainder and written as the true, honest length — see step 4's fallback
+for when each applies.
 
 The dry run in step 4 is what keeps gate 2 from approving a prompt the tool will refuse.
 The guard walks keys **and** values recursively and raises `MediaReferenceRefusedError`
@@ -331,9 +428,15 @@ reel-shaped lives in `metadata.reels[]`. Build the whole thing as `scene_plan`:
     { "id": "reel_02-03", "type": "generated", "narrative_role": "emotional_beat",
       "script_section_id": "reel_02",
       "description": "chalk dust in hard side light, macro",
-      "start_seconds": 3.88, "end_seconds": 5.82,
+      "start_seconds": 3.88, "end_seconds": 4.48,
       "required_assets": [ { "type": "video", "source": "generate",
-                             "description": "sub-second AI flash accent, text-prompt only" } ] }
+                             "description": "sub-second AI flash accent, text-prompt only" } ] },
+    { "id": "reel_02-04", "type": "broll", "narrative_role": "build",
+      "script_section_id": "reel_02",
+      "description": "rack pull lockout, low angle, side light — extended to absorb cut 3's shortfall",
+      "start_seconds": 4.48, "end_seconds": 7.72,
+      "required_assets": [ { "type": "video", "source": "provided",
+                             "description": "push_day pool segment [17.26, 20.50)" } ] }
   ],
   "metadata": {
     "pipeline": "reel-batch",
@@ -349,12 +452,16 @@ reel-shaped lives in `metadata.reels[]`. Build the whole thing as `scene_plan`:
             "source_path": "/pool/rack_pulls_A.mp4",
             "clip_id": "footage_rack_pulls_a_mp4_7c1e9a04_00004200_00006140",
             "in_seconds": 4.20, "out_seconds": 6.14, "claim_id": "3f9c..." },
-          { "id": "reel_02-03", "provenance": "ai_generated", "beat_seconds": 16.29 } ] }
+          { "id": "reel_02-03", "provenance": "ai_generated", "beat_seconds": 16.29 },
+          { "id": "reel_02-04", "provenance": "operator_footage", "beat_seconds": 18.23,
+            "source_path": "/pool/rack_pulls_A.mp4",
+            "clip_id": "footage_rack_pulls_a_mp4_7c1e9a04_00017260_00020500",
+            "in_seconds": 17.26, "out_seconds": 20.50, "claim_id": "7b2e..." } ] }
     ],
     "shortfall": [
       { "reel_id": "reel_02", "cut_id": "reel_02-03",
         "prompt": "chalk dust drifting through a hard side light, black background, macro",
-        "why": "no unclaimed segment >= 1.94s remained for slot 3" }
+        "why": "no unclaimed segment >= 1.94s remained for slot 3", "length_seconds": 1.94 }
     ],
     "pool": { "usable_segments": 24, "claimed": 24, "spare": 0 }
   }
@@ -367,6 +474,26 @@ reel entry carries its own `track_id` and `cut_policy`, so `edit` reads them off
 on an empty `scene_meta["renderer_family"]`. `clip_id` is whatever `record.clip_id` holds;
 never hand-write one, its shape is `footage_<slug>_<digest>_<in_ms>_<out_ms>`
 (`tools/video/footage_library.py:878-890`) and an invented id matches no corpus row.
+`reel_02-04`'s `beat_seconds` above is still `18.23` — the grid line step 2 built it
+around — even though step 6's shrink pulled its `start_seconds` to `4.48` to absorb cut
+3's shortfall: `beat_seconds` records which beat a cut is *for*, not where it now starts,
+and only the shrunk cut's own beat has to survive untouched.
+
+This worked example puts the shortfall on a MIDDLE slot (`reel_02-03`, index 2 of 5) —
+step 4's `if` branch, where the neighbour it grows into (`reel_02-04`) is not yet claimed,
+so its `3.24`s span above already includes the `1.34`s it absorbed. Had the shortfall
+instead landed on the reel's LAST slot (`reel_02-05`, originally `7.72`-`9.62`, length
+`1.90`) with `reel_02-04` unextended and claimed at its own original `[17.26, 19.16)`,
+step 4's `else` branch runs: `flash_length` is still `0.60`, but `remainder` is
+`1.90 - 0.60 = 1.30`. If `rack_pulls_A.mp4` has footage past `19.16` out to at least
+`20.46`, the headroom check claims `[19.16, 20.46)` as a *second* claim on that same file,
+`reel_02-04`'s `out_seconds` becomes `20.46`, the flash sits at `9.02`-`9.62`, and
+`total_seconds` stays `9.62` — the approved length and grid survive a last-slot shortfall
+exactly as they do a middle-slot one. If the source ends at `19.16` with nothing past it,
+`reel_02-04` is left exactly as claimed, the flash moves to `7.72`-`8.32` instead (flush
+against `reel_02-04`'s unmoved end — no gap), and `total_seconds` is written as `8.32` —
+`1.30`s short of the reel this gate approved, reported honestly rather than silently
+overrun.
 
 The cut's `in_seconds` / `out_seconds` are in/out points **inside `source_path`**, the pool
 file; the `start_seconds` / `end_seconds` on the matching `scenes[]` entry are reel-local
@@ -407,10 +534,27 @@ assert len(shortfall) <= armed_cutaways        # brief.metadata.cutaway_count, s
 # and the line above caps the batch TOTAL — neither stops three armed cutaways stacking
 # into one reel, which is the outcome that makes a reel mostly generated footage.
 assert max(Counter(sf["reel_id"] for sf in shortfall).values() or [0]) <= 1
+scene_by_id = {s["id"]: s for s in scene_plan["scenes"]}
 for r in reels:
-    assert r["total_seconds"] <= 10.0
+    assert r["total_seconds"] <= 9.8       # the authoring budget, not compose's 10.0 probe —
+                                            # refuse an over-length reel here, before assets spends
     assert all(c.get("beat_seconds") is not None and
                c["provenance"] in ("operator_footage", "ai_generated") for c in r["cuts"])
+    for c in r["cuts"]:
+        if c["provenance"] != "operator_footage":
+            continue
+        # The invariant nothing checked before: a cut's TIMELINE span (how long it
+        # sits in the reel) must equal its SOURCE span (how much footage backs it),
+        # speed-adjusted. A shrink that moves a timeline boundary without moving the
+        # matching source in/out — the defect the last-slot fallback in step 4 exists
+        # to stop — fails here, at gate 2, instead of shipping ~1.3s short with every
+        # cut past it off the beat grid.
+        sc = scene_by_id[c["id"]]
+        span = round(sc["end_seconds"] - sc["start_seconds"], 3)
+        source_span = round((c["out_seconds"] - c["in_seconds"]) / c.get("speed", 1.0), 3)
+        assert span == source_span, (
+            f"{c['id']}: timeline span {span}s != source span {source_span}s"
+        )
 ```
 
 By eye: one reel group per planned reel; one `scenes[]` entry per cut, ids matching; every
@@ -431,14 +575,25 @@ hook, and the running length.
 |---|-----------|--------------|----------------|------------|-----|
 | 1 | 0.00-1.94 | 12.41 | rack_pulls_A.mp4 [4.20, 6.14) | operator_footage | 1.94 |
 | 2 | 1.94-3.88 | 14.35 | db_press_B.mp4 [11.00, 12.94) | operator_footage | 3.88 |
-| 3 | 3.88-5.82 | 16.29 | (shortfall) chalk dust in hard side light, macro | ai_generated | 5.82 |
-| 4 | 5.82-7.72 | 18.23 | rack_pulls_A.mp4 [18.60, 20.50) | operator_footage | 7.72 |
+| 3 | 3.88-4.48 | 16.29 | (shortfall, sub-second flash) chalk dust in hard side light, macro | ai_generated | 4.48 |
+| 4 | 4.48-7.72 | 18.23 | rack_pulls_A.mp4 [17.26, 20.50) | operator_footage | 7.72 |
 | 5 | 7.72-9.62 | 20.13 | walkout_C.mp4 [2.10, 4.00) | operator_footage | 9.62 |
 
 Hook: "you don't need motivation" - 0.00-1.94, over cut 1.
-Slot 3: no unclaimed segment >= 1.94s remained; one cutaway on the pinned kling_video
-route via video_selector, $0.10 for this cut.
+Slot 3: no unclaimed segment >= 1.94s remained (R8: sub-second flash, not a full beat
+interval) — cut 3 shrinks to 0.60s and cut 4 extends to absorb the other 1.34s (cut 4's
+own source grows with it, so 9.62s and the beat grid both hold); one cutaway on the
+pinned kling_video route via video_selector, $0.10 for this cut.
 ```
+
+The shortfall above lands on a middle slot, so the neighbour it grows into (cut 4) is
+still unclaimed and simply sizes larger. Had it instead landed on slot 5 — the reel's
+last — the summary reads the same way when the source claimed for slot 4 has footage
+past its out-point to extend into (its `run` column changes, `9.62s` does not). When it
+does not, say so plainly instead: "Slot 5: no unclaimed segment remained and slot 4's
+source has no footage past its out-point — reel ends 1.30s early at 8.32s rather than
+overrunning the source" is the honest fallback line, and the reel's `total_seconds` in
+the header changes to match.
 
 Close with the batch line: reels planned, segments claimed against spare pool, how many
 reels carry a cutaway, and the figure the operator is approving — **$0.00 when the pool

@@ -941,6 +941,87 @@ def test_reel_batch_booking_block_prices_and_executes_one_dict() -> None:
         )
 
 
+def test_reel_batch_booked_flash_seconds_is_always_sub_second() -> None:
+    """R8, re-affirmed: the booked flash is SUB-SECOND, and the shortfall
+    slot's remainder goes to a neighbouring clip — never to the cutaway.
+
+    W6.2's original defect (`flash_seconds: 0.6` hard-coded against a full
+    beat-grid interval) reverts cleanly to a form the two tests above stay
+    green on: they only check the estimate and execute payloads are the SAME
+    dict, not what value flash_seconds actually holds. This pins the value:
+    the expression the fence assigns to `flash_seconds` is extracted and
+    evaluated (not merely read as prose) against several shortfall lengths,
+    so a regression that sizes the flash off `sf["length_seconds"]` again —
+    sub-second for a short shortfall, multi-second for a long one — fails
+    here regardless of which length happens to be in the fence's own example.
+    """
+    import ast
+
+    text = _read(BOOKING_FENCE)
+    blocks = _python_fences(text, "cutaway_gen.estimate_cost")
+    assert blocks, f"{BOOKING_FENCE} has no cutaway_gen booking block"
+
+    from tools.video.cutaway_gen import DEFAULT_FLASH_SECONDS, MAX_FLASH_SECONDS
+
+    assert MAX_FLASH_SECONDS <= 2.0  # sanity: the tool's own ceiling, not this test's
+
+    checked = 0
+    for block in blocks:
+        tree = _parse_fence(block, BOOKING_FENCE)
+        dict_node = next(
+            (
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Dict)
+                and any(
+                    isinstance(key, ast.Constant) and key.value == "flash_seconds"
+                    for key in node.keys
+                )
+            ),
+            None,
+        )
+        if dict_node is None:
+            continue  # a fence in this same file with no inputs dict, e.g. the estimate/execute pair
+        checked += 1
+        value_node = next(
+            value
+            for key, value in zip(dict_node.keys, dict_node.values)
+            if isinstance(key, ast.Constant) and key.value == "flash_seconds"
+        )
+
+        # The direct mutant this guards: sizing the flash off the slot length.
+        # `sf["length_seconds"]` anywhere in the expression is the shrunk-slot
+        # value, and R8 is explicit that value sizes the SHRINK, never the flash.
+        dumped = ast.dump(value_node)
+        assert "length_seconds" not in dumped, (
+            f"{BOOKING_FENCE}: flash_seconds is sized off length_seconds "
+            f"({ast.dump(value_node)!r}) — R8 says length_seconds sizes "
+            "scene-director's shrink, not this stage's flash"
+        )
+
+        expr = ast.fix_missing_locations(ast.Expression(body=value_node))
+        code = compile(expr, "<flash_seconds>", "eval")
+
+        for length_seconds in (0.3, 0.6, 1.94, 5.0, 9.8):
+            sf = {"length_seconds": length_seconds}
+            booked = eval(
+                code,
+                {
+                    "DEFAULT_FLASH_SECONDS": DEFAULT_FLASH_SECONDS,
+                    "MAX_FLASH_SECONDS": MAX_FLASH_SECONDS,
+                    "sf": sf,
+                    "min": min,
+                    "max": max,
+                },
+            )
+            assert booked <= 1.0, (
+                f"{BOOKING_FENCE}: a {length_seconds}s shortfall slot books "
+                f"flash_seconds={booked} — R8 requires sub-second (<= 1.0) "
+                "regardless of the slot's own length"
+            )
+
+    assert checked, f"{BOOKING_FENCE}: no fence sets flash_seconds — the sweep is broken"
+
+
 def test_reel_batch_cutaway_prices_and_runs_the_same_pinned_object() -> None:
     """The pin lives in the tool, not in the instructions — deliberately.
 
@@ -1254,6 +1335,151 @@ def test_reel_batch_compose_still_reads_the_per_reel_motion() -> None:
         )
 
 
+def test_reel_batch_compose_never_defaults_animation_preset_to_pop() -> None:
+    """W13.1: decision #12 puts the preset->motion table in TypeScript ONLY,
+    "because a Python copy would put one table in two languages with nothing
+    pinning them equal". `entry.get("animation_preset") or "pop"` re-creates
+    exactly that table in Python — and it is NOT caught by the neighbouring
+    test's `entry.get("animation_preset", ` check, because it never passes a
+    default arg to `.get()`; it ORs the return value instead. Once that
+    mutant lands, an absent preset silently means "pop" rather than "let the
+    preset decide", and this is the only assertion that would notice.
+    """
+    compose = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "compose-director.md"
+    text = compose.read_text(encoding="utf-8")
+
+    fences = re.findall(r"```python\n(.*?)```", text, re.DOTALL)
+    burn_fences = [f for f in fences if 'burn_inputs["animation_preset"]' in f]
+    assert burn_fences, "compose-director has no burn fence that sets animation_preset"
+
+    for fence in burn_fences:
+        assert 'if entry.get("animation_preset"):' in fence, (
+            "compose-director must read animation_preset under an `if`, not "
+            "assign it unconditionally with a fallback baked in"
+        )
+        assert 'or "pop"' not in fence, (
+            'compose-director defaults animation_preset to "pop" in Python — '
+            "decision #12 puts the preset->motion table in TypeScript only"
+        )
+        assert 'burn_inputs["animation_preset"] = entry["animation_preset"]' in fence, (
+            "compose-director must pass animation_preset through unchanged, by "
+            "direct subscript, once the `if` above has confirmed it is present"
+        )
+
+
+def test_reel_batch_directors_only_author_valid_animation_presets() -> None:
+    """W13.2: a literal `"animation_preset": "<value>"` in a director's own
+    fence is an instruction to author that exact string into reel_plan.
+    `"slide"` is not in `RemotionCaptionBurn.ANIMATION_PRESETS`, so an agent
+    following the instruction authors an invalid reel_plan entry and only
+    fails at runtime schema validation, mid-sitting through the batch.
+
+    Discovery is dynamic: every python fence under skills/pipelines/reel-batch/
+    is swept, so a literal added to a director this test does not name is
+    still checked.
+    """
+    from tools.video.remotion_caption_burn import RemotionCaptionBurn
+
+    literal_pattern = re.compile(r'"animation_preset":\s*"([a-zA-Z_]+)"')
+    found: list[tuple[Path, str]] = []
+    reel_batch = REPO_ROOT / "skills" / "pipelines" / "reel-batch"
+    for path in sorted(reel_batch.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for block in re.findall(r"```python\n(.*?)```", text, re.DOTALL):
+            for literal in literal_pattern.findall(block):
+                found.append((path, literal))
+
+    assert found, (
+        f"no literal `\"animation_preset\": \"<value>\"` found under {reel_batch} "
+        "— the sweep is broken, not the rollout"
+    )
+
+    invalid = [
+        (path.relative_to(REPO_ROOT), literal) for path, literal in found
+        if literal not in RemotionCaptionBurn.ANIMATION_PRESETS
+    ]
+    assert not invalid, (
+        "reel-batch director(s) author an animation_preset literal outside "
+        f"RemotionCaptionBurn.ANIMATION_PRESETS {RemotionCaptionBurn.ANIMATION_PRESETS}: "
+        + ", ".join(f"{path}: {literal!r}" for path, literal in invalid)
+    )
+
+
+def test_g6_gate_still_checks_motion_parity() -> None:
+    """W13.3: with W13.1, this bullet is the whole hole — edit authors one
+    value, compose could silently substitute another, and nothing at the gate
+    compares them unless this bullet is actually there. `6578149` hardened the
+    compose FENCE (killing the reel_id mutant) but left this GATE unpinned;
+    deleting the bullet was a one-line diff that the entire suite let through.
+    """
+    executive_producer = (
+        REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "executive-producer.md"
+    )
+    text = executive_producer.read_text(encoding="utf-8")
+    assert "G6 — after COMPOSE" in text and "G7 — after PUBLISH" in text, (
+        f"{executive_producer.relative_to(REPO_ROOT)} no longer has a G6 gate "
+        "bounded by a G7 heading — the section split below is invalid"
+    )
+    g6 = text.split("G6 — after COMPOSE", 1)[1].split("G7 — after PUBLISH", 1)[0]
+
+    assert "caption_animation" in g6, "G6 dropped the motion-parity bullet entirely"
+    assert "reel_plan.animation_preset" in g6, (
+        "G6 no longer joins outputs[].caption_animation against "
+        "reel_plan.animation_preset"
+    )
+    assert "caption_degraded" in g6, (
+        "G6 no longer excuses a mismatch through the caption_degraded escape "
+        "hatch — a degraded SRT-fallback render would fail the gate for a "
+        "reason the pipeline itself already explains"
+    )
+    assert "outputs[].reel_id" in g6, "G6 no longer states the join key"
+
+
+def test_scene_director_reads_corpus_dir_from_brief_metadata() -> None:
+    """Regression for W1.1: scene-director used to open
+    `Corpus(PROJECTS_DIR / project_id / "corpus")` — a path nothing under
+    tools/ or lib/ writes, since `cb4033c` moved the index to
+    `projects/_footage_index/<pool>_<digest>` and updated idea- and
+    asset-director but not scene. The pool loaded as zero rows and every cut
+    became a false shortfall. The fix is the same form asset-director.md
+    already uses.
+    """
+    scene = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "scene-director.md"
+    text = scene.read_text(encoding="utf-8")
+
+    assert 'Corpus(Path(brief["metadata"]["corpus_dir"]))' in text, (
+        "scene-director no longer resolves the corpus through "
+        "brief.metadata.corpus_dir — a batch will load a zero-row pool again"
+    )
+    assert 'PROJECTS_DIR / project_id / "corpus"' not in text, (
+        "scene-director opens a corpus path nothing under tools/ or lib/ "
+        "ever writes"
+    )
+
+
+def test_publish_director_no_longer_claims_reel_id_is_absent() -> None:
+    """Regression for W6.1: publish-director asserted outputs[] carries NO
+    reel_id field, citing the exact schema range this branch added it to —
+    contradicting compose-director's own (already-fixed) claim about the same
+    field. The fix states reel_id is schema-declared and reads it before
+    falling back to the filename-stem inference.
+    """
+    publish = REPO_ROOT / "skills" / "pipelines" / "reel-batch" / "publish-director.md"
+    text = publish.read_text(encoding="utf-8")
+
+    assert "carries **no** `reel_id` field" not in text, (
+        "publish-director still claims outputs[] lacks reel_id, contradicting "
+        "the schema and compose-director"
+    )
+    assert "schema-declared" in text, (
+        "publish-director no longer states that reel_id is schema-declared"
+    )
+    assert 'rid = out.get("reel_id")' in text, (
+        "publish-director must read reel_id off the output before falling "
+        "back to the filename-stem inference"
+    )
+
+
 def test_reel_batch_compose_still_records_what_it_rendered() -> None:
     """There is no Python builder for `render_report.outputs[]` anywhere in the
     repo — compose-director's fence is the only author of every field in it.
@@ -1305,3 +1531,394 @@ def test_reel_batch_script_declares_the_caption_source_edit_subscripts() -> None
         "which edit-director subscripts directly"
     )
     assert 'sr["caption_source"]' in edit.read_text(encoding="utf-8")
+
+
+def test_reel_batch_fence_imports_resolve_against_real_modules() -> None:
+    """The broader ask behind W1.1 and W6.4: catch a NameError/TypeError-class
+    regression automatically rather than by a verifier reading every fence by
+    eye.
+
+    Full execution of an arbitrary reel-batch fence is not generally
+    possible: these fences are copy-and-run pseudocode over pipeline state
+    (`brief`, `scene_plan`, `corpus`, a live `tracker`, ...) that exists only
+    once an agent is actually mid-run, and stubbing all of that would hide
+    real bugs behind a fabricated success — worse than not checking. What
+    every fence's `import` statements ARE is fully, honestly checkable
+    without any pipeline state: `ast`-parsed and resolved against the real
+    module tree. A renamed or removed export (`DEFAULT_FLASH_SECONDS`, say)
+    breaks every fence that imports it, silently, until an agent actually
+    runs the pipeline — this is the automatic version of noticing that.
+    """
+    import ast
+    import importlib
+
+    reel_batch = REPO_ROOT / "skills" / "pipelines" / "reel-batch"
+    checked = 0
+    for path in sorted(reel_batch.glob("*.md")):
+        rel = str(path.relative_to(REPO_ROOT))
+        text = path.read_text(encoding="utf-8")
+        for fence in re.findall(r"```python\n(.*?)```", text, re.DOTALL):
+            if "import " not in fence:
+                continue
+            tree = _parse_fence(fence, rel)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    module = importlib.import_module(node.module)
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        assert hasattr(module, alias.name), (
+                            f"{rel}: `from {node.module} import {alias.name}` "
+                            f"— {node.module} has no attribute {alias.name!r}"
+                        )
+                        checked += 1
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        importlib.import_module(alias.name)
+                        checked += 1
+
+    assert checked >= 10, (
+        f"only resolved {checked} imports across {reel_batch} — the sweep is "
+        "broken, not the rollout"
+    )
+
+
+def _scene_director_shrink_fence() -> str:
+    text = _read("skills/pipelines/reel-batch/scene-director.md")
+    # Located by the surrounding claim, not by the formula this test polices —
+    # a mutant that changes `flash_length`'s own line must not also make the
+    # fence unlocatable, or a reversion fails on "found 0 fences" instead of
+    # on the invariant that actually broke.
+    fences = _python_fences(text, "the neighbouring operator clip, which extends to cover it")
+    assert len(fences) == 1, (
+        "skills/pipelines/reel-batch/scene-director.md: expected exactly one "
+        f"shrink+extend fence, found {len(fences)}"
+    )
+    return fences[0]
+
+
+def _run_shrink_fence(
+    slots: list[dict],
+    shortfall_index: int,
+    ledger=None,
+    slot_tail: dict[int, dict] | None = None,
+) -> dict:
+    """Execute the REAL step-4 shrink+extend fence against synthetic slots.
+
+    `ranked = []` forces the for-loop's `else` — the shortfall path — every
+    time, which is the only branch this fence's shrink logic lives in. The
+    imports inside the fence (`SegmentAlreadyClaimedError`,
+    `DEFAULT_FLASH_SECONDS`, `refuse_media_references`) are real; nothing
+    about the shrink math itself is stubbed.
+
+    `ledger` and `slot_tail` are optional and exist for the LAST-slot branch,
+    the only one that reaches either name (scene-director.md :257-296): it
+    probes and claims against `ledger` and reads the previous cut's tail room
+    from `slot_tail`. A caller exercising only the middle-slot branch never
+    touches either name, so the defaults are inert — that keeps the existing
+    middle-slot test working unchanged. Pass a REAL `ClipLedger`, not a
+    stand-in, when a test needs to prove the real no-reuse rule permits (or
+    refuses) a claim.
+    """
+    namespace = {
+        "ranked": [],
+        "slot": slots[shortfall_index],
+        "slots": slots,
+        "reel_id": "reel_02",
+        "cut_id": f"reel_02-{shortfall_index + 1:02d}",
+        "slot_description": "test slot",
+        "shortfall": [],
+        "planned_clip_ids": set(),
+        "ledger": ledger,
+        "slot_tail": slot_tail if slot_tail is not None else {},
+    }
+    exec(compile(_scene_director_shrink_fence(), "<scene-director-shrink-fence>", "exec"), namespace)
+    return namespace
+
+
+def test_scene_director_shrink_extend_absorbs_remainder_on_a_middle_slot() -> None:
+    """The documented mechanism (scene-director.md step 6): a shortfall does
+    not keep its own full beat-grid interval. It shrinks to the flash length
+    and 'the seconds it gives up extend the neighbouring operator clip so the
+    reel's total_seconds and its beat grid both hold exactly as planned.'
+
+    Run against the REAL fence, not a paraphrase of it, for a shortfall on a
+    middle slot: the shortfall's own duration must equal the flash length,
+    the following slot's boundary must absorb exactly the remainder (still
+    touching, not overlapping), and the reel's overall span must be
+    unchanged.
+    """
+    from tools.video.cutaway_gen import DEFAULT_FLASH_SECONDS
+
+    slots = [
+        {"index": 0, "start_seconds": 0.0, "end_seconds": 2.0},
+        {"index": 1, "start_seconds": 2.0, "end_seconds": 4.0},
+        {"index": 2, "start_seconds": 4.0, "end_seconds": 6.0},  # the shortfall
+        {"index": 3, "start_seconds": 6.0, "end_seconds": 8.0},
+        {"index": 4, "start_seconds": 8.0, "end_seconds": 9.8},
+    ]
+    span_before = (slots[0]["start_seconds"], slots[-1]["end_seconds"])
+    original_neighbour_start = slots[3]["start_seconds"]
+
+    result = _run_shrink_fence(slots, shortfall_index=2)
+
+    flash_length = result["flash_length"]
+    remainder = result["remainder"]
+    assert flash_length <= 1.0, f"flash_length={flash_length} is not sub-second (R8)"
+
+    shortfall_slot = slots[2]
+    assert round(shortfall_slot["end_seconds"] - shortfall_slot["start_seconds"], 3) == flash_length, (
+        "the shortfall's own duration no longer equals the flash length"
+    )
+    assert round(original_neighbour_start - slots[3]["start_seconds"], 3) == remainder, (
+        "the neighbouring slot's boundary did not absorb exactly the remainder"
+    )
+    assert shortfall_slot["end_seconds"] == slots[3]["start_seconds"], (
+        "the shrunk shortfall and its neighbour no longer touch — a gap or "
+        "an overlap opened between them"
+    )
+    span_after = (slots[0]["start_seconds"], slots[-1]["end_seconds"])
+    assert span_after == span_before, (
+        f"the reel's overall span moved from {span_before} to {span_after} — "
+        "only the internal boundary the shortfall shares with its neighbour "
+        "may move"
+    )
+
+
+# scene-director.md's own reel_02 grid (step 2's worked example): 5 slots,
+# the last spanning 7.72 -> 9.62 (length 1.9s, so remainder == 1.3s once the
+# 0.6s flash is carved out). The last-slot shrink tests below build their
+# slots from this grid, not ad-hoc numbers, so the tests and the document
+# cannot quietly drift apart.
+_REEL_02_GRID = [0.0, 1.94, 3.88, 5.82, 7.72, 9.62]
+
+
+def _reel_02_slots() -> list[dict]:
+    return [
+        {"index": i, "start_seconds": _REEL_02_GRID[i], "end_seconds": _REEL_02_GRID[i + 1]}
+        for i in range(len(_REEL_02_GRID) - 1)
+    ]
+
+
+def test_scene_director_shrink_extend_last_slot_headroom_claims_abutting_sliver(tmp_path) -> None:
+    """The step-4 last-slot branch's HEADROOM path (scene-director.md :257-280).
+
+    When the previous (operator) cut's source has `remainder` more seconds of
+    real footage past its current out-point, the fence must claim that
+    abutting sliver as a SECOND real `ClipLedger` claim and grow the previous
+    cut's TIMELINE span and its SOURCE span *together*. Regress to the old
+    defect (decision-log #14) — moving the timeline boundary without a
+    matching source claim — and the previous cut plays footage nobody
+    reserved: the ledger no longer backs what the reel shows, and nothing
+    downstream would notice until gate 2's per-cut coverage assert
+    (scene-director.md :545-556) — by which point the shortfall's paid prompt
+    has already been authored.
+
+    Runs against a REAL `ClipLedger`, not a stub, so this cannot pass on a
+    ledger that would rubber-stamp any claim: `claims_for_reel` and
+    `assert_no_reuse()` are read back from the same object the fence claimed
+    against.
+    """
+    from lib.clip_ledger import ClipLedger
+
+    slots = _reel_02_slots()
+    ledger = ClipLedger(tmp_path / "clip_ledger.json")
+    source = "/tmp/openmontage-test-source.mp4"
+    prev_in, prev_out = 10.0, 11.9  # 1.9s claimed == slot 3's own 1.9s timeline span
+    ledger.claim(reel_id="reel_02", source=source, in_seconds=prev_in, out_seconds=prev_out,
+                 clip_id="prev-clip")
+    slot_tail = {3: {"source": source, "take_out": prev_out, "seg_out": 13.5, "clip_id": "prev-clip"}}
+
+    result = _run_shrink_fence(slots, shortfall_index=4, ledger=ledger, slot_tail=slot_tail)
+    remainder = result["remainder"]
+
+    assert slots[-1]["end_seconds"] == 9.62, (
+        "the reel's total_seconds moved even though the previous cut's "
+        "source had headroom to cover the shortfall — the headroom path "
+        "must keep the reel at its full approved length"
+    )
+    assert slots[3]["end_seconds"] == slots[4]["start_seconds"], (
+        "a gap or overlap opened between the extended previous cut and the flash"
+    )
+    prev_timeline_span = round(slots[3]["end_seconds"] - slots[3]["start_seconds"], 3)
+    prev_source_span = round(slot_tail[3]["take_out"] - prev_in, 3)
+    assert prev_timeline_span == prev_source_span, (
+        f"previous cut's timeline span ({prev_timeline_span}s) no longer "
+        f"equals its source span ({prev_source_span}s) — this is exactly "
+        "the coverage gate 2 asserts at scene-director.md :545-556, and it "
+        "is the thing the last-slot branch exists to keep true"
+    )
+    assert slot_tail[3]["take_out"] == round(prev_out + remainder, 3), (
+        "slot_tail's take_out was not advanced to the newly-claimed "
+        "out-point — step 8 would then write the OLD, shorter source span "
+        "for this cut while the ledger holds the claim for the longer one"
+    )
+    claims = ledger.claims_for_reel("reel_02")
+    assert len(claims) == 2, (
+        "the abutting sliver was never actually claimed on the real ledger"
+    )
+    # Read back WHICH footage the ledger actually reserved, not just how many rows
+    # it holds. Every assertion above this one compares the timeline against the
+    # fence's OWN bookkeeping (`slot_tail`), so a fence that moved the timeline
+    # correctly, recorded take_out correctly, and claimed the WRONG seconds would
+    # satisfy all of them — decision-log #14's defect (a plan claiming more than
+    # the ledger backs) relocated one level down. The claimed intervals must tile
+    # the prev cut's source span exactly: [prev_in, prev_out) + [prev_out, new_out).
+    spans = sorted((c["in_seconds"], c["out_seconds"]) for c in claims)
+    assert spans == [(prev_in, prev_out), (prev_out, round(prev_out + remainder, 3))], (
+        f"the ledger reserved {spans} — not the original cut plus the abutting "
+        "sliver the timeline was grown to cover; the scene_plan would then "
+        "promise footage no claim backs"
+    )
+    assert round(spans[-1][1] - spans[0][0], 3) == prev_timeline_span, (
+        "the claimed footage, end to end, does not cover the previous cut's "
+        "grown timeline span"
+    )
+    ledger.assert_no_reuse()  # must not raise: two abutting claims on one source are not reuse
+
+
+def test_scene_director_shrink_extend_last_slot_fallback_ends_reel_early_and_records_it(tmp_path) -> None:
+    """The step-4 last-slot branch's FALLBACK path (scene-director.md :281-296).
+
+    When the previous cut's source has no footage left past its out-point,
+    the fence must NOT move that cut — it has nothing more to give — and must
+    instead let the reel end `remainder` seconds early, flush against the
+    unmoved previous slot. Per the operator's ruling on decision-log #14: a
+    fallback that ends the reel early WITHOUT the caller being able to record
+    the true length is worse than the defect it replaces — it would silently
+    ship a reel shorter than what step 8 writes into
+    `metadata.reels[].total_seconds` (scene-director.md :293). This test pins
+    the exact slot geometry step 8 depends on to record that true length
+    correctly — the flash slot's own `end_seconds` IS the reel's real end —
+    not merely "no overlap".
+
+    Runs against a REAL `ClipLedger` so "no footage left" is proven by the
+    ledger's own bookkeeping (`claims_for_reel` stays at one claim), not
+    asserted by construction.
+    """
+    from lib.clip_ledger import ClipLedger
+
+    slots = _reel_02_slots()
+    ledger = ClipLedger(tmp_path / "clip_ledger.json")
+    source = "/tmp/openmontage-test-source.mp4"
+    prev_in, prev_out = 10.0, 11.9  # 1.9s claimed == slot 3's own 1.9s timeline span
+    ledger.claim(reel_id="reel_02", source=source, in_seconds=prev_in, out_seconds=prev_out,
+                 clip_id="prev-clip")
+    # seg_out == take_out: nothing left past the current claim, so the
+    # headroom check's `new_out <= seg_out` can never hold.
+    slot_tail = {3: {"source": source, "take_out": prev_out, "seg_out": prev_out, "clip_id": "prev-clip"}}
+
+    result = _run_shrink_fence(slots, shortfall_index=4, ledger=ledger, slot_tail=slot_tail)
+    remainder = result["remainder"]
+
+    assert slots[3]["end_seconds"] == 7.72, (
+        "the previous cut was moved even though its source has no unclaimed "
+        "footage to give — this is the silent overrun decision-log #14 forbids"
+    )
+    assert slots[-1]["end_seconds"] == round(9.62 - remainder, 3) == 8.32, (
+        f"the reel did not end early by exactly the shortfall's remainder "
+        f"({remainder}s) — step 8 records THIS value as "
+        "metadata.reels[].total_seconds (scene-director.md :293), so a wrong "
+        "number here is what actually ships as the reel's real length"
+    )
+    assert slots[4]["start_seconds"] == slots[3]["end_seconds"], (
+        "a gap opened between the shrunk flash and the unmoved previous slot"
+    )
+    assert len(ledger.claims_for_reel("reel_02")) == 1, (
+        "the fallback claimed a sliver anyway — there is no footage behind "
+        "the previous cut's out-point to back it, so a second claim here "
+        "reserves footage the source does not have"
+    )
+    prev_timeline_span = round(slots[3]["end_seconds"] - slots[3]["start_seconds"], 3)
+    prev_source_span = round(slot_tail[3]["take_out"] - prev_in, 3)
+    assert prev_timeline_span == prev_source_span, (
+        "the previous cut's timeline span no longer equals its (unchanged) "
+        "source span — the fallback must not touch this cut at all"
+    )
+
+
+def test_ep_wall_time_table_matches_the_manifest() -> None:
+    """No test caught `pipeline_defs/reel-batch.yaml` saying 45 while
+    `executive-producer.md`'s Execution Limits table said 20 and named that
+    manifest key as its own source — a healthy first sitting was told to stop
+    and escalate mid cold-index. Both numbers are re-read live here, so either
+    one drifting away from the other fails; nothing is pinned as a literal in
+    this test.
+    """
+    ep = _read("skills/pipelines/reel-batch/executive-producer.md")
+    manifest = yaml.safe_load(_read("pipeline_defs/reel-batch.yaml"))
+    manifest_minutes = manifest["orchestration"]["max_wall_time_minutes"]
+
+    match = re.search(
+        r"\|\s*Max wall time\s*\|\s*(\d+)\s*min\s*\|\s*"
+        r"`orchestration\.max_wall_time_minutes`\s*\|",
+        ep,
+    )
+    assert match, (
+        "executive-producer.md's Execution Limits table no longer has a Max "
+        "wall time row citing orchestration.max_wall_time_minutes as its source"
+    )
+    table_minutes = int(match.group(1))
+    assert table_minutes == manifest_minutes, (
+        f"executive-producer.md's Execution Limits table says {table_minutes} "
+        "min but pipeline_defs/reel-batch.yaml's "
+        f"orchestration.max_wall_time_minutes is {manifest_minutes} — the "
+        "table names that key as its own source, so they must agree"
+    )
+
+
+def test_g3_duration_ceiling_agrees_across_ep_scene_and_script() -> None:
+    """G3's per-reel duration ceiling is authored in three separate places —
+    the EP's checklist, scene-director's step-9 assert, and script-director's
+    window cap — with no shared constant pinning them equal. W6.3 pushed the
+    cap upstream specifically so an over-length reel is refused before any
+    paid stage spends; that only holds if all three name the same number.
+    Deleting the G3 bullet, or drifting any ONE of the three back to a
+    different figure (10.0, say) while the others stay put, fails here.
+    script-director.md itself states the cap twice (prose, then the
+    executable fence); every occurrence there is required to agree too, so a
+    drift confined to the fence — the copy that is actually run — cannot hide
+    behind an unchanged prose figure.
+    """
+    ep = _read("skills/pipelines/reel-batch/executive-producer.md")
+    scene = _read("skills/pipelines/reel-batch/scene-director.md")
+    script = _read("skills/pipelines/reel-batch/script-director.md")
+
+    assert "G3 — after SCENE_PLAN" in ep and "G4 — after ASSETS" in ep, (
+        "executive-producer.md no longer has a G3 section bounded by a G4 "
+        "heading — the section split below is invalid"
+    )
+    g3 = ep.split("G3 — after SCENE_PLAN", 1)[1].split("G4 — after ASSETS", 1)[0]
+    ep_match = re.search(r"Slots per reel total <= (\d+(?:\.\d+)?) seconds", g3)
+    assert ep_match, "G3's checklist no longer states a per-reel duration ceiling"
+
+    scene_match = re.search(r'assert r\["total_seconds"\] <= (\d+(?:\.\d+)?)', scene)
+    assert scene_match, "scene-director's step-9 gate no longer asserts total_seconds"
+
+    # script-director.md states the cap twice — once in prose, once in the
+    # ```python fence that is actually copied and run. `re.search` takes only
+    # the FIRST hit (the prose), so a drift confined to the executable fence
+    # went unpinned: an agent would author reels straight past the ceiling
+    # while this test stayed green. `findall` collects every occurrence and
+    # every one must agree with the others before it stands in for "the"
+    # script-director value below.
+    script_matches = re.findall(
+        r"window_end = min\(window_start \+ (\d+(?:\.\d+)?),", script
+    )
+    assert script_matches, "script-director's window cap no longer bounds window_end"
+    assert len(set(script_matches)) == 1, (
+        "script-director.md states the window cap more than once and they "
+        f"disagree with each other: {script_matches} — the ```python fence is "
+        "the copy that actually runs, so a prose/fence mismatch here is "
+        "load-bearing, not cosmetic"
+    )
+
+    values = {
+        "executive-producer.md (G3)": float(ep_match.group(1)),
+        "scene-director.md (step 9)": float(scene_match.group(1)),
+        "script-director.md (window cap)": float(script_matches[0]),
+    }
+    assert len(set(values.values())) == 1, (
+        "the per-reel duration ceiling disagrees across the three places that "
+        f"author it: {values}"
+    )

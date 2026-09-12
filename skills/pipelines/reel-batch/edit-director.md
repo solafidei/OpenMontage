@@ -96,10 +96,10 @@ spine = {
     "render_runtime": "ffmpeg",                          # the PICTURE plane
     "cuts": [],
     "subtitles": {...},                                  # step 5
+    "batch_look": {...},                                 # step 4 — spine ROOT, not metadata
     "metadata": {
         "pipeline": "reel-batch", "reel_count": 5,
         "identity_lock": True, "proposal_render_runtime": "ffmpeg",
-        "batch_look": {...},                             # step 4
         "caption_style": {...},                          # step 5
     },
 }
@@ -427,6 +427,24 @@ cut_ids = [c["id"] for c in spine["cuts"]]
 assert len(cut_ids) == len(set(cut_ids))
 assert all(c["source"] in asset_ids for c in spine["cuts"])
 partition_is_total(spine, reel_plan)   # every cut in exactly one reel, or ReelPlanError
+
+# The invariant nothing upstream checks: an operator_footage cut's TIMELINE span
+# (scene_plan's reel-local start/end for this cut id) must equal its SOURCE span
+# (this cut's own in/out, speed-adjusted). A shortfall's shrink that grew a
+# neighbour's timeline without growing its source — the defect scene-director's
+# step-4 last-slot fallback exists to stop — would otherwise ship a reel that
+# renders short with everything past it off the beat grid, undetected until now.
+scene_by_id = {s["id"]: s for s in scene_plan["scenes"]}
+for c in spine["cuts"]:
+    if c["provenance"] != "operator_footage":
+        continue
+    sc = scene_by_id[c["id"]]
+    span = round(sc["end_seconds"] - sc["start_seconds"], 3)
+    source_span = round((c["out_seconds"] - c["in_seconds"]) / c.get("speed", 1.0), 3)
+    assert span == source_span, (
+        f"{c['id']}: timeline span {span}s != source span {source_span}s"
+    )
+
 for r in reel_plan["reels"]:
     prefix = f"{r['reel_id']}-"
     assert all(cid.startswith(prefix) for cid in r["cut_ids"])
@@ -449,6 +467,8 @@ claimed the segments — this is the last stage that can fix a collision cheaply
   every `source` an `asset_manifest` id; every cut has `provenance` and a
   one-line `reason`.
 - Every `polish` value inside its bounds; no `whip` on a sub-0.4s cut.
+- Every `operator_footage` cut's timeline span (`scene_plan.scenes[]` start/end for that
+  cut id) equals its source span (`out_seconds - in_seconds`, divided by `speed`).
 - `reel_seconds(...) <= 9.8` for every reel. The budget is 9.8, not 10.0, because the
   rendered file is reliably longer than the filter graph: each segment pads to whole frames
   at 30fps, `zoompan` re-times at its own fps, and the caption pass re-encodes again. A reel

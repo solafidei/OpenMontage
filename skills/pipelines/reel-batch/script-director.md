@@ -252,14 +252,17 @@ states the opening boundary rather than letting `scene_plan` infer it. The
 absolute track time of any boundary is `snap_value + window["offset_seconds"]` — that
 inverse, not a second grid, is what a cut records downstream as `beat_seconds`.
 
-A reel needs `cuts_per_reel + 1` boundaries — six for the standard five-cut reel. At 120 BPM
-a bar is 2.0s, so `bar` puts boundaries at 0.0, 2.0, 4.0, 6.0, 8.0 and 10.0: six, exactly
-enough. At 90 BPM a bar is 2.67s and ten seconds holds only 0.0, 2.67, 5.33 and 8.0 — four
-boundaries, three slots. `scene_plan` does not absorb that: `cut_slots` raises `ValueError`
-on a grid shorter than `cuts_per_reel + 1`. Do not pass it downstream and do not invent
-beats. Escalate here as a structured blocker with the two real options — a lower
-`cuts_per_reel` for the batch (a brief-level number, so that is a send-back to `idea`), or a
-different track for that reel whose grid supplies the boundaries under its own policy.
+A reel needs `cuts_per_reel + 1` boundaries — six for the standard five-cut reel. At 125 BPM
+a bar is 1.92s, so `bar` puts boundaries at 0.0, 1.92, 3.84, 5.76, 7.68 and 9.6: six, all
+inside the 9.8-second cap. At 120 BPM a bar is 2.0s and the same cap holds only 0.0, 2.0,
+4.0, 6.0 and 8.0 — the sixth boundary would be 10.0, past the cap, so this is the reel that
+escalates rather than the one that plans. At 90 BPM a bar is 2.67s and the cap holds only
+0.0, 2.67, 5.33 and 8.0 — four boundaries, three slots. `scene_plan` does not absorb that:
+`cut_slots` raises `ValueError` on a grid shorter than `cuts_per_reel + 1`. Do not pass it
+downstream and do not invent beats. Escalate here as a structured blocker with the two real
+options — a lower `cuts_per_reel` for the batch (a brief-level number, so that is a
+send-back to `idea`), or a different track for that reel whose grid supplies the boundaries
+under its own policy.
 
 ### 5. Choose The Hook Line, Then Anchor The Window To It
 
@@ -274,13 +277,14 @@ and the hook lands mid-reel.
 3. Require `hook_start - window_start <= 60.0 / bg.data["bpm"]` — one beat. If a downbeat
    anchor puts the hook more than a beat late, fall back to the nearest **beat** and record
    that the reel opens on a partial bar.
-4. `window_end = min(window_start + 10.0, bg.data["duration_seconds"])` (the analyser's own
+4. `window_end = min(window_start + 9.8, bg.data["duration_seconds"])` (the analyser's own
    duration, `beat_grid.py:380`; `tx.data["duration_seconds"]` is the same number),
    pulled back to the last snap boundary so the final cut lands on the grid rather than
    mid-hold — **then extended to the end of the word the line finishes on, when that word
-   still ends inside the 10-second cap.** Only the LAST boundary moves; every other cut edge
+   still ends inside the 9.8-second cap.** Only the LAST boundary moves; every other cut edge
    stays on the grid, so the reel gains a slightly longer final hold rather than a cut that
-   drifts.
+   drifts. The cap is 9.8, not 10.0 — the same rendered-length pad edit-director's own gate
+   accounts for (step 8).
 
    The pull-back alone discards up to a whole bar, and at `bar` policy a bar is 2.4-2.7s on
    a 90-99 BPM track. Measured on the week-37 batch it cost 1.04s / 1.45s / 1.80s / 2.66s of
@@ -290,20 +294,35 @@ and the hook lands mid-reel.
    cut early, because it is. The reel the same batch got right wasted 0.32s.
 
    ```python
-   window_end = min(window_start + 10.0, bg.data["duration_seconds"])
+   window_end = min(window_start + 9.8, bg.data["duration_seconds"])
    grid_abs = [t for t in line if window_start <= t <= window_end]
    window_end = grid_abs[-1]                       # on the grid, as before
    tail = [w for w in words                        # the line the reel ends mid-way through
            if w["start"] < window_end < w["end"] or
-              (window_end <= w["start"] < window_start + 10.0)]
+              (window_end <= w["start"] < window_start + 9.8)]
    for w in tail:                                  # extend only while the cap allows it
-       if w["end"] <= window_start + 10.0 and w["probability"] >= 0.6:
+       if w["end"] <= window_start + 9.8 and w["probability"] >= 0.6:
            window_end = w["end"]
+   # snap_grid is the function from step 4; the reel's actual boundary LIST only
+   # exists once that function is called against the now-final window_end.
+   grid = snap_grid(bg.data, cut_policy, window_start, window_end, cuts_per_reel)
+   grid[-1] = round(window_end - window_start, 3)   # restate the boundary the
+                                                     # extension just moved — the
+                                                     # count of boundaries is unchanged
    ```
 
-   Stop extending at the first word that would breach the cap or fail the confidence gate —
-   a reel that runs to 10.04s fails compose's own probe, and a sub-0.6 word is not caption
-   content (step 7). If nothing follows the boundary, the pulled-back value stands.
+   Stop extending at the first word that would breach the 9.8 cap or fail the confidence
+   gate — the loop's own guard (`w["end"] <= window_start + 9.8`) is what enforces this, so
+   a reel overshooting it fails step 9's window bound here rather than dying at `edit` after
+   `assets` has already spent money on it; 10.0 stays compose's own probe ceiling, unrelated
+   to this budget. A sub-0.6 word is not caption content either way (step 7). If nothing
+   follows the boundary, the pulled-back value stands. `grid` above is the list the
+   `snap_grid` function actually returns, called only once `window_end` is final — call
+   it before the extension and the boundary it hands back is the one the extension is
+   about to undo. The restated `grid[-1]` is what keeps step 9's stored-artifact
+   invariant, `snap_grid[-1] == window.end_seconds - window.start_seconds`, true when the
+   extension fires: the extension moved `window_end` past the grid line `grid[-1]` still
+   named, and nothing else corrects it.
 5. Rebase the hook off `window_start` the way step 6 rebases the caption — the stored
    `hook` is reel-local, `{"text", "start_seconds", "end_seconds"}` — and require
    `hook["end_seconds"] <= snap_grid[2]`, both sides reel-local. Running past the first
@@ -458,7 +477,7 @@ to snap cuts without re-analysing alongside it.
   at `edit`, where the carry raises a `KeyError` with no useful message.
 - `contamination` present for **every** track, with real numbers from `bg.data["speech"]` —
   a missing block means the transcript never reached `beat_grid` and the report was skipped.
-- Every `window` is `<= 10.0` seconds and its `snap_grid` carries at least
+- Every `window` is `<= 9.8` seconds and its `snap_grid` carries at least
   `cuts_per_reel + 1` boundaries — six for the standard five-cut reel. Fewer and
   `scene_plan`'s `cut_slots` raises `ValueError`. A `phrase`-policy reel reaches six only
   through the downbeat fallback in step 4's `snap_grid`; if even that is short, the track

@@ -329,11 +329,27 @@ a probe and not from the plan.** Motion is burned into pixels and leaves no cont
 trace, so it is the one output fact `ffprobe` cannot recover. Reporting what the plan
 *asked for* would defeat the G6 bullet that exists to catch the two disagreeing:
 
+`confidence_by_reel = {}`, declared once before this per-reel loop starts — step 6 reads
+it once the loop is done, so this is where each reel's entry goes in:
+
 ```python
 entry_out["caption_degraded"] = burn.data["degraded"]     # both paths write it
 if burn.data.get("animation_preset"):                     # absent = the preset decided
     entry_out["caption_animation"] = burn.data["animation_preset"]
 entry_out["reel_id"] = entry["reel_id"]                   # types the join G6 needs
+
+# Approval-vs-render caption confidence — the comparison the schema and edit-director
+# both describe but nothing before this stage actually ran. `rendered` is None when the
+# burn had no per-word confidence to aggregate (the SRT fallback, e.g.); that counts as
+# degraded too, not as "nothing to compare".
+rendered = burn.data.get("word_confidence")
+approved_min = entry["caption_confidence"]["min"]
+confidence_by_reel[entry["reel_id"]] = {
+    "reel_id": entry["reel_id"],
+    "approved_min": approved_min,
+    "rendered_min": rendered["min"] if rendered else None,
+    "degraded": rendered is None or rendered["min"] < approved_min,
+}
 ```
 
 `burn.data["degraded"]` is a direct subscript on purpose: the tool writes the key on
@@ -414,6 +430,35 @@ table goes in `metadata.per_reel` (`checks` is `additionalProperties: false` —
 add a key there). `recommended_action: "re_render"` for a fixable reel,
 `"revise_edit"` when the cut list is at fault.
 
+Fold step 5's `confidence_by_reel` into that table — it is the one comparison this
+pipeline is supposed to make and nowhere else makes it:
+
+```python
+# Merge, never overwrite: `metadata.per_reel` already carries the probe row for every
+# reel — duration_seconds, frames_sampled, verdict — built above. Assigning
+# `list(confidence_by_reel.values())` here would replace those rows with confidence-only
+# ones and lose every field but the join key.
+for row in final_review["metadata"]["per_reel"]:
+    row.update(confidence_by_reel[row["reel_id"]])
+
+for check in confidence_by_reel.values():
+    if check["degraded"]:
+        final_review["issues_found"].append(
+            f"{check['reel_id']}: caption confidence dropped below the approved "
+            f"min ({check['rendered_min']} < {check['approved_min']})"
+            if check["rendered_min"] is not None else
+            f"{check['reel_id']}: burn reported no word confidence to compare "
+            f"against the approved min ({check['approved_min']})"
+        )
+        final_review["checks"]["subtitle_check"].setdefault("issues", []).append(check["reel_id"])
+```
+
+A drop below the reel's own approved `min` is a finding on that reel, not a batch-wide
+one — the same track can approve one reel at 0.71 and another at 0.89, so compare each
+reel to its own `caption_confidence`, never to a batch minimum. Treat it the same as any
+other `subtitle_check` issue: it pulls that reel's verdict to at least `"revise"`, which
+is what makes `status` (the batch-wide worst) reflect it.
+
 `checks` requires **all five** of `technical_probe`, `visual_spotcheck`, `audio_spotcheck`,
 `promise_preservation` and `subtitle_check` — omitting any one fails `write_checkpoint`
 *after* the whole sitting has already rendered, which is the most expensive place to
@@ -432,6 +477,9 @@ video file, and `runtime_swap_detected` is false; fail it the moment any of thos
   exists and passes ffprobe at 1080x1920 with an audio stream.
 - Every reel carries its own track and its own hook — nothing pasted across the batch.
 - Captions burned and inside the safe zone, verified in frames.
+- Every reel's `burn.data["word_confidence"]` compared against its own
+  `reel_plan` entry's `caption_confidence.min`, the pair recorded in
+  `final_review.metadata.per_reel`; a drop is a finding, not a silent pass.
 - `final_review` produced from the captioned masters, `status` = worst reel.
 - `cost_log` has every entry in a terminal state (completed/failed/refunded) and totals
   matching what the run actually spent.
@@ -445,7 +493,8 @@ Measured on the dev machine at 1080x1920, 10s, 5 cuts
 extra 0.4s being the probe between planes. The text plane is the slower half and always
 will be — the price of the capability, not a tuning problem. Materially past that means
 something is re-encoding twice or Remotion is cold-starting per reel; investigate
-before adding reels. `max_wall_time_minutes: 20` gives five reels ten times the room.
+before adding reels. `max_wall_time_minutes: 45` gives five reels twenty-three times the
+room.
 
 ## Known And Accepted
 

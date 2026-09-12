@@ -212,7 +212,11 @@ G2 — after SCRIPT
 
 G3 — after SCENE_PLAN
   - Every cut slot snapped to a beat from ITS OWN reel's grid (not the batch's first track)?
-  - Slots per reel total <= 10 seconds INCLUDING any speed ramp's output duration?
+    **Exception (decision-log #14):** the ONE edge a shortfall slot's shrink shares with
+    the operator clip absorbing the remainder is not a grid line — that is the deliberate
+    trade the shrink makes, not a defect. The exception is per shortfall slot, exactly one
+    edge each; every other edge in the reel still has to be a grid line.
+  - Slots per reel total <= 9.8 seconds INCLUDING any speed ramp's output duration?
   - Every slot claimed against the clip ledger, and every slot names its provenance?
   - Every reel's hook ends at or before its own `snap_grid[2]` (past the first snap
     boundary is fine, the second is not)?
@@ -252,6 +256,9 @@ G6 — after COMPOSE
     — or caption_degraded is true and a warnings line names the fallback? Join on
     outputs[].reel_id. A mismatch means the motion changed between approval and render,
     which is the whole reason it is recorded.
+  - No reel's rendered caption confidence dropped below its approved `caption_confidence.min`
+    (compose-director.md step 6, `final_review.metadata.per_reel[].degraded`)? A degraded
+    transcription fails this gate instead of passing silently.
   - cost_log: every entry terminal (completed/failed/refunded), totals matching real spend?
 
 G7 — after PUBLISH
@@ -276,7 +283,7 @@ ClipLedger.for_project(project_id).assert_no_reuse()   # raises ClipReuseError
 |-------|-------|--------|
 | Max revisions per stage | 3 | `orchestration.max_revisions_per_stage` |
 | Max total send-backs | 3 | `orchestration.max_send_backs` |
-| Max wall time | 20 min | `orchestration.max_wall_time_minutes` |
+| Max wall time | 45 min | `orchestration.max_wall_time_minutes` |
 | Budget cap | `max($2.00, $0.75 x output_minutes)` = **$2.00** for five reels | `orchestration.budget_*` |
 
 **Send-back rules.** A send-back returns work to an *earlier* stage; a revision re-runs the
@@ -297,7 +304,7 @@ reels when five were approved** — a short batch is a decision the operator mak
 On wall time: the render itself is small. Measured on the dev machine at 1080x1920, 10s,
 5 cuts — picture 9.4s + text 13.6s = **23.0s** for a single reel, and **117.0s for a
 five-reel sitting**, i.e. 23.4s a reel, the extra 0.4s being the probe between planes
-(`scripts/reel_batch_two_plane_demo.py`). The 20-minute budget is for the whole sitting,
+(`scripts/reel_batch_two_plane_demo.py`). The 45-minute budget is for the whole sitting,
 indexing and transcription included, not the render.
 
 ## Mid-Batch Failure — The Batch Is Resumable Per Reel

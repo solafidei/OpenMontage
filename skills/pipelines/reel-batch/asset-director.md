@@ -11,8 +11,8 @@ that `edit` and `compose` read.
 It is also **the only stage in this pipeline that can spend money**, and on a typical
 sitting it spends **$0.00**. Cutaways are free-first: sub-second flash accents come out of
 the operator's own indexed pool, and the paid valve opens only against the shortfall the
-`idea` gate measured and gate 2 approved — one clip per shortfall cut at $0.10 on the pinned
-`kling_video` route, so a five-cut shortfall is $0.50. This pipeline has three human gates —
+`idea` gate measured and gate 2 approved — one clip per shortfall cut at $0.42 on the pinned
+`kling_video` route, so a five-cut shortfall is $2.10. This pipeline has three human gates —
 `idea`, `scene_plan`, `publish` — and gate 2 is the last of them **before any paid call**, which
 is exactly what lets `assets` run unattended (`human_approval_default: false`). Nothing here
 re-opens a creative decision; it executes the one that was approved.
@@ -47,16 +47,21 @@ terminal-guarded (`tools/cost_tracker.py:314`), `budget_spent_usd` counts failed
 spend (`:186-192`), and `refund` on a partly-executed entry erases real billing (`:323-337`).
 
 ```python
+from tools.video.cutaway_gen import DEFAULT_FLASH_SECONDS, MAX_FLASH_SECONDS
+
 # One iteration of step 3's loop: `sf` is that entry of scene_plan["metadata"]["shortfall"].
+# R8: sub-second flash accents, not B-roll. `length_seconds` is the SLOT scene-director
+# sized — it sizes the neighbouring operator clip's extension there, never this flash.
 sf = {"reel_id": "reel_02", "cut_id": "reel_02-03",
-      "prompt": "chalk dust drifting through a hard side light, black background, macro"}
+      "prompt": "chalk dust drifting through a hard side light, black background, macro",
+      "length_seconds": 1.94}
 inputs = {
     "prompts": [sf["prompt"]],                  # ONE prompt = ONE clip = ONE shortfall cut
-    "flash_seconds": 0.6,
+    "flash_seconds": min(DEFAULT_FLASH_SECONDS, MAX_FLASH_SECONDS),   # sub-second, not the slot's length
     "cache_dir": f"projects/{project_id}/assets/cutaway_cache",
     "output_dir": f"projects/{project_id}/assets/cutaway",
 }
-estimated_usd = cutaway_gen.estimate_cost(inputs)      # $0.10 on the pin; $0.00 if cached
+estimated_usd = cutaway_gen.estimate_cost(inputs)      # $0.42 on the pin; $0.00 if cached
 entry_id = tracker.estimate("video_selector", f"cutaway_{sf['cut_id']}_kling_video", estimated_usd)
 tracker.reserve(entry_id, user_approved=True)  # this cut's fill was approved at gate 2
 
@@ -89,11 +94,11 @@ not double-billed. See `skills/meta/checkpoint-protocol.md` → Cost Ledger Gove
 shared rules, including stranded entries and a corrupt ledger; do not re-derive them here.
 
 `user_approved=True` rides on every reservation in this stage because gate 2 approved each
-reel's cut list, cutaway included. It is not a threshold dodge: at $0.10 a per-cutaway entry
-sits well under `single_action_approval_usd: 0.50`, so that guard would not have fired
-anyway (`tools/cost_tracker.py:256-262`). It does **not** waive the first-paid-use guard —
-`video_selector` must already be armed via `approve_tool` (`:264-270`, `:291-295`). If that
-trips, surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers
+reel's cut list, cutaway included. It is not a threshold dodge: at $0.42 a per-cutaway entry
+sits under `single_action_approval_usd: 0.50` ($0.42 < $0.50), so that guard would not have
+fired anyway (`tools/cost_tracker.py:256-262`). It does **not** waive the first-paid-use
+guard — `video_selector` must already be armed via `approve_tool` (`:264-270`, `:291-295`).
+If that trips, surface it as a structured blocker per AGENT_GUIDE.md → "Escalate Blockers
 Explicitly"; never self-`approve_tool` around it, and never rename the line to a tool that
 happens to be armed. If a reservation is made and the call never runs (reel dropped, budget
 stopped the batch), call `tracker.refund(entry_id)`.
@@ -126,6 +131,11 @@ compose, after the money is spent.
 ### 1. Reopen Both Ledgers Before Touching Anything
 
 ```python
+from pathlib import Path
+from lib.clip_ledger import ClipLedger
+from lib.corpus import Corpus
+from tools.cost_tracker import CostTracker
+
 # The index is keyed to the POOL, not this batch — read the path the idea stage
 # resolved (brief.metadata.corpus_dir), never rebuild it from project_id.
 corpus = Corpus(Path(brief["metadata"]["corpus_dir"])); corpus.load()
@@ -248,7 +258,8 @@ One prompt, one clip, one cut, one ledger entry. The list to iterate is
 ```python
 generated, dropped = {}, []
 for sf in scene_plan["metadata"]["shortfall"]:
-    # sf = {"reel_id": "reel_02", "cut_id": "reel_02-03", "prompt": "...", "why": "..."}
+    # sf = {"reel_id": "reel_02", "cut_id": "reel_02-03", "prompt": "...", "why": "...",
+    #       "length_seconds": 1.94}
     # Run the paid booking block above verbatim, with sf["prompt"] as the single
     # element of inputs["prompts"] and f"cutaway_{sf['cut_id']}_kling_video" as the
     # ledger operation. It leaves `result` bound to the ToolResult:
@@ -287,16 +298,16 @@ style reference".
 (`tools/video/cutaway_gen.py:296-302`), and the *identical* dict is priced and executed
 (`:383-384`), so `VideoSelector` cannot stamp an estimate divergence. Unpinned, the same
 shortfall routes to whatever the scorer ranks top — currently seedance at **$1.52/clip,
-$7.60 a sitting**, 15x, for footage trimmed to six-tenths of a second. And a pin that
-resolves to nothing **raises** `ProviderPinUnresolvedError` rather than returning an
-unguardable $0.00 (`tools/video/video_selector.py:336-343`) — a $0.00 estimate is exempt
-from both approval guards, so the raise is what stops a typo seeding an unguarded paid
-line. `python scripts/reel_batch_route_cost.py` prints all three numbers and the bad-pin
-behaviour; run it before asserting any of them to the operator.
+$7.60 a sitting**, 3.6x the pinned $0.42/$2.10, for footage trimmed to six-tenths of a
+second. And a pin that resolves to nothing **raises** `ProviderPinUnresolvedError` rather
+than returning an unguardable $0.00 (`tools/video/video_selector.py:336-343`) — a $0.00
+estimate is exempt from both approval guards, so the raise is what stops a typo seeding an
+unguarded paid line. `python scripts/reel_batch_route_cost.py` prints all three numbers and
+the bad-pin behaviour; run it before asserting any of them to the operator.
 
 Announce the first call per AGENT_GUIDE.md → "Announce Before Execution": tool `cutaway_gen`,
 provider `kling`, variant `v3/standard`, reason "pool shortfall of N cuts measured at
-`idea`", batch run of N clips at $0.10 each, where N is `len(scene_plan["metadata"]["shortfall"])`.
+`idea`", batch run of N clips at $0.42 each, where N is `len(scene_plan["metadata"]["shortfall"])`.
 If a cutaway fails, reconcile it `success=False` (the block does this), then retry once or
 drop that reel and `clips.release_reel(sf["reel_id"])` to return its segments to the pool
 (`lib/clip_ledger.py:204-210`). A four-reel sitting that ships beats a five-reel one that
@@ -473,7 +484,7 @@ cut asset and the **reel id** for a track or caption asset.
     {"id": "asset_reel_02_03", "type": "video", "subtype": "ai_generated",
      "path": "projects/<id>/assets/cutaway/cutaway_9f2c_flash.mp4",
      "source_tool": "cutaway_gen", "scene_id": "reel_02-03", "provider": "kling",
-     "model": "v3/standard", "cost_usd": 0.1, "duration_seconds": 0.6,
+     "model": "v3/standard", "cost_usd": 0.42, "duration_seconds": 0.6,
      "prompt": "chalk dust drifting through a hard side light, black background, macro",
      "generation_summary": "Shortfall fill for reel_02-03, pinned kling_video via video_selector; silent, 9:16."},
     {"id": "asset_track_01", "type": "music",
@@ -490,7 +501,7 @@ cut asset and the **reel id** for a track or caption asset.
      "source_tool": "subtitle_gen", "scene_id": "reel_02", "format": "srt", "cost_usd": 0,
      "generation_summary": "Fallback for remotion_caption_burn's `srt_path` when Remotion is unavailable."}
   ],
-  "total_cost_usd": 0.1,
+  "total_cost_usd": 0.42,
   "metadata": {
     "pipeline": "reel-batch",
     "corpus_dir": "projects/_footage_index/<pool>_<digest>",   # from index.data["corpus_dir"]
